@@ -1,0 +1,32 @@
+Mar 15 09:00:01 webserver sshd[1234]: Failed password for root from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:02 webserver sshd[1234]: Failed password for root from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:03 webserver sshd[1234]: Failed password for admin from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:04 webserver sshd[1234]: Failed password for admin from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:05 webserver sshd[1234]: Failed password for ubuntu from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:06 webserver sshd[1234]: Failed password for ubuntu from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:07 webserver sshd[1234]: Failed password for deploy from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:08 webserver sshd[1234]: Failed password for git from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:09 webserver sshd[1234]: Failed password for test from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:10 webserver sshd[1234]: Failed password for user from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:11 webserver sshd[1234]: Failed password for oracle from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:12 webserver sshd[1234]: Failed password for postgres from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:13 webserver sshd[1234]: Failed password for mysql from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:14 webserver sshd[1234]: Failed password for ftp from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:15 webserver sshd[1234]: Failed password for www from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:16 webserver sshd[1234]: Failed password for nginx from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:17 webserver sshd[1234]: Failed password for apache from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:18 webserver sshd[1234]: Failed password for tomcat from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:19 webserver sshd[1234]: Failed password for jenkins from 192.168.1.100 port 22 ssh2
+Mar 15 09:00:20 webserver sshd[1234]: Failed password for hadoop from 192.168.1.100 port 22 ssh2
+Mar 15 09:01:00 webserver sshd[1235]: Accepted password for ubuntu from 10.0.0.5 port 54321 ssh2
+Mar 15 09:01:01 webserver sshd[1235]: pam_unix(sshd:session): session opened for user ubuntu by (uid=0)
+Mar 15 09:05:00 webserver sudo[2000]: ubuntu : TTY=pts/0 ; PWD=/home/ubuntu ; USER=root ; COMMAND=/bin/bash
+Mar 15 09:05:01 webserver sudo[2001]: ubuntu : command not allowed ; TTY=pts/0 ; PWD=/home/ubuntu ; USER=root ; COMMAND=/usr/bin/passwd root
+Mar 15 09:10:00 webserver useradd[3000]: new user: name=backdoor, UID=1001, GID=1001, home=/home/backdoor, shell=/bin/bash
+Mar 15 09:15:00 webserver sshd[4000]: pam_unix(sshd:session): session opened for user root by (uid=0)
+Mar 15 09:20:00 webserver sshd[5000]: Failed password for invalid user scanner from 203.0.113.50 port 12345 ssh2
+Mar 15 09:20:01 webserver sshd[5000]: Failed password for invalid user scanner from 203.0.113.50 port 12346 ssh2
+Mar 15 09:20:02 webserver sshd[5000]: Failed password for invalid user scanner from 203.0.113.50 port 12347 ssh2
+Mar 15 09:20:03 webserver sshd[5000]: Failed password for invalid user scanner from 203.0.113.50 port 12348 ssh2
+Mar 15 09:20:04 webserver sshd[5000]: Failed password for invalid user scanner from 203.0.113.50 port 12349 ssh2
+Mar 15 09:20:05 webserver sshd[5000]: Disconnected from invalid user scanner 203.0.113.50 port 12350 [preauth]
