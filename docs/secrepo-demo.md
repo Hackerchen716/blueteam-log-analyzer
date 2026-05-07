@@ -1,6 +1,6 @@
-# SecRepo 真实样本实测演示
+# SecRepo 真实样本实测记录
 
-本文档记录 BlueTeam Log Analyzer (BLA) 使用 SecRepo 公开日志样本的实际运行方式和结果摘要。建议在 README、项目介绍、演示视频或合作沟通中引用这份文档，展示工具在真实日志上的解析、检测、IOC 提取和报告输出能力。
+本文档记录 BlueTeam Log Analyzer (BLA) 使用 SecRepo 公开日志样本的实际运行方式和结果摘要，用于验证工具在真实日志上的解析、检测、IOC 提取和报告输出能力。
 
 > 说明：SecRepo 样本文件体积较大，且来源为第三方公开数据集，本项目不直接收录原始日志文件。请按下面命令自行下载。
 
@@ -106,7 +106,7 @@ IOC 提取结果：
 - 密码喷洒/多账户尝试识别
 - Top IP、Top User、攻击时间范围统计
 - `--syslog-year` 历史日志年份补齐
-- `--max-alerts` 大型日志终端展示截断
+- `--max-alerts` 大型日志终端输出限制
 - HTML、JSON、IOC 多格式报告输出
 
 ## 实测二：Web access.log
@@ -187,33 +187,3 @@ IOC 提取结果：
 - URL、路径、IP、域名 IOC 提取
 - HTML 报告离线生成
 - JSON 报告便于二次处理
-
-## 报告产物
-
-运行完成后可查看：
-
-| 文件 | 说明 |
-|------|------|
-| `/tmp/bla-secrepo/auth_report.html` | Linux auth.log HTML 报告 |
-| `/tmp/bla-secrepo/auth_report.json` | Linux auth.log JSON 报告 |
-| `/tmp/bla-secrepo/auth_iocs.txt` | Linux auth.log IOC 清单 |
-| `/tmp/bla-secrepo/web_report.html` | Web access.log HTML 报告 |
-| `/tmp/bla-secrepo/web_report.json` | Web access.log JSON 报告 |
-| `/tmp/bla-secrepo/web_iocs.txt` | Web access.log IOC 清单 |
-
-macOS 可直接打开 HTML 报告：
-
-```bash
-open /tmp/bla-secrepo/auth_report.html
-open /tmp/bla-secrepo/web_report.html
-```
-
-## 演示建议
-
-对外展示时建议按这个顺序：
-
-1. 展示下载公开样本和运行命令，说明结果可复现。
-2. 展示终端摘要，突出风险评分、告警数量、Top IP/Top User。
-3. 打开 HTML 报告，展示攻击链、告警详情、IOC 摘要。
-4. 打开 IOC 文本，说明可直接用于封禁、研判、工单流转。
-5. 说明 BLA 全程离线运行，不依赖外部 API 或 AI 服务。

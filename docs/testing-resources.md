@@ -1,6 +1,6 @@
 # BLA 测试资源推荐清单
 
-这份清单用于评估 BlueTeam Log Analyzer (BLA) 的解析、检测、IOC 提取、攻击链和报告输出能力。建议把这些数据作为人工验证和回归测试样本来源。
+这份清单用于评估 BlueTeam Log Analyzer (BLA) 的解析、检测、IOC 提取、攻击链和报告输出能力，可作为人工验证和回归测试样本来源。
 
 ## Windows 事件日志
 
@@ -55,9 +55,9 @@ bla access.log --profile cn-hvv --html web_report.html --json web_report.json --
 - 适合验证：认证日志分析、持久化线索、攻击时间线、处置建议
 - 说明：实验文件通常需要登录 CyberDefenders 后下载。
 
-## 推荐验证项
+## 验证项
 
-跑完样本后，重点检查：
+样本运行后可检查：
 
 - 是否正确识别日志类型
 - 是否产生合理的严重/高危告警

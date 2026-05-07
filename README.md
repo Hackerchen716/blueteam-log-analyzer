@@ -213,7 +213,7 @@ fi
 
 ---
 
-## 真实样本演示
+## 真实样本实测
 
 已使用 SecRepo 公开日志完成实测，覆盖 Linux auth.log 和 Web access.log 两类场景：
 
@@ -222,7 +222,7 @@ fi
 | SecRepo auth.log | 86,839 | 27,075 | 624 | 100/100（严重） | SSH 暴力破解、密码喷洒、Top IP/Top User、IOC 提取 |
 | SecRepo Web access.log | 2,928 | 236 | 2 | 100/100（严重） | 敏感路径探测、Web 访问日志解析、`cn-hvv` 画像、IOC 提取 |
 
-完整复现命令、数据来源和结果摘要见 [SecRepo 真实样本实测演示](docs/secrepo-demo.md)。
+完整复现命令、数据来源和结果摘要见 [SecRepo 真实样本实测记录](docs/secrepo-demo.md)。
 
 ### SecRepo auth.log 实测总览
 
@@ -307,7 +307,7 @@ python3 -m unittest discover -s tests -v
 - 可通过 `--syslog-year` 固定 Linux syslog 无年份时间戳
 
 更多可用于评估 BLA 的公开日志与靶场资源见 [测试资源推荐清单](docs/testing-resources.md)。
-SecRepo 真实样本的完整复现实测见 [SecRepo 真实样本实测演示](docs/secrepo-demo.md)。
+SecRepo 真实样本的完整复现实测见 [SecRepo 真实样本实测记录](docs/secrepo-demo.md)。
 
 ---
 
@@ -335,9 +335,9 @@ blueteam-log-analyzer/
 │   └── utils/
 │       └── helpers.py      # 工具函数
 ├── docs/
-│   ├── screenshots/        # 演示截图
+│   ├── screenshots/        # 界面截图
 │   ├── allowlist-example.json # 白名单示例
-│   ├── secrepo-demo.md     # SecRepo 真实样本实测演示
+│   ├── secrepo-demo.md     # SecRepo 真实样本实测记录
 │   └── testing-resources.md# 测试资源推荐清单
 ├── sample_logs/
 │   ├── auth.log            # Linux SSH 暴力破解示例日志
