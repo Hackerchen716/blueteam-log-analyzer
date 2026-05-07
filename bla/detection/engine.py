@@ -13,7 +13,7 @@ from ..models import (
 from ..utils.helpers import gen_id
 
 
-def run_detection(events: List[LogEvent]) -> AnalysisSummary:
+def run_detection(events: List[LogEvent], profile: str = "default") -> AnalysisSummary:
     alerts: List[DetectionAlert] = []
     alerts += detect_brute_force(events)
     alerts += detect_password_spray(events)
@@ -25,6 +25,8 @@ def run_detection(events: List[LogEvent]) -> AnalysisSummary:
     alerts += detect_lateral_movement(events)
     alerts += detect_web_attacks(events)
     alerts += detect_reconnaissance(events)
+    if profile == "cn-hvv":
+        alerts += detect_cn_hvv(events)
     alerts = _dedup_alerts(alerts)
 
     lvl_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -325,7 +327,23 @@ def detect_web_attacks(events: List[LogEvent]) -> List[DetectionAlert]:
 
 def detect_reconnaissance(events: List[LogEvent]) -> List[DetectionAlert]:
     alerts = []
-    scan_events = [e for e in events if any(t in e.tags for t in ("scanning","scanner"))]
+    volume_events = [e for e in events if e.category == "流量异常" and any(t in e.tags for t in ("scanning", "ddos"))]
+    if volume_events:
+        has_ddos = any("ddos" in e.tags for e in volume_events)
+        ips = sorted(set(e.ip for e in volume_events if e.ip))
+        level = ThreatLevel.CRITICAL if has_ddos else ThreatLevel.MEDIUM
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("rv"), rule_id="RECON-003" if not has_ddos else "RECON-004",
+            rule_name="DDoS/高频请求" if has_ddos else "自动化扫描/高频访问",
+            description=f"检测到 {len(ips)} 个 IP 存在异常高频 Web 请求",
+            level=level, category="侦察", mitre_attack="T1595", mitre_phase="侦察",
+            affected_events=[e.id for e in volume_events],
+            evidence=[e.message for e in volume_events[:5]],
+            recommendation="结合访问路径和业务基线确认是否为扫描、爬取或洪泛攻击，必要时限速或封锁源 IP",
+            timestamp=max(e.timestamp for e in volume_events), confidence="medium",
+        ))
+
+    scan_events = [e for e in events if e.category != "流量异常" and any(t in e.tags for t in ("scanning","scanner"))]
     if len(scan_events) >= 5:
         scan_ips = sorted(set(e.ip for e in scan_events if e.ip))
         alerts.append(DetectionAlert(
@@ -350,6 +368,60 @@ def detect_reconnaissance(events: List[LogEvent]) -> List[DetectionAlert]:
             recommendation="确保敏感文件不可公开访问，部署蜜罐文件",
             timestamp=max(e.timestamp for e in recon_events), confidence="medium",
         ))
+    return alerts
+
+
+def detect_cn_hvv(events: List[LogEvent]) -> List[DetectionAlert]:
+    """国内护网/重保常见场景增强检测。"""
+    alerts = []
+
+    hvv_events = [e for e in events if "cn-hvv" in e.tags]
+    if hvv_events:
+        ips = sorted(set(e.ip for e in hvv_events if e.ip))
+        names = sorted(set(e.rule_name or e.category for e in hvv_events))
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("hv"), rule_id="CN-HVV-001", rule_name="护网/重保高频漏洞利用",
+            description=f"检测到 {len(hvv_events)} 条国内实战高频漏洞或 Webshell 相关痕迹",
+            level=ThreatLevel.CRITICAL, category="护网画像",
+            mitre_attack="T1190", mitre_phase="初始访问",
+            affected_events=[e.id for e in hvv_events],
+            evidence=[
+                f"类型: {', '.join(names[:5])}",
+                f"来源IP: {', '.join(ips[:5]) or '?'}",
+                f"示例: {hvv_events[0].message}",
+            ],
+            recommendation="优先核查命中路径是否存在真实漏洞或 Webshell，检查同源 IP 后续登录、命令执行、文件上传和出网行为",
+            timestamp=max(e.timestamp for e in hvv_events), confidence="high",
+        ))
+
+    failed_by_ip: Dict[str, List[LogEvent]] = defaultdict(list)
+    success_by_ip: Dict[str, List[LogEvent]] = defaultdict(list)
+    for ev in events:
+        if ev.ip and any(t in ev.tags for t in ("failed-login", "failed-logon")):
+            failed_by_ip[ev.ip].append(ev)
+        if ev.ip and "successful-login" in ev.tags:
+            success_by_ip[ev.ip].append(ev)
+
+    for ip, successes in success_by_ip.items():
+        failures = failed_by_ip.get(ip, [])
+        if len(failures) < 5:
+            continue
+        evts = failures + successes
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("hs"), rule_id="CN-HVV-002", rule_name="爆破后成功登录",
+            description=f"来源 {ip} 在 {len(failures)} 次失败登录后出现 {len(successes)} 次成功登录",
+            level=ThreatLevel.CRITICAL, category="护网画像",
+            mitre_attack="T1078", mitre_phase="初始访问",
+            affected_events=[e.id for e in evts],
+            evidence=[
+                f"失败次数: {len(failures)}",
+                f"成功账户: {', '.join(sorted(set(e.user for e in successes if e.user))[:5]) or '?'}",
+                f"时间: {min(e.timestamp for e in evts)} ~ {max(e.timestamp for e in evts)}",
+            ],
+            recommendation="立即核查成功登录账户、登录源和后续操作，必要时冻结账户并重置凭据",
+            timestamp=max(e.timestamp for e in evts), confidence="high",
+        ))
+
     return alerts
 
 

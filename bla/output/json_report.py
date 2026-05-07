@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import datetime
 from typing import List
+from ..ioc import extract_iocs
 from ..models import ParseResult, AnalysisSummary
 
 
@@ -11,6 +12,10 @@ def generate_json_report(
     summary: AnalysisSummary,
     output_path: str,
 ) -> None:
+    all_events = []
+    for result in parse_results:
+        all_events.extend(result.events)
+
     report = {
         "meta": {
             "tool": "BlueTeam Log Analyzer (BLA)",
@@ -70,6 +75,7 @@ def generate_json_report(
             }
             for t in summary.timeline[:200]
         ],
+        "iocs": extract_iocs(all_events),
         "recommendations": summary.recommendations,
     }
 

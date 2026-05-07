@@ -15,9 +15,12 @@
 
 - **多格式解析**：Windows XML/EVTX、Linux auth.log/secure、Apache/Nginx 访问日志、通用文本日志（自动识别类型）
 - **70+ 检测规则**：覆盖 MITRE ATT&CK 9 个阶段，包括暴力破解、密码喷洒、横向移动、权限提升、持久化、防御规避、凭据访问、Web 攻击等
+- **护网/重保画像**：`--profile cn-hvv` 增强 Shiro、Fastjson、Struts2、ThinkPHP、WebLogic、Spring、Webshell 等国内常见痕迹检测
 - **攻击链还原**：自动关联多文件事件，还原 ATT&CK 攻击链
+- **IOC 提取**：一键导出 IP、域名、URL、文件路径、Hash、账户、进程和可疑命令
+- **白名单压制**：支持 JSON allowlist 过滤可信 IP、账户、路径、进程、UA，降低真实环境误报
 - **风险评分**：0-100 综合评分，4 级威胁分级（严重/高危/中危/低危）
-- **多格式输出**：终端彩色报告、独立 HTML 报告（含交互图表）、JSON、CSV
+- **多格式输出**：终端彩色报告、独立 HTML 报告（含离线图表）、JSON、CSV、IOC 文本
 - **完全离线**：无网络请求，无 AI 调用，所有规则内置，适合隔离网络环境
 - **零依赖**：Python 3.9+ 标准库即可运行
 
@@ -49,6 +52,7 @@
 | 可疑执行 | 高危 PowerShell、LOLBins（certutil/regsvr32 等） | T1059.001, T1218 |
 | Web 攻击 | SQL 注入、XSS、路径遍历、命令注入、Webshell | T1190, T1059.007 |
 | 侦察 | 扫描器识别（Nikto/sqlmap/nmap）、敏感文件探测 | T1595, T1083 |
+| 护网画像 | Shiro/Fastjson/Struts2/ThinkPHP/WebLogic/Spring/Webshell | T1190, T1505.003 |
 
 ---
 
@@ -121,7 +125,7 @@ bla /path/to/logs/*.xml
 ### 输出选项
 
 ```bash
-# 生成 HTML 报告（推荐，含交互图表，浏览器打开）
+# 生成 HTML 报告（推荐，含离线图表，浏览器打开）
 bla auth.log --html report.html
 open report.html          # macOS
 start report.html         # Windows
@@ -132,11 +136,26 @@ bla auth.log --json report.json
 # 导出 CSV（便于 Excel 分析）
 bla auth.log --csv events.csv
 
+# 导出 IOC 清单（便于封禁、研判、工单流转）
+bla logs/ --ioc iocs.txt
+
 # 同时生成所有格式
-bla logs/ --html report.html --json report.json --csv events.csv
+bla logs/ --html report.html --json report.json --csv events.csv --ioc iocs.txt
+
+# 国内护网/重保增强画像
+bla logs/ --profile cn-hvv --html report.html --ioc iocs.txt
+
+# 使用白名单压制已知可信噪音
+bla logs/ --allowlist docs/allowlist-example.json --html report.html
 
 # 详细模式（显示所有高危以上事件）
 bla auth.log --verbose
+
+# 大型日志终端只看前 100 个告警（JSON/HTML 仍保留完整结果）
+bla auth.log --max-alerts 100
+
+# 分析历史 syslog/auth.log（日志本身不含年份时指定年份）
+bla auth.log --syslog-year 2024
 
 # 禁用彩色输出（重定向到文件时使用）
 bla auth.log --no-color > report.txt
@@ -194,6 +213,31 @@ fi
 
 ---
 
+## 真实样本演示
+
+已使用 SecRepo 公开日志完成实测，覆盖 Linux auth.log 和 Web access.log 两类场景：
+
+| 样本 | 原始行数 | 解析事件 | 告警 | 风险 | 主要验证能力 |
+|------|----------|----------|------|------|--------------|
+| SecRepo auth.log | 86,839 | 27,075 | 624 | 100/100（严重） | SSH 暴力破解、密码喷洒、Top IP/Top User、IOC 提取 |
+| SecRepo Web access.log | 2,928 | 236 | 2 | 100/100（严重） | 敏感路径探测、Web 访问日志解析、`cn-hvv` 画像、IOC 提取 |
+
+完整复现命令、数据来源和结果摘要见 [SecRepo 真实样本实测演示](docs/secrepo-demo.md)。
+
+### SecRepo auth.log 实测总览
+
+![SecRepo auth.log 实测总览](docs/screenshots/secrepo-auth-overview.png)
+
+### 暴力破解告警详情
+
+![SecRepo auth.log 暴力破解告警详情](docs/screenshots/secrepo-auth-alerts.png)
+
+### Top 攻击源 IP 与报告输出
+
+![SecRepo auth.log Top 攻击源 IP 与报告输出](docs/screenshots/secrepo-auth-top-ip.png)
+
+---
+
 ## 输出示例
 
 ### 终端报告
@@ -229,12 +273,41 @@ fi
 ### HTML 报告功能
 
 - 风险评分仪表盘
-- 事件级别分布饼图
-- Top 攻击源 IP 柱状图
+- 事件级别分布图（纯 HTML/CSS，无需联网）
+- Top 攻击源 IP 柱状图（纯 HTML/CSS，无需联网）
 - ATT&CK 攻击链可视化
+- IOC 摘要（IP、域名、URL、路径、Hash、账户、进程、命令）
 - 告警过滤（按级别/关键词搜索）
 - 关键事件时间线（支持滚动）
 - 应急处置建议
+
+---
+
+## 开发与测试
+
+```bash
+# 语法检查
+python3 -m compileall -q bla bla_cli.py setup.py tests
+
+# 回归测试（仅使用 Python 标准库）
+python3 -m unittest discover -s tests -v
+```
+
+当前回归测试覆盖：
+
+- HTML 报告对日志内容做转义，避免攻击日志触发报告 XSS
+- HTML 报告不依赖外部 CDN，保持离线可用
+- Web payload 中带空格或 URL 编码时仍可识别 SQL 注入 / XSS
+- 高频 200 请求可生成扫描/洪泛类告警
+- Windows XML 异常字段不会导致整条事件被静默丢弃
+- IOC 提取与 `--ioc` 文本导出
+- `--profile cn-hvv` 国内护网/重保增强画像
+- `--allowlist` 白名单误报压制
+- 大型日志可通过 `--max-alerts` 控制终端告警展示数量
+- 可通过 `--syslog-year` 固定 Linux syslog 无年份时间戳
+
+更多可用于评估 BLA 的公开日志与靶场资源见 [测试资源推荐清单](docs/testing-resources.md)。
+SecRepo 真实样本的完整复现实测见 [SecRepo 真实样本实测演示](docs/secrepo-demo.md)。
 
 ---
 
@@ -257,12 +330,20 @@ blueteam-log-analyzer/
 │   │   ├── terminal.py     # 终端彩色输出（ANSI，支持 Windows 10+）
 │   │   ├── html_report.py  # HTML 报告生成（独立单文件）
 │   │   ├── json_report.py  # JSON 报告输出
-│   │   └── csv_report.py   # CSV 事件导出
+│   │   ├── csv_report.py   # CSV 事件导出
+│   │   └── ioc_report.py   # IOC 清单导出
 │   └── utils/
 │       └── helpers.py      # 工具函数
+├── docs/
+│   ├── screenshots/        # 演示截图
+│   ├── allowlist-example.json # 白名单示例
+│   ├── secrepo-demo.md     # SecRepo 真实样本实测演示
+│   └── testing-resources.md# 测试资源推荐清单
 ├── sample_logs/
 │   ├── auth.log            # Linux SSH 暴力破解示例日志
 │   └── access.log          # Web 攻击示例日志（SQLi/XSS/LFI/扫描）
+├── tests/
+│   └── test_regressions.py # 安全与解析回归测试
 ├── install.sh              # macOS/Linux 安装脚本
 ├── install.bat             # Windows 安装脚本
 ├── bla.cmd                 # Windows 快捷启动脚本

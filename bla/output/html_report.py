@@ -3,9 +3,10 @@ HTML 报告输出
 生成独立单文件 HTML 报告（内嵌 CSS/JS，无需网络）
 """
 from __future__ import annotations
-import json
 import datetime
+from html import escape
 from typing import List
+from ..ioc import extract_iocs
 from ..models import ParseResult, AnalysisSummary, ThreatLevel
 
 
@@ -27,6 +28,17 @@ def _level_bg_hex(level: ThreatLevel) -> str:
         "low":      "#052e16",
         "info":     "#172554",
     }.get(level.value, "#1f2937")
+
+
+def _h(value) -> str:
+    """Escape attacker-controlled log content before embedding it in HTML."""
+    return escape("" if value is None else str(value), quote=True)
+
+
+def _pct(part: int, total: int) -> float:
+    if total <= 0:
+        return 0.0
+    return part * 100.0 / total
 
 
 def generate_html_report(
@@ -51,50 +63,123 @@ def generate_html_report(
             all_ips[ip_info["ip"]] = all_ips.get(ip_info["ip"], 0) + ip_info["count"]
     top_ips = sorted(all_ips.items(), key=lambda x: x[1], reverse=True)[:15]
 
+    all_events = []
+    for result in parse_results:
+        all_events.extend(result.events)
+    iocs = extract_iocs(all_events)
+    ioc_counts = {
+        "IP": len(iocs["ips"]),
+        "域名": len(iocs["domains"]),
+        "URL": len(iocs["urls"]),
+        "路径": len(iocs["file_paths"]),
+        "Hash": len(iocs["hashes"]),
+        "账户": len(iocs["users"]),
+        "进程": len(iocs["processes"]),
+        "命令": len(iocs["commands"]),
+    }
+    ioc_summary_html = ""
+    for label, count in ioc_counts.items():
+        ioc_summary_html += f"""
+        <div class="ioc-card">
+          <div class="ioc-num">{count}</div>
+          <div class="ioc-label">{_h(label)}</div>
+        </div>"""
+    top_ioc_values = []
+    for key in ("ips", "domains", "urls", "file_paths", "users", "processes"):
+        top_ioc_values.extend(iocs[key][:5])
+    ioc_preview_html = "".join(f"<code>{_h(value)}</code>" for value in top_ioc_values[:20])
+    if not ioc_preview_html:
+        ioc_preview_html = '<span class="empty-inline">暂无 IOC</span>'
+
+    # 纯 CSS 图表，避免报告依赖外部 CDN，保持 100% 离线。
+    level_rows = [
+        ("严重", crit, "#ef4444"),
+        ("高危", high, "#f97316"),
+        ("中危", med, "#eab308"),
+        ("低危", low, "#22c55e"),
+        ("信息", info, "#3b82f6"),
+    ]
+    nonzero = [(label, count, color) for label, count, color in level_rows if count > 0]
+    if nonzero:
+        cursor = 0.0
+        segments = []
+        for _label, count, color in nonzero:
+            end = cursor + _pct(count, total_events)
+            segments.append(f"{color} {cursor:.2f}% {end:.2f}%")
+            cursor = end
+        donut_bg = "conic-gradient(" + ", ".join(segments) + ")"
+    else:
+        donut_bg = "#334155"
+
+    level_legend_html = ""
+    for label, count, color in level_rows:
+        level_legend_html += f"""
+        <div class="legend-row">
+          <span><i style="background:{color};"></i>{_h(label)}</span>
+          <strong>{count}</strong>
+        </div>"""
+
+    max_ip_count = max((count for _, count in top_ips), default=1)
+    ip_bars_html = ""
+    for ip, count in top_ips:
+        width = max(3.0, _pct(count, max_ip_count))
+        ip_bars_html += f"""
+        <div class="bar-row">
+          <span class="bar-label">{_h(ip)}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:{width:.1f}%;"></div></div>
+          <strong>{count}</strong>
+        </div>"""
+    if not ip_bars_html:
+        ip_bars_html = '<div class="empty-state">暂无 IP 数据</div>'
+
     # 告警 HTML
     alerts_html = ""
     for i, alert in enumerate(summary.alerts, 1):
         color = _level_color_hex(alert.level)
         bg    = _level_bg_hex(alert.level)
-        evidence_items = "".join(f"<li>{e}</li>" for e in alert.evidence)
+        evidence_items = "".join(f"<li>{_h(e)}</li>" for e in alert.evidence)
         alerts_html += f"""
-        <div class="alert-card" style="border-left:4px solid {color}; background:{bg};">
+        <div class="alert-card" data-level="{_h(alert.level.value)}" style="border-left:4px solid {color}; background:{bg};">
           <div class="alert-header">
-            <span class="badge" style="background:{color};">{alert.level.label}</span>
+            <span class="badge" style="background:{color};">{_h(alert.level.label)}</span>
             <span class="alert-num">#{i:02d}</span>
-            <strong>{alert.rule_name}</strong>
-            <span class="mitre-tag">{alert.mitre_attack}</span>
-            <span class="phase-tag">{alert.mitre_phase}</span>
+            <strong>{_h(alert.rule_name)}</strong>
+            <span class="mitre-tag">{_h(alert.mitre_attack)}</span>
+            <span class="phase-tag">{_h(alert.mitre_phase)}</span>
           </div>
-          <p class="alert-desc">{alert.description}</p>
+          <p class="alert-desc">{_h(alert.description)}</p>
           <div class="alert-meta">
-            <span>置信度: {alert.confidence}</span>
-            <span>时间: {alert.timestamp}</span>
+            <span>置信度: {_h(alert.confidence)}</span>
+            <span>时间: {_h(alert.timestamp)}</span>
             <span>影响事件: {len(alert.affected_events)}</span>
           </div>
           <details>
             <summary>证据详情</summary>
             <ul class="evidence-list">{evidence_items}</ul>
           </details>
-          <div class="recommendation">💡 {alert.recommendation}</div>
+          <div class="recommendation">💡 {_h(alert.recommendation)}</div>
         </div>"""
+    if not alerts_html:
+        alerts_html = '<div class="empty-state">未发现明显威胁告警</div>'
 
     # 时间线 HTML
     timeline_html = ""
     for entry in summary.timeline[-100:]:
         color = _level_color_hex(entry.level)
-        mitre = f'<span class="mitre-tag">{entry.mitre_attack}</span>' if entry.mitre_attack else ""
+        mitre = f'<span class="mitre-tag">{_h(entry.mitre_attack)}</span>' if entry.mitre_attack else ""
         timeline_html += f"""
         <div class="tl-entry">
           <div class="tl-dot" style="background:{color};"></div>
           <div class="tl-content">
-            <span class="tl-time">{entry.timestamp}</span>
-            <span class="badge" style="background:{color}; font-size:10px;">{entry.level.label}</span>
+            <span class="tl-time">{_h(entry.timestamp)}</span>
+            <span class="badge" style="background:{color}; font-size:10px;">{_h(entry.level.label)}</span>
             {mitre}
-            <span class="tl-cat">[{entry.category}]</span>
-            <span class="tl-msg">{entry.message}</span>
+            <span class="tl-cat">[{_h(entry.category)}]</span>
+            <span class="tl-msg">{_h(entry.message)}</span>
           </div>
         </div>"""
+    if not timeline_html:
+        timeline_html = '<div class="empty-state">暂无关键事件</div>'
 
     # 攻击链 HTML
     chain_html = ""
@@ -107,40 +192,36 @@ def generate_html_report(
             techs = ", ".join(c.techniques[:3])
             chain_html += f"""
             <div class="chain-item active" style="border-color:{color};">
-              <div class="chain-phase" style="color:{color};">{phase}</div>
+              <div class="chain-phase" style="color:{color};">{_h(phase)}</div>
               <div class="chain-count">{c.event_count} 事件</div>
-              <div class="chain-techs">{techs}</div>
+              <div class="chain-techs">{_h(techs)}</div>
             </div>
             <div class="chain-arrow">→</div>"""
         else:
             chain_html += f"""
             <div class="chain-item inactive">
-              <div class="chain-phase">{phase}</div>
+              <div class="chain-phase">{_h(phase)}</div>
             </div>
             <div class="chain-arrow">→</div>"""
-
-    # IP 柱状图数据
-    ip_labels = json.dumps([ip for ip, _ in top_ips], ensure_ascii=False)
-    ip_counts = json.dumps([cnt for _, cnt in top_ips])
 
     # 文件列表 HTML
     files_html = ""
     for r in parse_results:
         files_html += f"""
         <tr>
-          <td>{r.file_name}</td>
-          <td>{r.log_type}</td>
+          <td>{_h(r.file_name)}</td>
+          <td>{_h(r.log_type)}</td>
           <td>{r.stats.total}</td>
           <td style="color:#ef4444;">{r.stats.critical}</td>
           <td style="color:#f97316;">{r.stats.high}</td>
           <td style="color:#eab308;">{r.stats.medium}</td>
           <td>{r.file_size_bytes//1024} KB</td>
           <td>{r.parse_time_ms:.0f}ms</td>
-          <td>{r.stats.time_start[:10] if r.stats.time_start else '-'}</td>
+          <td>{_h(r.stats.time_start[:10] if r.stats.time_start else '-')}</td>
         </tr>"""
 
     # 建议 HTML
-    recs_html = "".join(f"<li>{r}</li>" for r in summary.recommendations)
+    recs_html = "".join(f"<li>{_h(r)}</li>" for r in summary.recommendations)
 
     risk_color = _level_color_hex(summary.risk_level)
     risk_score = summary.risk_score
@@ -172,6 +253,12 @@ def generate_html_report(
   .risk-label {{ font-size: 12px; color: var(--text2); }}
   .grid-4 {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }}
   .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+  @media (max-width: 860px) {{
+    .header, .grid-2 {{ display: block; }}
+    .risk-badge {{ margin-top: 16px; text-align: left; }}
+    .grid-4 {{ grid-template-columns: repeat(2, 1fr); }}
+    .stat-card, .card {{ margin-bottom: 12px; }}
+  }}
   .stat-card {{ background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; text-align: center; }}
   .stat-num {{ font-size: 32px; font-weight: bold; }}
   .stat-label {{ font-size: 11px; color: var(--text2); margin-top: 4px; }}
@@ -207,7 +294,28 @@ def generate_html_report(
   tr:hover td {{ background: var(--bg3); }}
   .rec-list {{ list-style: none; }}
   .rec-list li {{ padding: 8px 12px; border-left: 3px solid var(--accent); margin-bottom: 8px; background: var(--bg3); border-radius: 0 4px 4px 0; }}
-  canvas {{ max-height: 250px; }}
+  .chart-wrap {{ display: grid; grid-template-columns: 180px 1fr; gap: 18px; align-items: center; min-height: 210px; }}
+  .donut {{ width: 170px; height: 170px; border-radius: 50%; background: {donut_bg}; position: relative; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }}
+  .donut::after {{ content: ""; position: absolute; inset: 42px; border-radius: 50%; background: var(--bg2); box-shadow: inset 0 0 0 1px var(--border); }}
+  .donut-label {{ position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 1; }}
+  .donut-label strong {{ font-size: 26px; }}
+  .donut-label span {{ color: var(--text2); font-size: 11px; }}
+  .legend-row {{ display: flex; justify-content: space-between; gap: 14px; padding: 6px 0; border-bottom: 1px solid rgba(148,163,184,.12); }}
+  .legend-row span {{ display: flex; align-items: center; gap: 8px; color: var(--text2); }}
+  .legend-row i {{ width: 9px; height: 9px; border-radius: 2px; display: inline-block; }}
+  .bar-row {{ display: grid; grid-template-columns: minmax(110px, 160px) 1fr 44px; align-items: center; gap: 10px; margin: 8px 0; }}
+  .bar-label {{ color: var(--text2); overflow-wrap: anywhere; }}
+  .bar-track {{ height: 12px; border-radius: 999px; background: var(--bg3); overflow: hidden; }}
+  .bar-fill {{ height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--high), var(--crit)); }}
+  .empty-state {{ color: var(--text2); padding: 20px 0; text-align: center; }}
+  .empty-inline {{ color: var(--text2); }}
+  .ioc-grid {{ display: grid; grid-template-columns: repeat(8, 1fr); gap: 10px; margin-bottom: 12px; }}
+  .ioc-card {{ background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 10px; text-align: center; }}
+  .ioc-num {{ font-size: 22px; font-weight: bold; color: var(--accent); }}
+  .ioc-label {{ color: var(--text2); font-size: 11px; }}
+  .ioc-preview {{ display: flex; gap: 6px; flex-wrap: wrap; }}
+  .ioc-preview code {{ background: #111827; border: 1px solid var(--border); color: var(--text2); border-radius: 4px; padding: 2px 6px; overflow-wrap: anywhere; }}
+  @media (max-width: 860px) {{ .ioc-grid {{ grid-template-columns: repeat(2, 1fr); }} }}
   .tab-bar {{ display: flex; gap: 4px; margin-bottom: 12px; }}
   .tab {{ padding: 6px 14px; border-radius: 6px 6px 0 0; cursor: pointer; background: var(--bg3); color: var(--text2); border: 1px solid var(--border); border-bottom: none; font-size: 12px; }}
   .tab.active {{ background: var(--bg2); color: var(--text); }}
@@ -256,11 +364,14 @@ def generate_html_report(
   <div class="grid-2">
     <div class="card">
       <h3>事件级别分布</h3>
-      <canvas id="levelChart"></canvas>
+      <div class="chart-wrap">
+        <div class="donut"><div class="donut-label"><strong>{total_events}</strong><span>事件</span></div></div>
+        <div>{level_legend_html}</div>
+      </div>
     </div>
     <div class="card">
       <h3>Top 攻击源 IP</h3>
-      <canvas id="ipChart"></canvas>
+      <div>{ip_bars_html}</div>
     </div>
   </div>
 
@@ -274,6 +385,13 @@ def generate_html_report(
     <button class="filter-btn" onclick="setFilter('medium', this)" style="color:#eab308;">中危</button>
   </div>
   <div id="alertsContainer">{alerts_html}</div>
+
+  <!-- IOC 摘要 -->
+  <h2>🧭 IOC 摘要</h2>
+  <div class="card">
+    <div class="ioc-grid">{ioc_summary_html}</div>
+    <div class="ioc-preview">{ioc_preview_html}</div>
+  </div>
 
   <!-- 时间线 -->
   <h2>📅 关键事件时间线</h2>
@@ -303,39 +421,6 @@ def generate_html_report(
 </div>
 
 <script>
-// 图表
-(function() {{
-  const ctx1 = document.getElementById('levelChart').getContext('2d');
-  new Chart(ctx1, {{
-    type: 'doughnut',
-    data: {{
-      labels: ['严重','高危','中危','低危','信息'],
-      datasets: [{{ data: [{crit},{high},{med},{low},{info}],
-        backgroundColor: ['#ef4444','#f97316','#eab308','#22c55e','#3b82f6'],
-        borderWidth: 0 }}]
-    }},
-    options: {{ plugins: {{ legend: {{ labels: {{ color: '#94a3b8', font: {{ size: 11 }} }} }} }}, cutout: '60%' }}
-  }});
-
-  const ctx2 = document.getElementById('ipChart').getContext('2d');
-  new Chart(ctx2, {{
-    type: 'bar',
-    data: {{
-      labels: {ip_labels},
-      datasets: [{{ label: '请求次数', data: {ip_counts},
-        backgroundColor: '#ef4444', borderRadius: 3 }}]
-    }},
-    options: {{
-      indexAxis: 'y',
-      plugins: {{ legend: {{ display: false }} }},
-      scales: {{
-        x: {{ ticks: {{ color: '#94a3b8' }}, grid: {{ color: '#334155' }} }},
-        y: {{ ticks: {{ color: '#94a3b8', font: {{ size: 10 }} }}, grid: {{ display: false }} }}
-      }}
-    }}
-  }});
-}})();
-
 // 告警过滤
 let currentFilter = 'all';
 function setFilter(level, btn) {{
@@ -348,14 +433,11 @@ function filterAlerts() {{
   const q = document.getElementById('alertSearch').value.toLowerCase();
   document.querySelectorAll('.alert-card').forEach(card => {{
     const text = card.textContent.toLowerCase();
-    const levelMatch = currentFilter === 'all' || card.querySelector('.badge')?.textContent.includes(
-      {{critical:'严重',high:'高危',medium:'中危',low:'低危'}}[currentFilter] || currentFilter
-    );
+    const levelMatch = currentFilter === 'all' || card.dataset.level === currentFilter;
     card.style.display = (text.includes(q) && levelMatch) ? '' : 'none';
   }});
 }}
 </script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </body>
 </html>"""
 

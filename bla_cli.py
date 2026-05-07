@@ -30,13 +30,15 @@ if sys.platform == "win32":
 
 from bla.parsers import auto_parse
 from bla.detection import run_detection
+from bla.allowlist import apply_allowlist, load_allowlist
 from bla.output import (
     print_terminal_report,
     generate_html_report,
     generate_json_report,
     generate_csv_report,
+    generate_ioc_report,
 )
-from bla.utils.helpers import reset_counter
+from bla.utils.helpers import reset_counter, set_syslog_year
 from bla.models import ParseResult
 
 
@@ -69,14 +71,43 @@ def main():
         help="导出 CSV 事件列表（便于 Excel 分析）",
     )
     parser.add_argument(
+        "--ioc",
+        metavar="FILE",
+        help="导出 IOC 清单（IP、域名、URL、路径、Hash、账户、进程、命令）",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=("default", "cn-hvv"),
+        default="default",
+        help="检测画像：default 通用模式，cn-hvv 国内护网/重保增强模式",
+    )
+    parser.add_argument(
+        "--allowlist",
+        metavar="FILE",
+        help="加载 JSON 白名单，过滤可信 IP/账户/路径/进程/UA 等误报",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="详细模式：显示所有高危以上事件",
     )
     parser.add_argument(
+        "--max-alerts",
+        type=int,
+        default=50,
+        metavar="N",
+        help="终端报告最多展示的告警数，0 表示全部展示（默认: 50）",
+    )
+    parser.add_argument(
         "--no-color",
         action="store_true",
         help="禁用终端彩色输出",
+    )
+    parser.add_argument(
+        "--syslog-year",
+        type=int,
+        metavar="YEAR",
+        help="指定 Linux syslog/auth.log 这类无年份时间戳使用的年份",
     )
     parser.add_argument(
         "--version",
@@ -85,6 +116,16 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.max_alerts < 0:
+        print("❌ 错误：--max-alerts 不能小于 0", file=sys.stderr)
+        sys.exit(1)
+
+    if args.syslog_year is not None:
+        if args.syslog_year < 1970 or args.syslog_year > 2100:
+            print("❌ 错误：--syslog-year 必须在 1970 到 2100 之间", file=sys.stderr)
+            sys.exit(1)
+        set_syslog_year(args.syslog_year)
 
     # 收集所有文件
     files = []
@@ -127,6 +168,15 @@ def main():
         print("\n❌ 所有文件解析失败", file=sys.stderr)
         sys.exit(1)
 
+    if args.allowlist:
+        try:
+            allowlist = load_allowlist(args.allowlist)
+            parse_results, suppressed = apply_allowlist(parse_results, allowlist)
+            print(f"\n✓ 白名单过滤完成，压制 {suppressed} 条事件\n")
+        except Exception as e:
+            print(f"\n❌ 白名单加载失败: {e}", file=sys.stderr)
+            sys.exit(1)
+
     # 合并所有事件
     all_events = []
     for r in parse_results:
@@ -136,12 +186,12 @@ def main():
     print("🔎 运行威胁检测引擎...\n")
 
     # 运行检测
-    summary = run_detection(all_events)
+    summary = run_detection(all_events, profile=args.profile)
 
     print(f"✓ 检测完成，发现 {len(summary.alerts)} 个告警\n")
 
     # 输出报告
-    print_terminal_report(parse_results, summary, args.verbose, args.no_color)
+    print_terminal_report(parse_results, summary, args.verbose, args.no_color, args.max_alerts)
 
     if args.html:
         generate_html_report(parse_results, summary, args.html)
@@ -149,6 +199,8 @@ def main():
         generate_json_report(parse_results, summary, args.json)
     if args.csv:
         generate_csv_report(parse_results, summary, args.csv)
+    if args.ioc:
+        generate_ioc_report(parse_results, summary, args.ioc)
 
     # 退出码：有严重告警则返回 1
     if any(a.level.value == "critical" for a in summary.alerts):

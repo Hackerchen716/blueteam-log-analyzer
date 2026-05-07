@@ -50,8 +50,9 @@ def _hr(char: str = "─", width: int = 80) -> str:
     return GRAY + char * width + RESET
 
 
-def _section(title: str, color: str = CYAN) -> str:
+def _section(title: str, color: str = "") -> str:
     line = "═" * 80
+    color = color or CYAN
     return f"\n{BOLD}{color}{line}\n  {title}\n{line}{RESET}\n"
 
 
@@ -60,6 +61,7 @@ def print_terminal_report(
     summary: AnalysisSummary,
     verbose: bool = False,
     no_color: bool = False,
+    max_alerts: int = 50,
 ) -> None:
     """打印完整的终端分析报告"""
     if no_color:
@@ -134,7 +136,10 @@ def print_terminal_report(
     if not summary.alerts:
         out.write(f"  {GREEN}未发现明显威胁告警{RESET}\n")
     else:
-        for i, alert in enumerate(summary.alerts, 1):
+        shown_alerts = summary.alerts if max_alerts <= 0 else summary.alerts[:max_alerts]
+        if max_alerts > 0 and len(summary.alerts) > max_alerts:
+            out.write(f"  {DIM}终端仅展示前 {max_alerts} 个告警；完整结果请查看 --html / --json 报告，或使用 --max-alerts 0。{RESET}\n")
+        for i, alert in enumerate(shown_alerts, 1):
             color = _level_color(alert.level)
             badge = _level_badge(alert.level)
             out.write(f"\n  {BOLD}[{i:02d}] {badge} {color}{alert.rule_name}{RESET}\n")
@@ -198,4 +203,6 @@ def print_terminal_report(
 def _disable_color():
     """禁用颜色（重定向输出时使用）"""
     global RESET, BOLD, DIM, RED, ORANGE, YELLOW, GREEN, BLUE, CYAN, WHITE, GRAY
+    global BG_RED, BG_ORANGE, BG_YELLOW, BG_GREEN, BG_BLUE
     RESET = BOLD = DIM = RED = ORANGE = YELLOW = GREEN = BLUE = CYAN = WHITE = GRAY = ""
+    BG_RED = BG_ORANGE = BG_YELLOW = BG_GREEN = BG_BLUE = ""

@@ -203,7 +203,7 @@ def _classify_event(eid: int, details: Dict[str, str], channel: str) -> Tuple[Th
 
     # 动态级别升级
     if eid == 4625:
-        lt = int(details.get("LogonType", "0"))
+        lt = _safe_int(details.get("LogonType", "0"))
         if lt in (3, 10):
             level = ThreatLevel.HIGH  # 网络/RDP 失败登录更危险
 
@@ -231,6 +231,13 @@ def _classify_event(eid: int, details: Dict[str, str], channel: str) -> Tuple[Th
             tags.append("lsass-dump")
 
     return level, rule["cat"], msg, tags, rule.get("mitre"), rule.get("rule")
+
+
+def _safe_int(value: str, default: int = 0) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def _parse_xml_event(xml_text: str, source_file: str) -> Optional[LogEvent]:

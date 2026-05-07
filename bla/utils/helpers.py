@@ -4,6 +4,7 @@ import datetime
 from typing import Optional
 
 _counter = 0
+_syslog_year_override: Optional[int] = None
 
 def gen_id(prefix: str = "evt") -> str:
     global _counter
@@ -13,6 +14,11 @@ def gen_id(prefix: str = "evt") -> str:
 def reset_counter():
     global _counter
     _counter = 0
+
+def set_syslog_year(year: Optional[int]):
+    """Set the year used for syslog timestamps that do not include one."""
+    global _syslog_year_override
+    _syslog_year_override = year
 
 MONTH_MAP = {
     'Jan':'01','Feb':'02','Mar':'03','Apr':'04','May':'05','Jun':'06',
@@ -30,7 +36,7 @@ def normalize_timestamp(ts: str) -> str:
     # syslog: "Mar 15 09:00:01"
     m = re.match(r'(\w{3})\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})', ts)
     if m:
-        year = datetime.datetime.now().year
+        year = _syslog_year_override or datetime.datetime.now().year
         mon = MONTH_MAP.get(m.group(1), '01')
         day = m.group(2).zfill(2)
         return f"{year}-{mon}-{day}T{m.group(3)}"
