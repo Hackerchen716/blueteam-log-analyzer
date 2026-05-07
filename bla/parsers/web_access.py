@@ -19,6 +19,7 @@ from collections import defaultdict
 from typing import List, Dict, Optional, Tuple
 from urllib.parse import unquote_plus
 
+from .. import config
 from ..models import LogEvent, ParseResult, ParseStats, ThreatLevel
 from ..utils.helpers import gen_id, normalize_timestamp, truncate
 from .stats import compute_stats
@@ -105,10 +106,13 @@ def parse_web_access(content: str, source_file: str) -> ParseResult:
     lines = content.splitlines()
     events: List[LogEvent] = []
 
-    # 第一遍：解析所有请求
+    # 第一遍：解析所有请求。
+    # minute_buckets 用来支持基于时间窗口的 DDoS / 扫描判定，避免把"日累计
+    # 几千次但分散一整天"的合法 CDN/健康检查误报为 DDoS。
     ip_stats: Dict[str, Dict] = defaultdict(lambda: {
         "count": 0, "errors": 0, "events": [], "first_ts": "",
         "last_ts": "", "sample": "", "user_agent": "",
+        "minute_buckets": defaultdict(int),
     })
 
     for line in lines:
@@ -120,28 +124,29 @@ def parse_web_access(content: str, source_file: str) -> ParseResult:
             if ev.ip:
                 ip_stats[ev.ip]["events"].append(ev)
 
-    # 第二遍：DDoS / 扫描检测
+    # 第二遍：基于时间窗口的 DDoS / 扫描标记。
+    # 这里只追加一个独立的 volume 事件（category="流量异常"），不再回头修改
+    # 已有的攻击事件——告警阶段统一由 :func:`bla.detection.engine.detect_reconnaissance`
+    # 基于 volume 事件出 RECON-003/004 告警，避免规则在解析层和告警层各算一遍。
     for ip, data in ip_stats.items():
         count = data["count"]
         evts  = data["events"]
-        if count >= 1000 and not any("ddos" in e.tags for e in evts):
-            if not evts:
-                evts.append(_make_volume_event(ip, data, source_file, ThreatLevel.CRITICAL, "DDoS/高频请求", "ddos"))
-                events.append(evts[-1])
-            for e in evts:
-                e.level = ThreatLevel.CRITICAL
-                if "ddos" not in e.tags:
-                    e.tags.append("ddos")
-                e.rule_name = "DDoS 攻击"
-        elif count >= 100 and not any("scanning" in e.tags or "web-attack" in e.tags for e in evts):
-            if not evts:
-                evts.append(_make_volume_event(ip, data, source_file, ThreatLevel.MEDIUM, "自动化扫描/高频访问", "scanning"))
-                events.append(evts[-1])
-            for e in evts:
-                if e.level.score < ThreatLevel.MEDIUM.score:
-                    e.level = ThreatLevel.MEDIUM
-                if "scanning" not in e.tags:
-                    e.tags.append("scanning")
+        buckets = data["minute_buckets"]
+        peak_per_minute = max(buckets.values()) if buckets else 0
+        # 该 IP 已经被识别为 Web 攻击（SQLi/XSS/LFI 等），让攻击告警走专门的
+        # detect_web_attacks 路径，不再叠加 volume 噪音事件。
+        if any("web-attack" in e.tags for e in evts):
+            continue
+        if peak_per_minute >= config.THRESHOLDS.ddos_peak_per_minute and count >= config.THRESHOLDS.ddos_min_total:
+            events.append(_make_volume_event(
+                ip, data, source_file, ThreatLevel.CRITICAL,
+                "DDoS/高频请求", "ddos", peak_per_minute,
+            ))
+        elif peak_per_minute >= config.THRESHOLDS.scanning_peak_per_minute or count >= config.THRESHOLDS.scanning_min_total:
+            events.append(_make_volume_event(
+                ip, data, source_file, ThreatLevel.MEDIUM,
+                "自动化扫描/高频访问", "scanning", peak_per_minute,
+            ))
 
     stats = compute_stats(events)
     return ParseResult(
@@ -178,6 +183,9 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
         ip_stats[ip]["sample"] = f"{method} {path} -> {status}"
     if ua and not ip_stats[ip]["user_agent"]:
         ip_stats[ip]["user_agent"] = ua
+    # 分钟桶：取 ISO 时间戳前 16 位 "YYYY-MM-DDTHH:MM" 作为 key
+    if ts and len(ts) >= 16:
+        ip_stats[ip]["minute_buckets"][ts[:16]] += 1
 
     # 默认级别
     level     = ThreatLevel.INFO
@@ -292,12 +300,16 @@ def _make_volume_event(
     level: ThreatLevel,
     rule_name: str,
     tag: str,
+    peak_per_minute: int = 0,
 ) -> LogEvent:
     count = data.get("count", 0)
     errors = data.get("errors", 0)
     first_ts = data.get("first_ts", "")
     last_ts = data.get("last_ts", "")
     sample = data.get("sample", "")
+    msg = f"{rule_name}: {ip} 请求 {count} 次，错误 {errors} 次"
+    if peak_per_minute:
+        msg += f"（峰值 {peak_per_minute} 次/分钟）"
     return LogEvent(
         id          = gen_id("web"),
         timestamp   = last_ts or first_ts,
@@ -305,7 +317,7 @@ def _make_volume_event(
         category    = "流量异常",
         source      = "Web (volume)",
         source_file = source_file,
-        message     = f"{rule_name}: {ip} 请求 {count} 次，错误 {errors} 次",
+        message     = msg,
         raw_line    = sample,
         ip          = ip,
         details     = {
@@ -315,6 +327,7 @@ def _make_volume_event(
             "last_ts": last_ts,
             "sample": sample,
             "user_agent": data.get("user_agent", ""),
+            "peak_per_minute": str(peak_per_minute),
         },
         tags        = [tag, "reconnaissance"],
         mitre_attack= "T1595",

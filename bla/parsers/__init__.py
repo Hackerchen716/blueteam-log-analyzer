@@ -6,9 +6,11 @@ BlueTeam Log Analyzer - 解析器入口
 from __future__ import annotations
 import os
 import re
+import sys
 import time
 from typing import List
 
+from .. import config
 from ..models import ParseResult, LogEvent, ThreatLevel
 from ..utils.helpers import read_file, gen_id
 from .windows_evtx import parse_windows_xml, parse_windows_evtx
@@ -68,7 +70,15 @@ def _parse_generic(content: str, source_file: str) -> ParseResult:
     lines = content.splitlines()
     events: List[LogEvent] = []
 
-    for line in lines[:10000]:
+    line_limit = config.THRESHOLDS.generic_parse_line_limit
+    if len(lines) > line_limit:
+        sys.stderr.write(
+            f"⚠️  通用解析器只处理前 {line_limit} 行，"
+            f"{source_file} 共 {len(lines)} 行，剩余 {len(lines) - line_limit} 行被截断。\n"
+            "    建议显式指定日志类型，或使用更精确的解析器。\n"
+        )
+
+    for line in lines[:line_limit]:
         if not line.strip() or len(line) < 10:
             continue
 

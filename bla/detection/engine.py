@@ -6,11 +6,29 @@ import re
 from collections import defaultdict
 from typing import List, Dict, Set
 
+from .. import config
 from ..models import (
     LogEvent, DetectionAlert, TimelineEntry, AttackChainEntry,
     AnalysisSummary, ThreatLevel
 )
-from ..utils.helpers import gen_id
+from ..utils.helpers import gen_id, is_private_ip
+
+
+_CONFIDENCE_DOWNGRADE = {"high": "medium", "medium": "low", "low": "low"}
+
+
+def _adjust_for_private_ip(ip: str, confidence: str, evidence: List[str]) -> str:
+    """如果攻击源是私有 IP，置信度下调一档并在 evidence 里标注来源类型。
+
+    内网渗透测试、扫描器、合法运维操作经常会触发同样的特征，但风险显著低于
+    互联网攻击。降级而不是直接抑制，是为了让蓝队仍然能看到事件。
+    """
+    if not ip or not is_private_ip(ip):
+        if ip:
+            evidence.append(f"来源类型: 公网")
+        return confidence
+    evidence.append(f"来源类型: 内网/私有 IP（{ip}）")
+    return _CONFIDENCE_DOWNGRADE.get(confidence, confidence)
 
 
 def run_detection(events: List[LogEvent], profile: str = "default") -> AnalysisSummary:
@@ -62,20 +80,29 @@ def detect_brute_force(events: List[LogEvent]) -> List[DetectionAlert]:
             failed_by_ip[ev.ip].append(ev)
     for ip, evts in failed_by_ip.items():
         n = len(evts)
-        if n < 5:
+        if n < config.THRESHOLDS.brute_force_min:
             continue
-        level = ThreatLevel.CRITICAL if n >= 50 else ThreatLevel.HIGH if n >= 20 else ThreatLevel.MEDIUM
+        if n >= config.THRESHOLDS.brute_force_critical:
+            level = ThreatLevel.CRITICAL
+        elif n >= config.THRESHOLDS.brute_force_high:
+            level = ThreatLevel.HIGH
+        else:
+            level = ThreatLevel.MEDIUM
         users = sorted(set(e.user for e in evts if e.user))
         ts_sorted = sorted(evts, key=lambda e: e.timestamp)
+        evidence = [f"攻击源IP: {ip}", f"失败次数: {n}", f"目标账户数: {len(users)}",
+                    f"时间: {ts_sorted[0].timestamp} ~ {ts_sorted[-1].timestamp}"]
+        confidence = _adjust_for_private_ip(
+            ip, "high" if n >= config.THRESHOLDS.brute_force_high else "medium", evidence
+        )
         alerts.append(DetectionAlert(
             id="a"+gen_id("bf"), rule_id="BRUTE-001", rule_name="暴力破解攻击",
             description=f"来自 {ip} 的暴力破解，共失败 {n} 次，目标: {', '.join(users[:5])}{'...' if len(users)>5 else ''}",
             level=level, category="暴力破解", mitre_attack="T1110.001", mitre_phase="凭据访问",
             affected_events=[e.id for e in evts],
-            evidence=[f"攻击源IP: {ip}", f"失败次数: {n}", f"目标账户数: {len(users)}",
-                      f"时间: {ts_sorted[0].timestamp} ~ {ts_sorted[-1].timestamp}"],
+            evidence=evidence,
             recommendation=f"立即封锁 IP {ip}，检查是否有成功登录，启用账户锁定策略和 MFA",
-            timestamp=ts_sorted[-1].timestamp, confidence="high" if n >= 20 else "medium",
+            timestamp=ts_sorted[-1].timestamp, confidence=confidence,
         ))
     return alerts
 
@@ -88,20 +115,22 @@ def detect_password_spray(events: List[LogEvent]) -> List[DetectionAlert]:
             failed_by_ip[ev.ip].append(ev)
     for ip, evts in failed_by_ip.items():
         unique_users = set(e.user for e in evts if e.user)
-        if len(unique_users) < 5:
+        if len(unique_users) < config.THRESHOLDS.spray_min_unique_users:
             continue
         avg = len(evts) / len(unique_users)
-        if avg > 3:
+        if avg > config.THRESHOLDS.spray_max_avg_per_user:
             continue
+        evidence = [f"攻击源IP: {ip}", f"目标账户数: {len(unique_users)}", f"总尝试: {len(evts)}",
+                    f"目标: {', '.join(list(unique_users)[:5])}"]
+        confidence = _adjust_for_private_ip(ip, "high", evidence)
         alerts.append(DetectionAlert(
             id="a"+gen_id("sp"), rule_id="SPRAY-001", rule_name="密码喷洒攻击",
             description=f"来自 {ip} 的密码喷洒，针对 {len(unique_users)} 个账户，平均每账户 {avg:.1f} 次",
             level=ThreatLevel.HIGH, category="密码喷洒", mitre_attack="T1110.003", mitre_phase="凭据访问",
             affected_events=[e.id for e in evts],
-            evidence=[f"攻击源IP: {ip}", f"目标账户数: {len(unique_users)}", f"总尝试: {len(evts)}",
-                      f"目标: {', '.join(list(unique_users)[:5])}"],
+            evidence=evidence,
             recommendation="密码喷洒绕过锁定策略，检查所有目标账户是否有成功登录，实施异常登录检测",
-            timestamp=max(e.timestamp for e in evts), confidence="high",
+            timestamp=max(e.timestamp for e in evts), confidence=confidence,
         ))
     return alerts
 
@@ -119,7 +148,7 @@ def detect_privilege_escalation(events: List[LogEvent]) -> List[DetectionAlert]:
             timestamp=ev.timestamp, confidence="high",
         ))
     sudo_denied = [e for e in events if "sudo-denied" in e.tags]
-    if len(sudo_denied) >= 3:
+    if len(sudo_denied) >= config.THRESHOLDS.sudo_denied_min:
         alerts.append(DetectionAlert(
             id="a"+gen_id("sd"), rule_id="PRIV-002", rule_name="Sudo 权限滥用尝试",
             description=f"检测到 {len(sudo_denied)} 次 sudo 权限拒绝",
@@ -344,7 +373,7 @@ def detect_reconnaissance(events: List[LogEvent]) -> List[DetectionAlert]:
         ))
 
     scan_events = [e for e in events if e.category != "流量异常" and any(t in e.tags for t in ("scanning","scanner"))]
-    if len(scan_events) >= 5:
+    if len(scan_events) >= config.THRESHOLDS.scanner_min_events:
         scan_ips = sorted(set(e.ip for e in scan_events if e.ip))
         alerts.append(DetectionAlert(
             id="a"+gen_id("rc"), rule_id="RECON-001", rule_name="自动化扫描/侦察",
@@ -357,7 +386,7 @@ def detect_reconnaissance(events: List[LogEvent]) -> List[DetectionAlert]:
             timestamp=max(e.timestamp for e in scan_events), confidence="medium",
         ))
     recon_events = [e for e in events if "recon" in e.tags]
-    if len(recon_events) >= 10:
+    if len(recon_events) >= config.THRESHOLDS.recon_min_events:
         alerts.append(DetectionAlert(
             id="a"+gen_id("rf"), rule_id="RECON-002", rule_name="敏感文件/路径探测",
             description=f"检测到 {len(recon_events)} 次敏感文件探测",
@@ -426,10 +455,16 @@ def detect_cn_hvv(events: List[LogEvent]) -> List[DetectionAlert]:
 
 
 def _dedup_alerts(alerts: List[DetectionAlert]) -> List[DetectionAlert]:
-    seen: Set[str] = set()
+    """以 (rule_id, 影响事件集合) 为去重 key。
+
+    早期实现用 description 前 50 字做 key，对于不同 IP 但同类描述的告警会
+    误删（例如 "检测到 X 次..." 这种通用句式），所以改成基于 affected_events
+    的精确去重。
+    """
+    seen: Set = set()
     result = []
     for a in alerts:
-        key = f"{a.rule_id}:{a.description[:50]}"
+        key = (a.rule_id, tuple(sorted(a.affected_events)))
         if key not in seen:
             seen.add(key)
             result.append(a)
@@ -441,7 +476,8 @@ def _build_timeline(events: List[LogEvent]) -> List[TimelineEntry]:
     significant.sort(key=lambda e: e.timestamp)
     return [TimelineEntry(timestamp=e.timestamp, level=e.level, category=e.category,
                           message=e.message, event_id=e.id, source_file=e.source_file,
-                          mitre_attack=e.mitre_attack) for e in significant[:500]]
+                          mitre_attack=e.mitre_attack)
+            for e in significant[:config.THRESHOLDS.timeline_max_items]]
 
 
 def _build_attack_chain(events: List[LogEvent], alerts: List[DetectionAlert]) -> List[AttackChainEntry]:

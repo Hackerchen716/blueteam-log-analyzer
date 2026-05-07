@@ -66,7 +66,8 @@ def generate_html_report(
     all_events = []
     for result in parse_results:
         all_events.extend(result.events)
-    iocs = extract_iocs(all_events)
+    # 报告的 IOC 摘要走告警过滤，避免业务流量污染封禁清单
+    iocs = extract_iocs(all_events, alerts=summary.alerts)
     ioc_counts = {
         "IP": len(iocs["ips"]),
         "域名": len(iocs["domains"]),
@@ -182,27 +183,28 @@ def generate_html_report(
         timeline_html = '<div class="empty-state">暂无关键事件</div>'
 
     # 攻击链 HTML
-    chain_html = ""
     chain_phases = ["侦察","初始访问","执行","持久化","权限提升","防御规避","凭据访问","横向移动","命令控制"]
     active_phases = {c.phase: c for c in summary.attack_chain}
-    for phase in chain_phases:
+    chain_parts: List[str] = []
+    for idx, phase in enumerate(chain_phases):
         if phase in active_phases:
             c = active_phases[phase]
             color = _level_color_hex(c.level)
             techs = ", ".join(c.techniques[:3])
-            chain_html += f"""
+            chain_parts.append(f"""
             <div class="chain-item active" style="border-color:{color};">
               <div class="chain-phase" style="color:{color};">{_h(phase)}</div>
               <div class="chain-count">{c.event_count} 事件</div>
               <div class="chain-techs">{_h(techs)}</div>
-            </div>
-            <div class="chain-arrow">→</div>"""
+            </div>""")
         else:
-            chain_html += f"""
+            chain_parts.append(f"""
             <div class="chain-item inactive">
               <div class="chain-phase">{_h(phase)}</div>
-            </div>
-            <div class="chain-arrow">→</div>"""
+            </div>""")
+        if idx < len(chain_phases) - 1:
+            chain_parts.append('<div class="chain-arrow">→</div>')
+    chain_html = "".join(chain_parts)
 
     # 文件列表 HTML
     files_html = ""

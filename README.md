@@ -20,7 +20,10 @@
 - **IOC 提取**：一键导出 IP、域名、URL、文件路径、Hash、账户、进程和可疑命令
 - **白名单压制**：支持 JSON allowlist 过滤可信 IP、账户、路径、进程、UA，降低真实环境误报
 - **风险评分**：0-100 综合评分，4 级威胁分级（严重/高危/中危/低危）
-- **多格式输出**：终端彩色报告、独立 HTML 报告（含离线图表）、JSON、CSV、IOC 文本
+- **多格式输出**：终端彩色报告、独立 HTML 报告（含离线图表）、JSON、CSV、IOC 文本、**SARIF 2.1.0**（GitHub Code Scanning 兼容）
+- **可配置阈值**：暴力破解 / DDoS / 密码喷洒等阈值集中管理，支持 `--config thresholds.json` 与 `BLA_THRESHOLD_*` 环境变量覆盖，适配不同业务环境
+- **CI 友好**：`--exit-on {none,critical,high,medium}` 让流水线按需要的告警级别决定门禁
+- **并行解析**：`-j N` 多线程同时处理多个日志文件
 - **完全离线**：无网络请求，无 AI 调用，所有规则内置，适合隔离网络环境
 - **零依赖**：Python 3.9+ 标准库即可运行
 
@@ -142,6 +145,21 @@ bla logs/ --ioc iocs.txt
 # 同时生成所有格式
 bla logs/ --html report.html --json report.json --csv events.csv --ioc iocs.txt
 
+# 生成 SARIF 报告（可上传到 GitHub Code Scanning）
+bla logs/ --sarif report.sarif
+gh code-scanning upload-sarif --sarif report.sarif
+
+# 自定义阈值（公网跳板机适当调高暴力破解阈值，避免误报）
+bla logs/ --config thresholds.json
+# 或通过环境变量覆盖
+BLA_THRESHOLD_BRUTE_FORCE_HIGH=50 bla logs/
+
+# 并行解析多个文件
+bla logs/*.evtx -j 8
+
+# CI 流水线：只在严重以上告警时退出 1
+bla logs/ --exit-on high
+
 # 国内护网/重保增强画像
 bla logs/ --profile cn-hvv --html report.html --ioc iocs.txt
 
@@ -184,11 +202,18 @@ bla Security.xml System.xml Sysmon.xml --html incident_report.html
 
 ### 退出码
 
+`--exit-on` 决定何种级别的告警会触发退出码 1，默认为 `critical`。
+
 | 退出码 | 含义 |
 |--------|------|
-| `0` | 分析完成，无严重告警 |
-| `1` | 发现严重（Critical）告警 |
+| `0` | 分析完成，未达到 `--exit-on` 设定的告警级别 |
+| `1` | 发现达到/超过 `--exit-on` 阈值的告警 |
 | `130` | 用户中断（Ctrl+C） |
+
+```bash
+bla logs/ --exit-on none           # 永远 exit 0，仅生成报告
+bla logs/ --exit-on medium         # 任何中危以上告警都触发 exit 1
+```
 
 退出码可用于自动化告警脚本：
 
@@ -318,20 +343,24 @@ blueteam-log-analyzer/
 ├── bla_cli.py              # CLI 主入口
 ├── bla/
 │   ├── models.py           # 数据模型（LogEvent, DetectionAlert, AnalysisSummary 等）
+│   ├── config.py           # 阈值配置中心（支持环境变量 / JSON 覆盖）
+│   ├── allowlist.py        # 白名单过滤
+│   ├── ioc.py              # IOC 提取（支持基于告警的高置信度模式）
 │   ├── parsers/
 │   │   ├── __init__.py     # 自动类型识别路由
 │   │   ├── windows_evtx.py # Windows 事件日志解析（XML/EVTX）
-│   │   ├── linux_auth.py   # Linux 认证日志解析
-│   │   ├── web_access.py   # Web 访问日志解析（Apache/Nginx Combined）
+│   │   ├── linux_auth.py   # Linux 认证日志解析（带跨年处理）
+│   │   ├── web_access.py   # Web 访问日志解析（基于分钟桶的 DDoS 检测）
 │   │   └── stats.py        # 统计计算（Top IP、Top User、时间范围等）
 │   ├── detection/
-│   │   └── engine.py       # 威胁检测引擎（70+ 规则，ATT&CK 映射）
+│   │   └── engine.py       # 威胁检测引擎（统一规则源；私网 IP 自动降级）
 │   ├── output/
 │   │   ├── terminal.py     # 终端彩色输出（ANSI，支持 Windows 10+）
 │   │   ├── html_report.py  # HTML 报告生成（独立单文件）
 │   │   ├── json_report.py  # JSON 报告输出
 │   │   ├── csv_report.py   # CSV 事件导出
-│   │   └── ioc_report.py   # IOC 清单导出
+│   │   ├── ioc_report.py   # IOC 清单导出
+│   │   └── sarif_report.py # SARIF 2.1.0 输出（接入 GitHub Code Scanning 等）
 │   └── utils/
 │       └── helpers.py      # 工具函数
 ├── docs/

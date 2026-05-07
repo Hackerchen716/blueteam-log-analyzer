@@ -43,6 +43,24 @@ _WIN_RULES: Dict[int, dict] = {
     4771: dict(level=ThreatLevel.MEDIUM,   cat="Kerberos",tags=["kerberos","failed","brute-force"],
                mitre="T1110",      rule="Kerberos 预认证失败",
                msg=lambda d: f"Kerberos 预认证失败: {d.get('TargetUserName','?')} 来自 {d.get('IpAddress','?')}"),
+    4776: dict(level=ThreatLevel.MEDIUM,   cat="认证",    tags=["ntlm","authentication"],
+               mitre="T1110.001",  rule="NTLM 凭据校验",
+               msg=lambda d: f"NTLM 校验: {d.get('TargetUserName','?')} 来自 {d.get('Workstation','?')} 状态={d.get('Status','0x0')}"),
+    4634: dict(level=ThreatLevel.INFO,     cat="认证",    tags=["logoff"],
+               mitre=None,         rule="账户注销",
+               msg=lambda d: f"注销: 用户={d.get('TargetUserName','?')} 类型={d.get('LogonType','?')}"),
+    4647: dict(level=ThreatLevel.INFO,     cat="认证",    tags=["logoff","user-initiated"],
+               mitre=None,         rule="用户主动注销",
+               msg=lambda d: f"用户主动注销: {d.get('TargetUserName','?')}"),
+    4673: dict(level=ThreatLevel.MEDIUM,   cat="权限",    tags=["privilege","sensitive-call"],
+               mitre="T1078.002",  rule="敏感特权调用",
+               msg=lambda d: f"敏感特权调用: {d.get('SubjectUserName','?')} 服务={d.get('Service','?')}"),
+    4740: dict(level=ThreatLevel.HIGH,     cat="账户管理",tags=["account-lockout","brute-force"],
+               mitre="T1110",      rule="账户锁定",
+               msg=lambda d: f"账户被锁定: {d.get('TargetUserName','?')} 来自 {d.get('TargetDomainName','?')}"),
+    4738: dict(level=ThreatLevel.MEDIUM,   cat="账户管理",tags=["account-modified"],
+               mitre="T1098",      rule="账户属性变更",
+               msg=lambda d: f"账户属性变更: {d.get('TargetUserName','?')} 由 {d.get('SubjectUserName','?')}"),
 
     # ── 账户管理 ──────────────────────────────────────────
     4720: dict(level=ThreatLevel.HIGH,     cat="账户管理",tags=["account-creation","persistence"],
@@ -134,6 +152,14 @@ _WIN_RULES: Dict[int, dict] = {
     4779: dict(level=ThreatLevel.INFO,     cat="RDP",     tags=["rdp"],
                mitre="T1021.001",  rule="RDP 会话断开",
                msg=lambda d: f"RDP断开: {d.get('AccountName','?')}"),
+
+    # ── 文件共享 / 横向移动 ───────────────────────────────
+    5140: dict(level=ThreatLevel.MEDIUM,   cat="文件共享",tags=["smb","lateral-movement","file-share"],
+               mitre="T1021.002",  rule="文件共享访问",
+               msg=lambda d: f"文件共享访问: {d.get('SubjectUserName','?')} -> {d.get('ShareName','?')} 来自 {d.get('IpAddress','?')}"),
+    5145: dict(level=ThreatLevel.MEDIUM,   cat="文件共享",tags=["smb","lateral-movement","file-share"],
+               mitre="T1021.002",  rule="共享对象访问",
+               msg=lambda d: f"共享对象访问: {d.get('SubjectUserName','?')} -> {d.get('ShareName','?')}/{d.get('RelativeTargetName','?')}"),
 
     # ── Sysmon ────────────────────────────────────────────
     1:    dict(level=ThreatLevel.INFO,     cat="Sysmon",  tags=["sysmon","process-creation"],
@@ -240,83 +266,95 @@ def _safe_int(value: str, default: int = 0) -> int:
         return default
 
 
-def _parse_xml_event(xml_text: str, source_file: str) -> Optional[LogEvent]:
-    """解析单个 <Event> XML 块"""
+def _parse_xml_event_with_error(xml_text: str, source_file: str) -> Tuple[Optional[LogEvent], Optional[Exception]]:
+    """解析单个 <Event> XML 块，并返回异常对象（如有）便于上层统计错误数。"""
     try:
-        # 去掉命名空间简化解析
-        xml_clean = re.sub(r'\s+xmlns[^"]*"[^"]*"', '', xml_text)
-        root = ET.fromstring(xml_clean)
+        return _parse_xml_event(xml_text, source_file), None
+    except Exception as e:  # noqa: BLE001 — XML 行级失败不应中断整个分析
+        return None, e
 
-        sys_el = root.find("System")
-        if sys_el is None:
-            return None
 
-        def gtag(tag: str) -> str:
-            el = sys_el.find(tag)
-            return el.text.strip() if el is not None and el.text else ""
+def _parse_xml_event(xml_text: str, source_file: str) -> Optional[LogEvent]:
+    """解析单个 <Event> XML 块。
 
-        eid_str = gtag("EventID") or ""
-        eid = int(eid_str) if eid_str.isdigit() else 0
-        ts_raw = ""
-        tc = sys_el.find("TimeCreated")
-        if tc is not None:
-            ts_raw = tc.get("SystemTime", "")
-        computer = gtag("Computer")
-        channel  = gtag("Channel")
+    解析异常会向上抛出，由 :func:`_parse_xml_event_with_error` 捕获并记入
+    ``ParseStats.parse_errors``，避免静默丢事件。"""
+    # 去掉命名空间简化解析
+    xml_clean = re.sub(r'\s+xmlns[^"]*"[^"]*"', '', xml_text)
+    root = ET.fromstring(xml_clean)
 
-        # EventData
-        details: Dict[str, str] = {}
-        ed = root.find("EventData")
-        if ed is not None:
-            for data in ed.findall("Data"):
-                name = data.get("Name", "")
-                val  = data.text or ""
-                if name:
-                    details[name] = val.strip()
-
-        user    = details.get("SubjectUserName") or details.get("TargetUserName") or ""
-        ip      = details.get("IpAddress") or details.get("SourceAddress") or ""
-        process = details.get("NewProcessName") or details.get("ProcessName") or details.get("Image") or ""
-
-        level, cat, msg, tags, mitre, rule_name = _classify_event(eid, details, channel)
-
-        return LogEvent(
-            id          = gen_id("win"),
-            timestamp   = normalize_timestamp(ts_raw),
-            level       = level,
-            category    = cat,
-            source      = f"{channel} (EID:{eid_str})",
-            source_file = source_file,
-            message     = msg,
-            raw_line    = xml_text[:300],
-            event_id    = eid_str,
-            user        = user or None,
-            host        = computer or None,
-            ip          = ip or None,
-            process     = process or None,
-            details     = details,
-            tags        = tags,
-            mitre_attack= mitre,
-            rule_id     = f"WIN-{eid_str}",
-            rule_name   = rule_name,
-        )
-    except Exception:
+    sys_el = root.find("System")
+    if sys_el is None:
         return None
+
+    def gtag(tag: str) -> str:
+        el = sys_el.find(tag)
+        return el.text.strip() if el is not None and el.text else ""
+
+    eid_str = gtag("EventID") or ""
+    eid = int(eid_str) if eid_str.isdigit() else 0
+    ts_raw = ""
+    tc = sys_el.find("TimeCreated")
+    if tc is not None:
+        ts_raw = tc.get("SystemTime", "")
+    computer = gtag("Computer")
+    channel  = gtag("Channel")
+
+    # EventData
+    details: Dict[str, str] = {}
+    ed = root.find("EventData")
+    if ed is not None:
+        for data in ed.findall("Data"):
+            name = data.get("Name", "")
+            val  = data.text or ""
+            if name:
+                details[name] = val.strip()
+
+    user    = details.get("SubjectUserName") or details.get("TargetUserName") or ""
+    ip      = details.get("IpAddress") or details.get("SourceAddress") or ""
+    process = details.get("NewProcessName") or details.get("ProcessName") or details.get("Image") or ""
+
+    level, cat, msg, tags, mitre, rule_name = _classify_event(eid, details, channel)
+
+    return LogEvent(
+        id          = gen_id("win"),
+        timestamp   = normalize_timestamp(ts_raw),
+        level       = level,
+        category    = cat,
+        source      = f"{channel} (EID:{eid_str})",
+        source_file = source_file,
+        message     = msg,
+        raw_line    = xml_text[:300],
+        event_id    = eid_str,
+        user        = user or None,
+        host        = computer or None,
+        ip          = ip or None,
+        process     = process or None,
+        details     = details,
+        tags        = tags,
+        mitre_attack= mitre,
+        rule_id     = f"WIN-{eid_str}",
+        rule_name   = rule_name,
+    )
 
 
 def parse_windows_xml(content: str, source_file: str) -> ParseResult:
     """解析 Windows XML 事件日志"""
     t0 = time.time()
     events: List[LogEvent] = []
+    parse_errors = 0
 
     # 逐块提取 <Event>...</Event>
     pattern = re.compile(r'<Event[\s>][\s\S]*?</Event>', re.IGNORECASE)
     for m in pattern.finditer(content):
-        ev = _parse_xml_event(m.group(), source_file)
+        ev, err = _parse_xml_event_with_error(m.group(), source_file)
         if ev:
             events.append(ev)
+        elif err:
+            parse_errors += 1
 
     stats = _compute_stats(events)
+    stats.parse_errors = parse_errors
     return ParseResult(
         file_name      = source_file,
         log_type       = "Windows Event Log (XML)",
@@ -334,16 +372,24 @@ def parse_windows_evtx(path: str) -> ParseResult:
     """
     try:
         import Evtx.Evtx as evtx
-        import Evtx.Views as e_views
+        import Evtx.Views as e_views  # noqa: F401  imported for side effects
         t0 = time.time()
         events: List[LogEvent] = []
+        parse_errors = 0
         with evtx.Evtx(path) as log:
             for record in log.records():
-                xml_text = record.xml()
-                ev = _parse_xml_event(xml_text, path)
+                try:
+                    xml_text = record.xml()
+                except Exception:
+                    parse_errors += 1
+                    continue
+                ev, err = _parse_xml_event_with_error(xml_text, path)
                 if ev:
                     events.append(ev)
+                elif err:
+                    parse_errors += 1
         stats = _compute_stats(events)
+        stats.parse_errors = parse_errors
         return ParseResult(
             file_name     = path,
             log_type      = "Windows EVTX (Binary)",

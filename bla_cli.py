@@ -11,12 +11,14 @@ BlueTeam Log Analyzer (BLA) - CLI 入口
   bla Security.xml --html report.html      # Windows 事件日志
   bla logs/ --json out.json --csv out.csv  # 批量分析目录
   bla *.evtx --verbose                     # EVTX 详细模式
+  bla logs/ --sarif report.sarif           # 接入 GitHub Code Scanning
 """
 
 import sys
 import os
 import argparse
 import glob
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
 
 # Windows 10+ 启用 ANSI 颜色支持
@@ -28,6 +30,9 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+from bla.config import (
+    THRESHOLDS, load_thresholds, load_thresholds_from_env, set_thresholds,
+)
 from bla.parsers import auto_parse
 from bla.detection import run_detection
 from bla.allowlist import apply_allowlist, load_allowlist
@@ -37,9 +42,18 @@ from bla.output import (
     generate_json_report,
     generate_csv_report,
     generate_ioc_report,
+    generate_sarif_report,
 )
 from bla.utils.helpers import reset_counter, set_syslog_year
-from bla.models import ParseResult
+from bla.models import ParseResult, ThreatLevel
+
+
+_EXIT_THRESHOLDS = {
+    "none":     None,
+    "critical": ThreatLevel.CRITICAL.score,
+    "high":     ThreatLevel.HIGH.score,
+    "medium":   ThreatLevel.MEDIUM.score,
+}
 
 
 def main():
@@ -74,6 +88,29 @@ def main():
         "--ioc",
         metavar="FILE",
         help="导出 IOC 清单（IP、域名、URL、路径、Hash、账户、进程、命令）",
+    )
+    parser.add_argument(
+        "--sarif",
+        metavar="FILE",
+        help="生成 SARIF 2.1.0 报告（可上传到 GitHub Code Scanning 等）",
+    )
+    parser.add_argument(
+        "--config",
+        metavar="FILE",
+        help="加载自定义阈值 JSON（覆盖暴力破解 / DDoS 等内置阈值）",
+    )
+    parser.add_argument(
+        "--exit-on",
+        choices=tuple(_EXIT_THRESHOLDS.keys()),
+        default="critical",
+        help="按告警最高级别决定退出码：critical（默认 1）/ high / medium / none",
+    )
+    parser.add_argument(
+        "-j", "--jobs",
+        type=int,
+        default=0,
+        metavar="N",
+        help="并行解析的线程数，0 表示自动（默认: 0）。仅 IO/正则密集型解析受益",
     )
     parser.add_argument(
         "--profile",
@@ -127,6 +164,15 @@ def main():
             sys.exit(1)
         set_syslog_year(args.syslog_year)
 
+    # 阈值加载顺序：内置默认 → 环境变量 → --config 文件
+    set_thresholds(load_thresholds_from_env())
+    if args.config:
+        try:
+            set_thresholds(load_thresholds(args.config))
+        except Exception as e:
+            print(f"❌ 错误：阈值文件加载失败: {e}", file=sys.stderr)
+            sys.exit(1)
+
     # 收集所有文件
     files = []
     for path in args.paths:
@@ -153,16 +199,36 @@ def main():
     reset_counter()
     parse_results: List[ParseResult] = []
 
-    for i, fpath in enumerate(files, 1):
-        fname = os.path.basename(fpath)
-        print(f"  [{i}/{len(files)}] 解析: {fname} ...", end=" ", flush=True)
-        try:
-            result = auto_parse(fpath)
-            parse_results.append(result)
-            print(f"✓ ({result.stats.total} 事件)")
-        except Exception as e:
-            print(f"✗ 错误: {e}")
-            continue
+    # gen_id 是全局计数器，多线程并行解析时事件 ID 仍唯一（GIL 保证 +=
+    # 原子）；多进程会破坏计数器一致性，因此只用线程池。1 个文件时不引入
+    # 线程开销。
+    workers = args.jobs if args.jobs > 0 else min(8, max(1, len(files)))
+    if len(files) <= 1 or workers == 1:
+        for i, fpath in enumerate(files, 1):
+            fname = os.path.basename(fpath)
+            print(f"  [{i}/{len(files)}] 解析: {fname} ...", end=" ", flush=True)
+            try:
+                result = auto_parse(fpath)
+                parse_results.append(result)
+                print(f"✓ ({result.stats.total} 事件)")
+            except Exception as e:
+                print(f"✗ 错误: {e}")
+                continue
+    else:
+        print(f"  并行解析（{workers} 个线程）...")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_path = {pool.submit(auto_parse, fpath): fpath for fpath in files}
+            done = 0
+            for future in as_completed(future_to_path):
+                done += 1
+                fpath = future_to_path[future]
+                fname = os.path.basename(fpath)
+                try:
+                    result = future.result()
+                    parse_results.append(result)
+                    print(f"  [{done}/{len(files)}] ✓ {fname} ({result.stats.total} 事件)")
+                except Exception as e:
+                    print(f"  [{done}/{len(files)}] ✗ {fname}: {e}")
 
     if not parse_results:
         print("\n❌ 所有文件解析失败", file=sys.stderr)
@@ -201,12 +267,16 @@ def main():
         generate_csv_report(parse_results, summary, args.csv)
     if args.ioc:
         generate_ioc_report(parse_results, summary, args.ioc)
+    if args.sarif:
+        generate_sarif_report(parse_results, summary, args.sarif)
 
-    # 退出码：有严重告警则返回 1
-    if any(a.level.value == "critical" for a in summary.alerts):
-        sys.exit(1)
-    else:
+    # 退出码：可通过 --exit-on 控制触发等级
+    threshold = _EXIT_THRESHOLDS.get(args.exit_on)
+    if threshold is None:
         sys.exit(0)
+    if any(a.level.score >= threshold for a in summary.alerts):
+        sys.exit(1)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

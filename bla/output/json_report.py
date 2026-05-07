@@ -16,6 +16,9 @@ def generate_json_report(
     for result in parse_results:
         all_events.extend(result.events)
 
+    # 高置信度 IOC：只从触发告警的事件中提取，避免把正常运维流量混进列表
+    iocs_high_conf = extract_iocs(all_events, alerts=summary.alerts)
+
     report = {
         "meta": {
             "tool": "BlueTeam Log Analyzer (BLA)",
@@ -75,7 +78,8 @@ def generate_json_report(
             }
             for t in summary.timeline[:200]
         ],
-        "iocs": extract_iocs(all_events),
+        "iocs": iocs_high_conf,
+        "iocs_all_events": extract_iocs(all_events),
         "recommendations": summary.recommendations,
     }
 

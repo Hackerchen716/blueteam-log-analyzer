@@ -20,13 +20,21 @@ def set_syslog_year(year: Optional[int]):
     global _syslog_year_override
     _syslog_year_override = year
 
+
+def get_syslog_year_override() -> Optional[int]:
+    return _syslog_year_override
+
 MONTH_MAP = {
     'Jan':'01','Feb':'02','Mar':'03','Apr':'04','May':'05','Jun':'06',
     'Jul':'07','Aug':'08','Sep':'09','Oct':'10','Nov':'11','Dec':'12'
 }
 
-def normalize_timestamp(ts: str) -> str:
-    """将各种时间格式统一为 ISO8601"""
+def normalize_timestamp(ts: str, syslog_year: Optional[int] = None) -> str:
+    """将各种时间格式统一为 ISO8601。
+
+    ``syslog_year`` 用于 syslog/auth.log 这类不带年份的时间戳。优先级：
+    显式参数 > :func:`set_syslog_year` 设置的全局值 > 系统当前年份。
+    """
     if not ts:
         return ""
     ts = ts.strip()
@@ -36,7 +44,7 @@ def normalize_timestamp(ts: str) -> str:
     # syslog: "Mar 15 09:00:01"
     m = re.match(r'(\w{3})\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})', ts)
     if m:
-        year = _syslog_year_override or datetime.datetime.now().year
+        year = syslog_year or _syslog_year_override or datetime.datetime.now().year
         mon = MONTH_MAP.get(m.group(1), '01')
         day = m.group(2).zfill(2)
         return f"{year}-{mon}-{day}T{m.group(3)}"
