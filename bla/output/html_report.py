@@ -8,6 +8,7 @@ from html import escape
 from typing import List
 from ..ioc import extract_iocs
 from ..models import ParseResult, AnalysisSummary, ThreatLevel
+from ..utils.helpers import safe_print
 
 
 def _level_color_hex(level: ThreatLevel) -> str:
@@ -446,5 +447,5 @@ function filterAlerts() {{
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
 
-    print(f"  [✓] HTML 报告已保存: {output_path}")
-    print(f"      用浏览器打开: open {output_path}")
+    safe_print(f"  [✓] HTML 报告已保存: {output_path}")
+    safe_print(f"      用浏览器打开: open {output_path}")

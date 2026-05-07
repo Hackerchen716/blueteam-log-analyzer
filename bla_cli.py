@@ -44,7 +44,7 @@ from bla.output import (
     generate_ioc_report,
     generate_sarif_report,
 )
-from bla.utils.helpers import reset_counter, set_syslog_year
+from bla.utils.helpers import reset_counter, safe_print as print, set_syslog_year
 from bla.models import ParseResult, ThreatLevel
 
 

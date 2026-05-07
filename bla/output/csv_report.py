@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from typing import List
 from ..models import ParseResult, AnalysisSummary
+from ..utils.helpers import safe_print
 
 
 def generate_csv_report(
@@ -44,4 +45,4 @@ def generate_csv_report(
                 "raw_line":    ev.raw_line[:200],
             })
 
-    print(f"  [✓] CSV 报告已保存: {output_path}  ({len(all_events)} 条事件)")
+    safe_print(f"  [✓] CSV 报告已保存: {output_path}  ({len(all_events)} 条事件)")

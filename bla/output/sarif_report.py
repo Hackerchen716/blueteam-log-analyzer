@@ -16,6 +16,7 @@ import json
 from typing import Any, Dict, List
 
 from ..models import AnalysisSummary, DetectionAlert, ParseResult, ThreatLevel
+from ..utils.helpers import safe_print
 
 
 SARIF_VERSION = "2.1.0"
@@ -127,4 +128,4 @@ def generate_sarif_report(
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(sarif, f, ensure_ascii=False, indent=2)
 
-    print(f"  [✓] SARIF 报告已保存: {output_path}  ({len(results)} 个发现)")
+    safe_print(f"  [✓] SARIF 报告已保存: {output_path}  ({len(results)} 个发现)")

@@ -20,7 +20,7 @@ from bla.parsers import _parse_generic
 from bla.parsers.linux_auth import parse_linux_auth
 from bla.parsers.web_access import parse_web_access
 from bla.parsers.windows_evtx import _parse_xml_event, parse_windows_xml
-from bla.utils.helpers import normalize_timestamp, set_syslog_year
+from bla.utils.helpers import is_private_ip, normalize_timestamp, set_syslog_year
 
 
 class RegressionTests(unittest.TestCase):
@@ -218,6 +218,16 @@ class RegressionTests(unittest.TestCase):
         # n>=20 公网 IP 时 confidence=high；私网降级为 medium
         self.assertEqual(bf[0].confidence, "medium")
         self.assertTrue(any("内网" in e for e in bf[0].evidence))
+
+    def test_private_ip_check_only_matches_rfc1918_ranges(self):
+        """保留/文档网段不应当被当作内网地址降级。"""
+        self.assertTrue(is_private_ip("10.1.2.3"))
+        self.assertTrue(is_private_ip("172.16.0.1"))
+        self.assertTrue(is_private_ip("172.31.255.255"))
+        self.assertTrue(is_private_ip("192.168.1.1"))
+        self.assertFalse(is_private_ip("172.32.0.1"))
+        self.assertFalse(is_private_ip("203.0.113.50"))
+        self.assertFalse(is_private_ip("198.51.100.70"))
 
     def test_cross_year_syslog_lines_advance_year_on_month_rollback(self):
         """12 月之后出现 1 月份事件，应自动 +1 年。"""

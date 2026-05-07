@@ -39,6 +39,7 @@ Thumbs.db
 # Output files (don't commit reports)
 *.html
 *.json
+!docs/allowlist-example.json
 *.csv
 !sample_logs/
 

@@ -1,6 +1,8 @@
 """工具函数"""
-import re
 import datetime
+import ipaddress
+import re
+import sys
 from typing import Optional
 
 _counter = 0
@@ -58,12 +60,58 @@ def normalize_timestamp(ts: str, syslog_year: Optional[int] = None) -> str:
 def truncate(s: str, n: int = 120) -> str:
     return s if len(s) <= n else s[:n] + "…"
 
-def is_private_ip(ip: str) -> bool:
-    import ipaddress
+
+def safe_write(text: str, stream=None) -> None:
+    """Write text without crashing on legacy Windows console encodings."""
+    stream = stream or sys.stdout
     try:
-        return ipaddress.ip_address(ip).is_private
+        stream.write(text)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        stream.write(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
+
+
+def safe_print(*values, sep: str = " ", end: str = "\n", file=None, flush: bool = False) -> None:
+    """print() compatible helper that tolerates non-UTF-8 output streams."""
+    stream = file or sys.stdout
+    safe_write(sep.join(str(v) for v in values) + end, stream)
+    if flush:
+        stream.flush()
+
+
+class SafeStream:
+    """Small write/flush adapter for modules that stream terminal reports."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text: str) -> None:
+        safe_write(text, self._stream)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+
+def safe_stream(stream):
+    return SafeStream(stream)
+
+
+def is_private_ip(ip: str) -> bool:
+    """Return True only for RFC1918 private address ranges.
+
+    ``ipaddress.ip_address(...).is_private`` also marks documentation ranges
+    such as 203.0.113.0/24 and 198.51.100.0/24 as private-like. For alert
+    confidence downgrades we only want internal RFC1918 space.
+    """
+    try:
+        ip_obj = ipaddress.ip_address(ip)
     except Exception:
         return False
+    return (
+        ip_obj in ipaddress.ip_network("10.0.0.0/8") or
+        ip_obj in ipaddress.ip_network("172.16.0.0/12") or
+        ip_obj in ipaddress.ip_network("192.168.0.0/16")
+    )
 
 def detect_encoding(raw: bytes) -> str:
     """简单检测文件编码"""

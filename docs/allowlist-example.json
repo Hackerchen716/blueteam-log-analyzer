@@ -1,0 +1,31 @@
+{
+  "ips": [
+    "127.0.0.1",
+    "10.0.0.10",
+    "192.168.1.10"
+  ],
+  "users": [
+    "backup",
+    "monitoring"
+  ],
+  "hosts": [
+    "jumpbox01"
+  ],
+  "processes": [
+    "C:\\Windows\\System32\\wevtutil.exe"
+  ],
+  "paths": [
+    "/health",
+    "/status",
+    "/metrics"
+  ],
+  "user_agents": [
+    "UptimeRobot",
+    "Prometheus"
+  ],
+  "messages": [
+    "known maintenance window"
+  ],
+  "rule_names": [],
+  "event_ids": []
+}

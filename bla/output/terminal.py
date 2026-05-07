@@ -9,6 +9,7 @@ from typing import List
 from ..models import (
     ParseResult, AnalysisSummary, DetectionAlert, ThreatLevel, LogEvent
 )
+from ..utils.helpers import safe_stream
 
 # ANSI 颜色
 RESET  = "\033[0m"
@@ -67,7 +68,7 @@ def print_terminal_report(
     if no_color:
         _disable_color()
 
-    out = sys.stdout
+    out = safe_stream(sys.stdout)
 
     # ── 标题横幅 ──────────────────────────────────────────
     out.write(f"\n{BOLD}{BLUE}")
