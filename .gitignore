@@ -40,6 +40,7 @@ Thumbs.db
 *.html
 *.json
 !docs/allowlist-example.json
+!tests/fixtures/**/*.json
 *.csv
 !sample_logs/
 

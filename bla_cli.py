@@ -18,7 +18,12 @@ import sys
 import os
 import argparse
 import glob
+import json
+import tempfile
+import time
+import tracemalloc
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import List
 
 # Windows 10+ 启用 ANSI 颜色支持
@@ -31,12 +36,14 @@ if sys.platform == "win32":
         pass
 
 from bla.config import (
-    THRESHOLDS, load_thresholds, load_thresholds_from_env, set_thresholds,
+    load_thresholds, load_thresholds_from_env, set_thresholds,
 )
+from bla.log_sources import format_log_source_priorities
 from bla.parsers import auto_parse
 from bla.detection import run_detection
+from bla.detection.enrichment import enrich_events
 from bla.allowlist import apply_allowlist, load_allowlist
-from bla.rules import set_rule_dirs
+from bla.rules import set_rule_dirs, validate_web_attack_rules
 from bla.output import (
     print_terminal_report,
     generate_html_report,
@@ -58,7 +65,227 @@ _EXIT_THRESHOLDS = {
 }
 
 
+def _dispatch_subcommand(argv: List[str]) -> bool:
+    if len(argv) < 2 or argv[1] not in {"validate-rules", "benchmark", "explain"}:
+        return False
+    command = argv[1]
+    if command == "validate-rules":
+        _cmd_validate_rules(argv[2:])
+    elif command == "benchmark":
+        _cmd_benchmark(argv[2:])
+    elif command == "explain":
+        _cmd_explain(argv[2:])
+    return True
+
+
+def _cmd_validate_rules(argv: List[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="bla validate-rules",
+        description="校验内置和自定义 Web/P0 规则元数据与正则可编译性",
+    )
+    parser.add_argument("--rules", action="append", metavar="DIR", help="额外规则目录，可重复指定")
+    parser.add_argument("--strict-metadata", action="store_true", help="元数据 warning 也作为失败处理")
+    args = parser.parse_args(argv)
+
+    try:
+        result = validate_web_attack_rules(args.rules or [])
+    except Exception as e:
+        print(f"❌ 规则校验失败: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    print("规则校验结果")
+    print(f"  规则数:       {result['raw_rules']}")
+    print(f"  编译模式数:   {result['compiled_patterns']}")
+    print(f"  errors:      {result['errors']}")
+    print(f"  warnings:    {result['warnings']}")
+    for item in result["issues"][:50]:
+        marker = "ERROR" if item["severity"] == "error" else "WARN"
+        print(f"  [{marker}] {item['source']} :: {item['rule']} :: {item['message']}")
+    if len(result["issues"]) > 50:
+        print(f"  ... 还有 {len(result['issues']) - 50} 条问题未展示")
+
+    if result["errors"] or (args.strict_metadata and result["warnings"]):
+        sys.exit(1)
+    sys.exit(0)
+
+
+def _cmd_benchmark(argv: List[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="bla benchmark",
+        description="对真实日志或合成 P0/Web 日志做解析与检测性能评估",
+    )
+    parser.add_argument("paths", nargs="*", help="可选：真实日志文件/目录；为空时生成合成日志")
+    parser.add_argument("--size-mb", type=int, default=10, help="合成日志大小，默认 10MB")
+    parser.add_argument("--profile", choices=("default", "cn-hvv"), default="cn-hvv")
+    parser.add_argument("-j", "--jobs", type=int, default=0)
+    args = parser.parse_args(argv)
+
+    files = _collect_files(args.paths)
+    temp_path = None
+    if not files:
+        temp_path = _make_synthetic_p0_log(args.size_mb)
+        files = [str(temp_path)]
+
+    reset_counter()
+    tracemalloc.start()
+    started = time.perf_counter()
+    parse_results = _parse_files(files, args.jobs, quiet=True)
+    all_events = [event for result in parse_results for event in result.events]
+    summary = run_detection(all_events, profile=args.profile)
+    elapsed = time.perf_counter() - started
+    current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    total_bytes = sum(result.file_size_bytes for result in parse_results)
+    mb = total_bytes / (1024 * 1024) if total_bytes else 0
+    eps = len(all_events) / elapsed if elapsed > 0 else 0
+    print("Benchmark")
+    print(f"  files:       {len(files)}")
+    print(f"  size:        {mb:.2f} MB")
+    print(f"  events:      {len(all_events)}")
+    print(f"  alerts:      {len(summary.alerts)}")
+    print(f"  incidents:   {len(summary.incidents)}")
+    print(f"  elapsed:     {elapsed:.3f}s")
+    print(f"  throughput:  {mb / elapsed if elapsed > 0 else 0:.2f} MB/s")
+    print(f"  event rate:  {eps:.0f} events/s")
+    print(f"  peak memory: {peak / (1024 * 1024):.2f} MB")
+    if temp_path:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+    sys.exit(0)
+
+
+def _cmd_explain(argv: List[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="bla explain",
+        description="从 JSON 报告解释某个 alert_id 或 incident_id 的证据与处置建议",
+    )
+    parser.add_argument("id", help="告警 ID（如 awa1）或案件 ID（如 inc-001）")
+    parser.add_argument("--report", default="report.json", help="由 --json 或 --out 生成的 JSON 报告，默认 report.json")
+    args = parser.parse_args(argv)
+
+    try:
+        with open(args.report, "r", encoding="utf-8") as f:
+            report = json.load(f)
+    except Exception as e:
+        print(f"❌ 无法读取报告 {args.report}: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    target_id = args.id
+    for incident in report.get("incidents", []):
+        if incident.get("id") == target_id:
+            print(f"[案件] {incident.get('title')}")
+            print(f"级别: {incident.get('level')}  置信度: {incident.get('confidence')}")
+            print(incident.get("description", ""))
+            print("\n关键证据:")
+            for item in incident.get("evidence", []):
+                print(f"  - {item}")
+            print("\n建议补采:")
+            for item in incident.get("next_logs", []):
+                print(f"  - {item}")
+            print("\n处置动作:")
+            for item in incident.get("recommended_actions", []):
+                print(f"  - {item}")
+            sys.exit(0)
+
+    for alert in report.get("alerts", []):
+        if alert.get("id") == target_id or alert.get("rule_id") == target_id:
+            print(f"[告警] {alert.get('rule_name')}")
+            print(f"规则: {alert.get('rule_id')}  级别: {alert.get('level')}  置信度: {alert.get('confidence')}")
+            print(alert.get("description", ""))
+            print("\n证据:")
+            for item in alert.get("evidence", []):
+                print(f"  - {item}")
+            print(f"\n建议: {alert.get('recommendation', '')}")
+            sys.exit(0)
+
+    print(f"❌ 报告中未找到 ID: {target_id}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _collect_files(paths: List[str]) -> List[str]:
+    files = []
+    for path in paths:
+        if os.path.isfile(path):
+            files.append(path)
+        elif os.path.isdir(path):
+            for root, _, fnames in os.walk(path):
+                for fname in fnames:
+                    if not fname.startswith("."):
+                        files.append(os.path.join(root, fname))
+        else:
+            files.extend(glob.glob(path))
+    return sorted(set(files))
+
+
+def _parse_files(files: List[str], jobs: int = 0, quiet: bool = False) -> List[ParseResult]:
+    parse_results: List[ParseResult] = []
+    workers = jobs if jobs > 0 else min(8, max(1, len(files)))
+    if len(files) <= 1 or workers == 1:
+        for i, fpath in enumerate(files, 1):
+            fname = os.path.basename(fpath)
+            if not quiet:
+                print(f"  [{i}/{len(files)}] 解析: {fname} ...", end=" ", flush=True)
+            try:
+                result = auto_parse(fpath)
+                parse_results.append(result)
+                if not quiet:
+                    print(f"✓ ({result.stats.total} 事件)")
+            except Exception as e:
+                if not quiet:
+                    print(f"✗ 错误: {e}")
+                continue
+    else:
+        if not quiet:
+            print(f"  并行解析（{workers} 个线程）...")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_path = {pool.submit(auto_parse, fpath): fpath for fpath in files}
+            done = 0
+            for future in as_completed(future_to_path):
+                done += 1
+                fpath = future_to_path[future]
+                fname = os.path.basename(fpath)
+                try:
+                    result = future.result()
+                    parse_results.append(result)
+                    if not quiet:
+                        print(f"  [{done}/{len(files)}] ✓ {fname} ({result.stats.total} 事件)")
+                except Exception as e:
+                    if not quiet:
+                        print(f"  [{done}/{len(files)}] ✗ {fname}: {e}")
+    return parse_results
+
+
+def _make_synthetic_p0_log(size_mb: int) -> Path:
+    size_mb = max(1, size_mb)
+    fd, path_text = tempfile.mkstemp(prefix="bla-benchmark-", suffix=".jsonl")
+    os.close(fd)
+    path = Path(path_text)
+    row_templates = [
+        '{{"log_type":"waf","time":"2024-03-15 10:00:{sec:02d}","src_ip":"8.8.8.{octet}","host":"www.example.com","uri":"/login?id=1 UNION SELECT NULL--","action":"block","attack_type":"SQL Injection","status":"403"}}\n',
+        '{{"log_type":"vpn","time":"2024-03-15 10:01:{sec:02d}","user":"alice","src_ip":"8.8.8.{octet}","result":"failed","reason":"bad password"}}\n',
+        '{{"log_type":"dns","time":"2024-03-15 10:02:{sec:02d}","client_ip":"10.0.0.{octet}","query":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.evil.example","rcode":"NOERROR"}}\n',
+        '{{"log_type":"proxy","time":"2024-03-15 10:03:{sec:02d}","src_ip":"10.0.0.{octet}","url":"http://evil.example/a.sh","bytes_out":"2048","action":"allow"}}\n',
+        '{{"log_type":"edr","time":"2024-03-15 10:04:{sec:02d}","host":"win-{octet}","severity":"high","alert":"webshell beacon","process":"java.exe"}}\n',
+    ]
+    target = size_mb * 1024 * 1024
+    written = 0
+    i = 0
+    with open(path, "w", encoding="utf-8") as f:
+        while written < target:
+            line = row_templates[i % len(row_templates)].format(sec=i % 60, octet=(i % 200) + 1)
+            f.write(line)
+            written += len(line.encode("utf-8"))
+            i += 1
+    return path
+
+
 def main():
+    if _dispatch_subcommand(sys.argv):
+        return
+
     parser = argparse.ArgumentParser(
         prog="bla",
         description="BlueTeam Log Analyzer - 蓝队应急响应日志分析工具",
@@ -68,8 +295,13 @@ def main():
 
     parser.add_argument(
         "paths",
-        nargs="+",
+        nargs="*",
         help="日志文件或目录路径（支持通配符）",
+    )
+    parser.add_argument(
+        "--list-log-sources",
+        action="store_true",
+        help="打印应急日志源采集优先级清单后退出",
     )
     parser.add_argument(
         "--html",
@@ -167,6 +399,13 @@ def main():
 
     args = parser.parse_args()
 
+    if args.list_log_sources:
+        print(format_log_source_priorities())
+        sys.exit(0)
+
+    if not args.paths:
+        parser.error("缺少日志文件或目录路径；查看采集优先级可使用 --list-log-sources")
+
     if args.max_alerts < 0:
         print("❌ 错误：--max-alerts 不能小于 0", file=sys.stderr)
         sys.exit(1)
@@ -198,65 +437,25 @@ def main():
         sys.exit(1)
 
     # 收集所有文件
-    files = []
-    for path in args.paths:
-        if os.path.isfile(path):
-            files.append(path)
-        elif os.path.isdir(path):
-            for root, _, fnames in os.walk(path):
-                for fname in fnames:
-                    if not fname.startswith("."):
-                        files.append(os.path.join(root, fname))
-        else:
-            # 通配符
-            files.extend(glob.glob(path))
+    files = _collect_files(args.paths)
 
     if not files:
         print("❌ 错误：未找到任何日志文件", file=sys.stderr)
         sys.exit(1)
 
-    # 去重
-    files = sorted(set(files))
     print(f"\n🔍 开始分析 {len(files)} 个文件...\n")
 
     # 解析所有文件
     reset_counter()
-    parse_results: List[ParseResult] = []
-
-    # gen_id 是全局计数器，多线程并行解析时事件 ID 仍唯一（GIL 保证 +=
-    # 原子）；多进程会破坏计数器一致性，因此只用线程池。1 个文件时不引入
-    # 线程开销。
-    workers = args.jobs if args.jobs > 0 else min(8, max(1, len(files)))
-    if len(files) <= 1 or workers == 1:
-        for i, fpath in enumerate(files, 1):
-            fname = os.path.basename(fpath)
-            print(f"  [{i}/{len(files)}] 解析: {fname} ...", end=" ", flush=True)
-            try:
-                result = auto_parse(fpath)
-                parse_results.append(result)
-                print(f"✓ ({result.stats.total} 事件)")
-            except Exception as e:
-                print(f"✗ 错误: {e}")
-                continue
-    else:
-        print(f"  并行解析（{workers} 个线程）...")
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            future_to_path = {pool.submit(auto_parse, fpath): fpath for fpath in files}
-            done = 0
-            for future in as_completed(future_to_path):
-                done += 1
-                fpath = future_to_path[future]
-                fname = os.path.basename(fpath)
-                try:
-                    result = future.result()
-                    parse_results.append(result)
-                    print(f"  [{done}/{len(files)}] ✓ {fname} ({result.stats.total} 事件)")
-                except Exception as e:
-                    print(f"  [{done}/{len(files)}] ✗ {fname}: {e}")
+    parse_results = _parse_files(files, args.jobs)
 
     if not parse_results:
         print("\n❌ 所有文件解析失败", file=sys.stderr)
         sys.exit(1)
+
+    # 先归一化/富化字段，白名单和后续检测都能用 source_type、asset、event_family 等稳定字段。
+    for result in parse_results:
+        enrich_events(result.events)
 
     if args.allowlist:
         try:

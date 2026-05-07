@@ -120,6 +120,7 @@ def generate_sarif_report(
                     "risk_level": summary.risk_level.value,
                     "files_analyzed": summary.files_analyzed,
                     "total_events": summary.total_events,
+                    "incident_count": len(summary.incidents),
                 },
             }
         ],

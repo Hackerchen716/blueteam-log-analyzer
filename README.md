@@ -13,19 +13,22 @@
 
 ## 功能特性
 
-- **多格式解析**：Windows XML/EVTX、Linux auth.log/secure、Apache/Nginx 访问日志、通用文本日志（自动识别类型）
+- **多格式解析**：Windows XML/EVTX、Linux auth.log/secure、Apache/Nginx 访问日志、HVV/重保 P0 结构化日志、通用文本日志（自动识别类型）
 - **70+ 检测规则**：覆盖 MITRE ATT&CK 9 个阶段，包括暴力破解、密码喷洒、横向移动、权限提升、持久化、防御规避、凭据访问、Web 攻击等
 - **护网/重保画像**：`--profile cn-hvv` 增强 Shiro、Fastjson、Struts2、ThinkPHP、WebLogic、Spring、Webshell 等国内常见痕迹检测
 - **攻击链还原**：自动关联多文件事件，还原 ATT&CK 攻击链
+- **P0 多源关联案件**：对 WAF、VPN、堡垒机、DNS、代理、防火墙、EDR、应用日志做归一化、富化和跨源关联，输出 incident 级案件视图
 - **IOC 提取**：一键导出 IP、域名、URL、文件路径、Hash、账户、进程和可疑命令
-- **白名单压制**：支持 JSON allowlist 过滤可信 IP、账户、路径、进程、UA，降低真实环境误报
+- **白名单/基线压制**：支持 JSON allowlist 过滤可信 IP、账户、路径、进程、UA，并支持可信扫描器、维护窗口、规则级 suppress，降低真实环境误报
 - **风险评分**：0-100 综合评分，4 级威胁分级（严重/高危/中危/低危）
+- **HVV/重保采集矩阵**：内置边界、身份、终端、流量、应用、数据库、云原生、协同办公等日志源优先级，可用 `--list-log-sources` 快速查看
 - **多格式输出**：终端彩色报告、独立 HTML 报告（含离线图表）、JSON、CSV、IOC 文本、**SARIF 2.1.0**（GitHub Code Scanning 兼容）
 - **一键报告目录**：`--out report/` 自动生成 HTML、JSON、CSV、IOC、SARIF 五类标准产物
 - **可配置阈值**：暴力破解 / DDoS / 密码喷洒等阈值集中管理，支持 `--config thresholds.json` 与 `BLA_THRESHOLD_*` 环境变量覆盖，适配不同业务环境
 - **YAML 规则扩展**：支持 `--rules` 加载自定义 Web 检测规则目录，保持零依赖同时方便二次开发
+- **规则质量工具**：`bla validate-rules` 校验规则元数据与正则可编译性，`bla benchmark` 评估解析/检测吞吐，`bla explain` 从 JSON 报告解释告警或案件证据
 - **CI 友好**：`--exit-on {none,critical,high,medium}` 让流水线按需要的告警级别决定门禁
-- **大文件友好**：Linux auth.log 与 Web access.log 使用逐行解析路径，多个文件可用 `-j N` 并行处理
+- **大文件友好**：Linux auth.log、Web access.log 与 P0 JSONL/key=value/CSV 日志使用逐行解析路径，多个文件可用 `-j N` 并行处理
 - **完全离线**：无网络请求，无 AI 调用，所有规则内置，适合隔离网络环境
 - **零依赖**：Python 3.9+ 标准库即可运行
 
@@ -39,7 +42,45 @@
 | Windows EVTX | `.evtx`（二进制） | 需安装 `python-evtx`（可选） |
 | Linux 认证日志 | `auth.log` / `secure` | SSH / Sudo / PAM / useradd |
 | Web 访问日志 | Apache/Nginx Combined | SQL 注入/XSS/LFI/RCE/扫描器检测 |
+| HVV/重保 P0 结构化日志 | CSV / JSONL / JSON 数组 / key=value | WAF、VPN、堡垒机、DNS、代理/NAT、防火墙、EDR、应用日志 |
 | 通用文本日志 | 任意格式 | 关键字提取与告警 |
+
+### HVV / 重保日志源采集矩阵
+
+这份矩阵用于 HVV、重保和大型应急响应现场安排日志拉取顺序。它不是简单罗列“能拿什么日志”，而是按攻击链研判价值分成三档：
+
+- `P0`：第一轮必采，直接支撑入口确认、账号突破、主机失陷、C2 外联、横向移动、数据访问等关键判断。
+- `P1`：第二轮补全攻击链，用于交叉验证、扩大排查、确认影响面和处置闭环。
+- `P2`：溯源、影响评估和运营支撑材料，用于确认资产归属、变更背景、日志缺口、备份恢复点等。
+
+完整矩阵可直接由 CLI 输出，包含优先级、类别、类型、重要性、必备字段、研判重点和建议时间窗：
+
+```bash
+bla --list-log-sources
+```
+
+第一轮 `P0` 必采源建议优先覆盖：
+
+| 类别 | P0 日志源 | 核心价值 |
+| --- | --- | --- |
+| 边界入口 | WAF / Web 安全网关日志 | 确认攻击载荷、命中规则、真实源 IP 和被打入口 |
+| 边界入口 | CDN / SLB / 反向代理访问日志 | 还原真实客户端、转发链路和后端实例 |
+| Web 与应用 | Web 服务器 access.log | 识别扫描、漏洞利用、Webshell 访问和批量下载 |
+| Web 与应用 | 业务应用日志 | 定位鉴权绕过、反序列化、命令执行、越权和业务异常 |
+| 身份与远程接入 | VPN / SSL VPN / 零信任登录日志 | 发现弱口令、撞库、异地登录和异常设备 |
+| 身份与远程接入 | 堡垒机登录与命令审计 | 还原运维跳转、命令执行、文件落地和会话时间线 |
+| 身份与权限 | AD / 域控 Security 日志 | 识别域账号爆破、票据滥用、横向移动、提权和权限变更 |
+| 身份与权限 | IAM / SSO / MFA 审计日志 | 确认单点登录异常、MFA 绕过、云账号滥用和权限扩大 |
+| 主机与终端 | EDR / XDR 告警与终端行为 | 还原木马落地、进程执行、横向移动和查杀隔离情况 |
+| 主机与终端 | Windows 安全日志 / Sysmon | 追踪登录、进程、计划任务、服务安装、网络连接和持久化 |
+| 主机与终端 | Linux auth.log / secure / auditd | 识别 SSH 爆破、提权、账号变更、敏感文件访问和持久化 |
+| 流量与解析 | DNS 解析日志 | 发现 C2、DGA、DNS 隧道、恶意域名访问和感染主机 |
+| 流量与解析 | 出口代理 / 上网行为 / SWG 日志 | 确认 C2 回连、恶意下载、数据外传和访问链路 |
+| 流量与解析 | 边界防火墙 / NAT / 会话日志 | 还原南北向访问、源地址映射、出入口连接和大流量传输 |
+| 流量与解析 | NDR / 天眼 / 全流量探针告警 | 发现漏洞利用、C2、横向移动、内网扫描和数据外传线索 |
+| 数据与中间件 | 核心数据库审计日志 | 识别拖库、越权查询、高危 DDL/DML 和敏感表访问 |
+| 云与容器 | 云平台审计日志 | 确认云账号接管、AK 滥用、权限变更和安全策略关闭 |
+| 云与容器 | Kubernetes API 审计日志 | 识别 exec、Secret 读取、RBAC 变更和集群接管 |
 
 ---
 
@@ -180,6 +221,15 @@ bla logs/ --allowlist docs/allowlist-example.json --html report.html
 # 加载自定义 YAML 规则目录（可多次指定，也可用 BLA_RULES_DIR）
 bla logs/ --rules ./my-rules --profile cn-hvv --out report/
 
+# 校验规则元数据与正则
+bla validate-rules --strict-metadata
+
+# 对合成 P0 日志做性能基准，也可传真实日志路径
+bla benchmark --size-mb 100
+
+# 从 JSON 报告解释某个案件或告警
+bla explain inc-001 --report incident_report/report.json
+
 # 详细模式（显示所有高危以上事件）
 bla auth.log --verbose
 
@@ -188,6 +238,9 @@ bla auth.log --max-alerts 100
 
 # 分析历史 syslog/auth.log（日志本身不含年份时指定年份）
 bla auth.log --syslog-year 2024
+
+# 查看应急日志源采集优先级
+bla --list-log-sources
 
 # 禁用彩色输出（重定向到文件时使用）
 bla auth.log --no-color > report.txt

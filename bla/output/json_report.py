@@ -59,6 +59,7 @@ def generate_json_report(
             for r in parse_results
         ],
         "alerts": [a.to_dict() for a in summary.alerts],
+        "incidents": [incident.to_dict() for incident in summary.incidents],
         "attack_chain": [
             {
                 "phase":       c.phase,

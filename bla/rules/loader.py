@@ -26,6 +26,11 @@ class WebAttackRule:
     name: str
     mitre: str
     tags: List[str]
+    confidence: str = "medium"
+    source_types: List[str] = None
+    evidence_fields: List[str] = None
+    false_positive_hints: List[str] = None
+    remediation: str = ""
 
 
 _RULE_DIRS: Tuple[str, ...] = ()
@@ -53,6 +58,48 @@ def reset_rule_cache() -> None:
 def get_web_attack_rules() -> List[WebAttackRule]:
     """读取内置规则和用户自定义规则。用户规则优先生效。"""
     return list(_load_web_attack_rules_cached(_RULE_DIRS))
+
+
+def validate_web_attack_rules(rule_dirs: Iterable[str] = ()) -> Dict[str, Any]:
+    """Validate built-in and custom web rule metadata without running detection."""
+    normalized_dirs = tuple(os.path.abspath(path) for path in rule_dirs if path)
+    raw_rules: List[Tuple[str, Dict[str, Any]]] = []
+    for directory in normalized_dirs:
+        if not os.path.isdir(directory):
+            raise ValueError(f"规则目录不存在: {directory}")
+        for fname in sorted(os.listdir(directory)):
+            if not fname.lower().endswith((".yaml", ".yml")):
+                continue
+            path = os.path.join(directory, fname)
+            with open(path, "r", encoding="utf-8") as f:
+                raw_rules.extend((path, item) for item in _extract_web_attacks(_load_yamlish(f.read())))
+    raw_rules.extend(("<builtin:web_attacks.yaml>", item) for item in _load_builtin_rules())
+
+    issues: List[Dict[str, str]] = []
+    compiled = 0
+    required = ("id", "name", "mitre", "tags", "patterns")
+    metadata = ("source_types", "evidence_fields", "false_positive_hints", "remediation")
+    for source, raw in raw_rules:
+        rule_name = str(raw.get("id") or raw.get("rule_id") or raw.get("name") or "<unnamed>")
+        for field in required:
+            if field not in raw:
+                issues.append({"severity": "error", "source": source, "rule": rule_name, "message": f"缺少必填字段: {field}"})
+        if "severity" not in raw and "level" not in raw:
+            issues.append({"severity": "error", "source": source, "rule": rule_name, "message": "缺少必填字段: severity 或 level"})
+        for field in metadata:
+            if field not in raw:
+                issues.append({"severity": "warning", "source": source, "rule": rule_name, "message": f"缺少规则元数据: {field}"})
+        try:
+            compiled += len(_compile_web_rule(raw))
+        except Exception as exc:
+            issues.append({"severity": "error", "source": source, "rule": rule_name, "message": f"规则无法编译: {exc}"})
+    return {
+        "raw_rules": len(raw_rules),
+        "compiled_patterns": compiled,
+        "errors": sum(1 for item in issues if item["severity"] == "error"),
+        "warnings": sum(1 for item in issues if item["severity"] == "warning"),
+        "issues": issues,
+    }
 
 
 @lru_cache(maxsize=8)
@@ -121,7 +168,7 @@ def _compile_web_rule(raw: Dict[str, Any]) -> List[WebAttackRule]:
     tags = raw.get("tags") or []
     if isinstance(tags, str):
         tags = [tags]
-    level_name = str(raw.get("level") or "medium").lower()
+    level_name = str(raw.get("severity") or raw.get("level") or "medium").lower()
     level = {
         "critical": ThreatLevel.CRITICAL,
         "high": ThreatLevel.HIGH,
@@ -129,6 +176,12 @@ def _compile_web_rule(raw: Dict[str, Any]) -> List[WebAttackRule]:
         "low": ThreatLevel.LOW,
         "info": ThreatLevel.INFO,
     }.get(level_name, ThreatLevel.MEDIUM)
+
+    confidence = str(raw.get("confidence") or "medium").lower()
+    source_types = _as_str_list(raw.get("source_types") or ["web", "waf", "application", "proxy"])
+    evidence_fields = _as_str_list(raw.get("evidence_fields") or ["url", "uri", "path", "request", "user_agent"])
+    false_positive_hints = _as_str_list(raw.get("false_positive_hints") or [])
+    remediation = str(raw.get("remediation") or "")
 
     flags = re.IGNORECASE
     compiled = []
@@ -141,8 +194,21 @@ def _compile_web_rule(raw: Dict[str, Any]) -> List[WebAttackRule]:
             name=name,
             mitre=mitre,
             tags=list(dict.fromkeys([str(tag) for tag in tags])),
+            confidence=confidence,
+            source_types=source_types,
+            evidence_fields=evidence_fields,
+            false_positive_hints=false_positive_hints,
+            remediation=remediation,
         ))
     return compiled
+
+
+def _as_str_list(value: Any) -> List[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if item not in (None, "")]
+    return []
 
 
 def _load_yamlish(text: str) -> Any:

@@ -16,6 +16,7 @@ from ..utils.helpers import gen_id, read_file, read_file_sample, safe_write
 from .windows_evtx import parse_windows_xml, parse_windows_evtx
 from .linux_auth import parse_linux_auth, parse_linux_auth_file
 from .web_access import parse_web_access, parse_web_access_file
+from .p0_security import looks_like_p0_security_log, parse_p0_security_file
 from .stats import compute_stats
 
 
@@ -27,6 +28,7 @@ def auto_parse(file_path: str) -> ParseResult:
       - Windows EVTX (.evtx)
       - Linux Auth (/var/log/auth.log, /var/log/secure)
       - Web Access (Apache/Nginx Combined)
+      - HVV / 重保 P0 结构化安全日志
       - 通用文本日志 (fallback)
     """
     fname = os.path.basename(file_path)
@@ -54,6 +56,11 @@ def auto_parse(file_path: str) -> ParseResult:
     # Web Access
     if _looks_like_web_log(sample_text[:500]):
         return parse_web_access_file(file_path, fname)
+
+    # HVV / 重保 P0 结构化安全日志：WAF、VPN、堡垒机、DNS、代理/NAT、
+    # 防火墙、EDR、应用日志等常见 CSV/JSON/key=value 导出。
+    if looks_like_p0_security_log(file_path, sample_text):
+        return parse_p0_security_file(file_path, fname)
 
     # Fallback: 通用日志
     content = read_file(file_path)

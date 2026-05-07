@@ -207,6 +207,40 @@ def generate_html_report(
             chain_parts.append('<div class="chain-arrow">→</div>')
     chain_html = "".join(chain_parts)
 
+    # Incident/case HTML
+    incidents_html = ""
+    for i, incident in enumerate(summary.incidents, 1):
+        color = _level_color_hex(incident.level)
+        evidence_items = "".join(f"<li>{_h(item)}</li>" for item in incident.evidence[:8])
+        action_items = "".join(f"<li>{_h(item)}</li>" for item in incident.recommended_actions)
+        next_logs = "".join(f"<code>{_h(item)}</code>" for item in incident.next_logs)
+        mini_timeline = "".join(
+            f"<li><span>{_h(item.timestamp)}</span>{_h(item.message)}</li>"
+            for item in incident.timeline[:6]
+        )
+        incidents_html += f"""
+        <div class="incident-card" style="border-left-color:{color};">
+          <div class="incident-head">
+            <span class="badge" style="background:{color};">{_h(incident.level.label)}</span>
+            <strong>#{i:02d} {_h(incident.title)}</strong>
+            <span class="phase-tag">置信度 {_h(incident.confidence)}</span>
+          </div>
+          <p>{_h(incident.description)}</p>
+          <div class="incident-meta">
+            <span>日志源: {_h(', '.join(incident.source_types[:8]) or '?')}</span>
+            <span>阶段: {_h(', '.join(incident.attack_phases[:8]) or '?')}</span>
+            <span>事件: {len(incident.affected_events)}</span>
+          </div>
+          <div class="incident-grid">
+            <div><h3>关键证据</h3><ul>{evidence_items}</ul></div>
+            <div><h3>处置动作</h3><ul>{action_items}</ul></div>
+          </div>
+          <div class="next-logs">{next_logs}</div>
+          <details><summary>案件时间线</summary><ul class="mini-timeline">{mini_timeline}</ul></details>
+        </div>"""
+    if not incidents_html:
+        incidents_html = '<div class="empty-state">暂无跨源关联案件</div>'
+
     # 文件列表 HTML
     files_html = ""
     for r in parse_results:
@@ -268,6 +302,15 @@ def generate_html_report(
   .card {{ background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }}
   .badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; color: #fff; }}
   .alert-card {{ border-radius: 8px; padding: 14px; margin-bottom: 12px; }}
+  .incident-card {{ background: var(--bg2); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 8px; padding: 14px; margin-bottom: 12px; }}
+  .incident-head {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }}
+  .incident-meta {{ display: flex; gap: 12px; flex-wrap: wrap; color: var(--text2); font-size: 11px; margin: 8px 0; }}
+  .incident-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 10px; }}
+  .incident-grid ul {{ margin-left: 16px; color: var(--text2); }}
+  .next-logs {{ display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }}
+  .next-logs code {{ background: #111827; border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; color: var(--accent); }}
+  .mini-timeline {{ margin: 8px 0 0 16px; color: var(--text2); }}
+  .mini-timeline span {{ color: var(--accent); margin-right: 8px; }}
   .alert-header {{ display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }}
   .alert-num {{ color: var(--text2); font-size: 11px; }}
   .alert-desc {{ margin-bottom: 8px; }}
@@ -339,7 +382,7 @@ def generate_html_report(
       <h1>🛡 BlueTeam Log Analyzer <span>| 蓝队应急响应日志分析报告</span></h1>
       <div class="header-meta">
         生成时间: {now} &nbsp;|&nbsp; 分析文件: {summary.files_analyzed} 个 &nbsp;|&nbsp;
-        总事件: {total_events} 条 &nbsp;|&nbsp; 告警: {len(summary.alerts)} 个
+        总事件: {total_events} 条 &nbsp;|&nbsp; 告警: {len(summary.alerts)} 个 &nbsp;|&nbsp; 案件: {len(summary.incidents)} 个
       </div>
     </div>
     <div class="risk-badge">
@@ -377,6 +420,10 @@ def generate_html_report(
       <div>{ip_bars_html}</div>
     </div>
   </div>
+
+  <!-- 告警 -->
+  <h2>🧩 应急案件视图 ({len(summary.incidents)})</h2>
+  <div>{incidents_html}</div>
 
   <!-- 告警 -->
   <h2>🚨 威胁告警 ({len(summary.alerts)})</h2>

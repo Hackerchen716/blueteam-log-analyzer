@@ -215,6 +215,7 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
     mitre: Optional[str] = None
     rule_id: Optional[str] = None
     rule_name: Optional[str] = None
+    rule_metadata: Dict[str, str] = {}
     display_path = decoded_path or path
     event_msg = f"{method} {display_path} -> {status}"
 
@@ -236,6 +237,12 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
             mitre     = rule.mitre
             rule_id   = rule.rule_id
             rule_name = rule.name
+            rule_metadata = {
+                "rule_confidence": rule.confidence,
+                "rule_remediation": rule.remediation,
+                "rule_false_positive_hints": "|".join(rule.false_positive_hints or []),
+                "rule_evidence_fields": "|".join(rule.evidence_fields or []),
+            }
             event_msg = f"{rule.name}: {method} {truncate(display_path, 100)} -> {status}"
             attack_detected = True
             break
@@ -301,6 +308,7 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
             "status":     status_str,
             "user_agent": ua or "",
             "referer":    referer or "",
+            **rule_metadata,
         },
         tags        = tags,
         mitre_attack= mitre,

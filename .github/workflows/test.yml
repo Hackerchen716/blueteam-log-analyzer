@@ -27,6 +27,9 @@ jobs:
       - name: Compile (syntax check)
         run: python -m compileall -q bla bla_cli.py setup.py tests
 
+      - name: Validate bundled rules
+        run: python bla_cli.py validate-rules --strict-metadata
+
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
 
@@ -40,3 +43,9 @@ jobs:
           rc=$?; [ $rc -eq 0 ] || [ $rc -eq 1 ] || exit $rc
           python bla_cli.py sample_logs/access.log --no-color --max-alerts 5
           rc=$?; [ $rc -eq 0 ] || [ $rc -eq 1 ] || exit $rc
+
+      - name: Build package
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: |
+          python -m pip install --upgrade build
+          python -m build

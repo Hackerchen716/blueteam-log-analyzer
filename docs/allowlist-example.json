@@ -27,5 +27,26 @@
     "known maintenance window"
   ],
   "rule_names": [],
-  "event_ids": []
+  "rule_ids": [],
+  "event_ids": [],
+  "source_types": [],
+  "tags": [],
+  "trusted_scanners": [
+    "10.0.0.50"
+  ],
+  "maintenance_windows": [
+    {
+      "start": "2024-03-15T01:00:00",
+      "end": "2024-03-15T02:00:00",
+      "hosts": ["app01"],
+      "source_types": ["bastion", "edr"]
+    }
+  ],
+  "suppressions": [
+    {
+      "rule_ids": ["WEB-SWAGGER-001"],
+      "ips": ["10.0.0.50"],
+      "messages": ["asset inventory scanner"]
+    }
+  ]
 }

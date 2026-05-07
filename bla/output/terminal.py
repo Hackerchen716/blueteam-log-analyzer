@@ -85,6 +85,7 @@ def print_terminal_report(
     out.write(f"  分析文件数:   {WHITE}{summary.files_analyzed}{RESET}\n")
     out.write(f"  总事件数:     {WHITE}{summary.total_events}{RESET}\n")
     out.write(f"  告警数量:     {WHITE}{len(summary.alerts)}{RESET}\n")
+    out.write(f"  关联案件:     {WHITE}{len(summary.incidents)}{RESET}\n")
 
     # 按级别统计
     total_events = sum(r.stats.total for r in parse_results)
@@ -131,6 +132,24 @@ def print_terminal_report(
                     out.write(f"    {GRAY}│{RESET}\n")
             else:
                 out.write(f"  {DIM}○ {phase}{RESET}\n")
+
+    # ── 应急案件视图 ──────────────────────────────────────
+    if summary.incidents:
+        out.write(_section("🧩 应急案件视图"))
+        for i, incident in enumerate(summary.incidents[:10], 1):
+            color = _level_color(incident.level)
+            out.write(f"\n  {BOLD}[INC-{i:02d}] {_level_badge(incident.level)} {color}{incident.title}{RESET}\n")
+            out.write(f"       {incident.description}\n")
+            out.write(f"       {DIM}置信度: {incident.confidence}  |  日志源: {', '.join(incident.source_types[:6]) or '?'}  |  事件: {len(incident.affected_events)}{RESET}\n")
+            if incident.evidence:
+                out.write(f"       {GRAY}关键证据:{RESET}\n")
+                for item in incident.evidence[:4]:
+                    out.write(f"         • {item}\n")
+            if incident.next_logs:
+                out.write(f"       {CYAN}建议补采: {', '.join(incident.next_logs[:5])}{RESET}\n")
+            if incident.recommended_actions:
+                out.write(f"       {YELLOW}处置动作: {incident.recommended_actions[0]}{RESET}\n")
+            out.write(f"  {_hr('─', 76)}\n")
 
     # ── 告警详情 ──────────────────────────────────────────
     out.write(_section("🚨 威胁告警"))

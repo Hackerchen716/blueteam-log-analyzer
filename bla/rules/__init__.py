@@ -5,6 +5,7 @@ from .loader import (
     get_web_attack_rules,
     reset_rule_cache,
     set_rule_dirs,
+    validate_web_attack_rules,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "get_web_attack_rules",
     "reset_rule_cache",
     "set_rule_dirs",
+    "validate_web_attack_rules",
 ]

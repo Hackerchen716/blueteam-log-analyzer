@@ -1,28 +1,43 @@
 web_attacks:
   - id: WEB-LOG4SHELL-001
     name: Log4Shell/JNDI 探测
-    level: critical
+    severity: critical
+    confidence: high
     category: Web攻击
     mitre: T1190
     tags: [log4shell, jndi, exploit, web-attack, cn-hvv]
+    source_types: [web, waf, application, proxy, dns]
+    evidence_fields: [url, uri, request, payload, user_agent, query]
+    false_positive_hints: [security scanner, vulnerability verification, benign JNDI test string]
+    remediation: 核查受影响 Java 应用与依赖版本，确认是否存在出网回连和命令执行痕迹。
     patterns:
       - '\$\{jndi:(?:ldap|rmi|dns|iiop)://'
 
   - id: WEB-NACOS-001
     name: Nacos 未授权/弱口令探测
-    level: high
+    severity: high
+    confidence: medium
     category: Web攻击
     mitre: T1190
     tags: [nacos, exploit, web-attack, cn-hvv]
+    source_types: [web, waf, application]
+    evidence_fields: [url, uri, path, status, user_agent]
+    false_positive_hints: [asset inventory scanner, exposed API documentation check]
+    remediation: 核查 Nacos 是否公网暴露，确认鉴权配置、默认口令和访问来源。
     patterns:
       - '/nacos/(?:v1/|index\.html|actuator|serverlist)'
       - 'Nacos-Server'
 
   - id: WEB-SWAGGER-001
     name: Swagger/OpenAPI 暴露探测
-    level: medium
+    severity: medium
+    confidence: medium
     category: 信息收集
     mitre: T1083
     tags: [swagger, openapi, recon, web-attack]
+    source_types: [web, waf, application]
+    evidence_fields: [url, uri, path, status, user_agent]
+    false_positive_hints: [internal crawler, uptime monitor, API gateway inventory]
+    remediation: 确认接口文档是否需要公网访问，不需要时限制来源或关闭生产环境暴露。
     patterns:
       - '/(?:swagger-ui|swagger-resources|v2/api-docs|v3/api-docs|openapi\.json)'

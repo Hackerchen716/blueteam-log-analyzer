@@ -174,6 +174,58 @@ class AttackChainEntry:
 
 
 @dataclass
+class Incident:
+    """跨日志源关联后的应急案件视图"""
+    id: str
+    title: str
+    description: str
+    level: ThreatLevel
+    confidence: str
+    affected_alerts: List[str]
+    affected_events: List[str]
+    source_ips: List[str]
+    accounts: List[str]
+    assets: List[str]
+    source_types: List[str]
+    attack_phases: List[str]
+    evidence: List[str]
+    timeline: List[TimelineEntry]
+    recommended_actions: List[str]
+    next_logs: List[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "description": self.description,
+            "level": self.level.value,
+            "confidence": self.confidence,
+            "affected_alerts": self.affected_alerts,
+            "affected_event_count": len(self.affected_events),
+            "source_ips": self.source_ips,
+            "accounts": self.accounts,
+            "assets": self.assets,
+            "source_types": self.source_types,
+            "attack_phases": self.attack_phases,
+            "evidence": self.evidence,
+            "timeline": [
+                {
+                    "timestamp": item.timestamp,
+                    "level": item.level.value,
+                    "category": item.category,
+                    "message": item.message,
+                    "event_id": item.event_id,
+                    "source_file": item.source_file,
+                    "mitre": item.mitre_attack,
+                }
+                for item in self.timeline
+            ],
+            "recommended_actions": self.recommended_actions,
+            "next_logs": self.next_logs,
+        }
+
+
+@dataclass
 class AnalysisSummary:
     """完整分析汇总"""
     risk_score: int
@@ -184,3 +236,4 @@ class AnalysisSummary:
     recommendations: List[str]
     total_events: int
     files_analyzed: int
+    incidents: List[Incident] = field(default_factory=list)
