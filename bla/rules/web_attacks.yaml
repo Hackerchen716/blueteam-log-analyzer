@@ -1,0 +1,28 @@
+web_attacks:
+  - id: WEB-LOG4SHELL-001
+    name: Log4Shell/JNDI 探测
+    level: critical
+    category: Web攻击
+    mitre: T1190
+    tags: [log4shell, jndi, exploit, web-attack, cn-hvv]
+    patterns:
+      - '\$\{jndi:(?:ldap|rmi|dns|iiop)://'
+
+  - id: WEB-NACOS-001
+    name: Nacos 未授权/弱口令探测
+    level: high
+    category: Web攻击
+    mitre: T1190
+    tags: [nacos, exploit, web-attack, cn-hvv]
+    patterns:
+      - '/nacos/(?:v1/|index\.html|actuator|serverlist)'
+      - 'Nacos-Server'
+
+  - id: WEB-SWAGGER-001
+    name: Swagger/OpenAPI 暴露探测
+    level: medium
+    category: 信息收集
+    mitre: T1083
+    tags: [swagger, openapi, recon, web-attack]
+    patterns:
+      - '/(?:swagger-ui|swagger-resources|v2/api-docs|v3/api-docs|openapi\.json)'

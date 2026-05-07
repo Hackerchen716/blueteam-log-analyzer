@@ -1,9 +1,10 @@
 """工具函数"""
 import datetime
 import ipaddress
+import os
 import re
 import sys
-from typing import Optional
+from typing import Iterator, Optional
 
 _counter = 0
 _syslog_year_override: Optional[int] = None
@@ -125,9 +126,33 @@ def detect_encoding(raw: bytes) -> str:
     except UnicodeDecodeError:
         return 'latin-1'
 
+def read_file_sample(path: str, max_bytes: int = 8192) -> str:
+    """读取文件开头一小段用于类型识别，避免为探测日志类型读完整大文件。"""
+    with open(path, 'rb') as f:
+        raw = f.read(max_bytes)
+    enc = detect_encoding(raw)
+    return raw.decode(enc, errors='replace')
+
 def read_file(path: str) -> str:
     """安全读取文件，自动处理编码"""
     with open(path, 'rb') as f:
         raw = f.read()
     enc = detect_encoding(raw)
     return raw.decode(enc, errors='replace')
+
+def iter_file_lines(path: str) -> Iterator[str]:
+    """逐行读取文本文件，保持与 read_file 相同的编码兜底策略。"""
+    enc = detect_encoding(_read_prefix(path))
+    with open(path, 'r', encoding=enc, errors='replace') as f:
+        for line in f:
+            yield line.rstrip('\n\r')
+
+def file_size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+def _read_prefix(path: str, max_bytes: int = 8192) -> bytes:
+    with open(path, 'rb') as f:
+        return f.read(max_bytes)

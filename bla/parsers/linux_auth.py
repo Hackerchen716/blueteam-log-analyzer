@@ -15,11 +15,12 @@ from __future__ import annotations
 import datetime
 import re
 import time
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from ..models import LogEvent, ParseResult, ThreatLevel
 from ..utils.helpers import (
-    MONTH_MAP, gen_id, get_syslog_year_override, normalize_timestamp, truncate,
+    MONTH_MAP, file_size, gen_id, get_syslog_year_override, iter_file_lines,
+    normalize_timestamp, truncate,
 )
 from .stats import compute_stats
 
@@ -47,6 +48,27 @@ _DISCONNECT_RE= re.compile(r'Disconnected from|Disconnecting', re.I)
 
 
 def parse_linux_auth(content: str, source_file: str) -> ParseResult:
+    return parse_linux_auth_lines(
+        content.splitlines(),
+        source_file,
+        file_size_bytes=len(content.encode()),
+    )
+
+
+def parse_linux_auth_file(path: str, source_file: Optional[str] = None) -> ParseResult:
+    """从文件逐行解析 Linux 认证日志，避免大文件一次性读入内存。"""
+    return parse_linux_auth_lines(
+        iter_file_lines(path),
+        source_file or path,
+        file_size_bytes=file_size(path),
+    )
+
+
+def parse_linux_auth_lines(
+    lines: Iterable[str],
+    source_file: str,
+    file_size_bytes: int = 0,
+) -> ParseResult:
     """解析 Linux 认证日志。
 
     解析阶段只输出"基础事实"：每条 ``Failed password`` 打 ``failed-login`` 标
@@ -55,7 +77,6 @@ def parse_linux_auth(content: str, source_file: str) -> ParseResult:
     阈值的判定全部交给 :mod:`bla.detection.engine`，确保规则只有一个真相源。
     """
     t0 = time.time()
-    lines = content.splitlines()
     events: List[LogEvent] = []
 
     # 跨年处理：syslog 时间戳不带年份，按字典序排序会把 12 月排在 1 月之后。
@@ -88,7 +109,7 @@ def parse_linux_auth(content: str, source_file: str) -> ParseResult:
         events        = events,
         stats         = stats,
         parse_time_ms = (time.time() - t0) * 1000,
-        file_size_bytes = len(content.encode()),
+        file_size_bytes = file_size_bytes,
     )
 
 

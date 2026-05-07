@@ -12,10 +12,10 @@ from typing import List
 
 from .. import config
 from ..models import ParseResult, LogEvent, ThreatLevel
-from ..utils.helpers import read_file, gen_id, safe_write
+from ..utils.helpers import gen_id, read_file, read_file_sample, safe_write
 from .windows_evtx import parse_windows_xml, parse_windows_evtx
-from .linux_auth import parse_linux_auth
-from .web_access import parse_web_access
+from .linux_auth import parse_linux_auth, parse_linux_auth_file
+from .web_access import parse_web_access, parse_web_access_file
 from .stats import compute_stats
 
 
@@ -36,24 +36,27 @@ def auto_parse(file_path: str) -> ParseResult:
     if fname_lower.endswith(".evtx"):
         return parse_windows_evtx(file_path)
 
-    # 读取文本内容
-    content = read_file(file_path)
-    sample  = content[:2000].lower()
+    # 先读取文件开头小样本用于类型识别。Linux/Web 日志会走逐行解析，
+    # 避免为了分析大文件把完整内容一次性加载到内存。
+    sample_text = read_file_sample(file_path)
+    sample  = sample_text[:2000].lower()
 
     # Windows XML
     if "<event" in sample and ("xmlns" in sample or "<eventid>" in sample):
+        content = read_file(file_path)
         return parse_windows_xml(content, fname)
 
     # Linux Auth
     if any(kw in fname_lower for kw in ("auth", "secure")) or \
        any(kw in sample for kw in ("sshd", "sudo:", "pam_unix", "useradd")):
-        return parse_linux_auth(content, fname)
+        return parse_linux_auth_file(file_path, fname)
 
     # Web Access
-    if _looks_like_web_log(content[:500]):
-        return parse_web_access(content, fname)
+    if _looks_like_web_log(sample_text[:500]):
+        return parse_web_access_file(file_path, fname)
 
     # Fallback: 通用日志
+    content = read_file(file_path)
     return _parse_generic(content, fname)
 
 

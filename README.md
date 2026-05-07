@@ -21,9 +21,11 @@
 - **白名单压制**：支持 JSON allowlist 过滤可信 IP、账户、路径、进程、UA，降低真实环境误报
 - **风险评分**：0-100 综合评分，4 级威胁分级（严重/高危/中危/低危）
 - **多格式输出**：终端彩色报告、独立 HTML 报告（含离线图表）、JSON、CSV、IOC 文本、**SARIF 2.1.0**（GitHub Code Scanning 兼容）
+- **一键报告目录**：`--out report/` 自动生成 HTML、JSON、CSV、IOC、SARIF 五类标准产物
 - **可配置阈值**：暴力破解 / DDoS / 密码喷洒等阈值集中管理，支持 `--config thresholds.json` 与 `BLA_THRESHOLD_*` 环境变量覆盖，适配不同业务环境
+- **YAML 规则扩展**：支持 `--rules` 加载自定义 Web 检测规则目录，保持零依赖同时方便二次开发
 - **CI 友好**：`--exit-on {none,critical,high,medium}` 让流水线按需要的告警级别决定门禁
-- **并行解析**：`-j N` 多线程同时处理多个日志文件
+- **大文件友好**：Linux auth.log 与 Web access.log 使用逐行解析路径，多个文件可用 `-j N` 并行处理
 - **完全离线**：无网络请求，无 AI 调用，所有规则内置，适合隔离网络环境
 - **零依赖**：Python 3.9+ 标准库即可运行
 
@@ -51,7 +53,7 @@
 | 权限提升 | 添加到特权组、Sudo 滥用、Root 直接登录 | T1098.001, T1548.003 |
 | 持久化 | 服务安装、计划任务创建、账户创建 | T1543.003, T1053.005, T1136 |
 | 防御规避 | 日志清除（EventID 1102/104）、审计策略修改 | T1070.001, T1562.002 |
-| 凭据访问 | Mimikatz 特征、LSASS 访问（EventID 4656） | T1003.001 |
+| 凭据访问 | Mimikatz 特征、LSASS 访问（Sysmon EventID 10） | T1003.001 |
 | 可疑执行 | 高危 PowerShell、LOLBins（certutil/regsvr32 等） | T1059.001, T1218 |
 | Web 攻击 | SQL 注入、XSS、路径遍历、命令注入、Webshell | T1190, T1059.007 |
 | 侦察 | 扫描器识别（Nikto/sqlmap/nmap）、敏感文件探测 | T1595, T1083 |
@@ -145,6 +147,15 @@ bla logs/ --ioc iocs.txt
 # 同时生成所有格式
 bla logs/ --html report.html --json report.json --csv events.csv --ioc iocs.txt
 
+# 一键生成标准报告目录
+bla logs/ --out incident_report/
+# incident_report/
+# ├── index.html
+# ├── report.json
+# ├── events.csv
+# ├── iocs.txt
+# └── report.sarif
+
 # 生成 SARIF 报告（可上传到 GitHub Code Scanning）
 bla logs/ --sarif report.sarif
 gh code-scanning upload-sarif --sarif report.sarif
@@ -165,6 +176,9 @@ bla logs/ --profile cn-hvv --html report.html --ioc iocs.txt
 
 # 使用白名单压制已知可信噪音
 bla logs/ --allowlist docs/allowlist-example.json --html report.html
+
+# 加载自定义 YAML 规则目录（可多次指定，也可用 BLA_RULES_DIR）
+bla logs/ --rules ./my-rules --profile cn-hvv --out report/
 
 # 详细模式（显示所有高危以上事件）
 bla auth.log --verbose
@@ -330,9 +344,39 @@ python3 -m unittest discover -s tests -v
 - `--allowlist` 白名单误报压制
 - 大型日志可通过 `--max-alerts` 控制终端告警展示数量
 - 可通过 `--syslog-year` 固定 Linux syslog 无年份时间戳
+- `--out` 标准报告目录可一次生成 HTML/JSON/CSV/IOC/SARIF
+- 内置 YAML Web 规则与 `--rules` 自定义规则加载
+- 自动识别 Linux/Web 日志时可走逐行解析路径，避免大文件一次性读入内存
 
 更多可用于评估 BLA 的公开日志与靶场资源见 [测试资源推荐清单](docs/testing-resources.md)。
 SecRepo 真实样本的完整复现实测见 [SecRepo 真实样本实测记录](docs/secrepo-demo.md)。
+
+---
+
+## 自定义规则
+
+BLA 支持加载简单 YAML Web 检测规则。规则文件可放在任意目录中，通过 `--rules` 指定；每个 `.yaml` / `.yml` 文件可包含一个 `web_attacks` 列表。
+
+```yaml
+web_attacks:
+  - id: WEB-CUSTOM-001
+    name: 自定义漏洞探测
+    level: high
+    category: Web攻击
+    mitre: T1190
+    tags: [custom, exploit, web-attack]
+    patterns:
+      - '/custom-vuln-probe'
+      - 'custom_payload='
+```
+
+运行：
+
+```bash
+bla access.log --rules ./rules --out report/
+```
+
+内置 Web YAML 规则位于 `bla/rules/web_attacks.yaml`，当前包含 Log4Shell/JNDI、Nacos、Swagger/OpenAPI 暴露等规则。未安装 PyYAML 时，BLA 会使用内置的轻量 YAML 子集解析器；如需更完整的 YAML 语法，可自行安装 PyYAML。
 
 ---
 
@@ -346,6 +390,9 @@ blueteam-log-analyzer/
 │   ├── config.py           # 阈值配置中心（支持环境变量 / JSON 覆盖）
 │   ├── allowlist.py        # 白名单过滤
 │   ├── ioc.py              # IOC 提取（支持基于告警的高置信度模式）
+│   ├── rules/
+│   │   ├── loader.py       # YAML 规则加载器（PyYAML 可选，内置轻量解析器）
+│   │   └── web_attacks.yaml# 内置 Web 扩展规则
 │   ├── parsers/
 │   │   ├── __init__.py     # 自动类型识别路由
 │   │   ├── windows_evtx.py # Windows 事件日志解析（XML/EVTX）
@@ -360,7 +407,8 @@ blueteam-log-analyzer/
 │   │   ├── json_report.py  # JSON 报告输出
 │   │   ├── csv_report.py   # CSV 事件导出
 │   │   ├── ioc_report.py   # IOC 清单导出
-│   │   └── sarif_report.py # SARIF 2.1.0 输出（接入 GitHub Code Scanning 等）
+│   │   ├── sarif_report.py # SARIF 2.1.0 输出（接入 GitHub Code Scanning 等）
+│   │   └── bundle.py       # --out 标准报告目录生成
 │   └── utils/
 │       └── helpers.py      # 工具函数
 ├── docs/
@@ -387,8 +435,8 @@ blueteam-log-analyzer/
 - **准确率优先**：规则基于真实攻击场景设计，参考 Hayabusa、DeepBlueCLI、Sigma 等成熟项目的检测逻辑
 - **完全离线**：无网络请求，无外部 API 调用，适合隔离网络和保密环境
 - **零依赖**：Python 3.9+ 标准库即可运行，EVTX 二进制解析为可选依赖
-- **高性能**：1000 行日志解析耗时 < 100ms
-- **可扩展**：规则以 Python 代码形式组织，易于添加自定义检测逻辑
+- **高性能**：Linux/Web 日志逐行解析，多文件可并行处理
+- **可扩展**：核心聚合规则使用 Python，Web 攻击特征支持 YAML 外置扩展
 
 ---
 
@@ -410,7 +458,7 @@ blueteam-log-analyzer/
 
 ## 贡献
 
-欢迎提交 Issue 和 Pull Request。如需添加新的检测规则，请参考 `bla/detection/engine.py` 中的规则格式。
+欢迎提交 Issue 和 Pull Request。如需添加新的 Web 检测规则，可优先参考 `bla/rules/web_attacks.yaml`；如需添加跨事件聚合规则，请参考 `bla/detection/engine.py`。
 
 ---
 

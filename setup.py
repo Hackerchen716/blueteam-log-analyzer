@@ -11,6 +11,10 @@ setup(
     license="MIT",
     python_requires=">=3.9",
     packages=find_packages(),
+    include_package_data=True,
+    package_data={
+        "bla.rules": ["*.yaml", "*.yml"],
+    },
     py_modules=["bla_cli"],
     entry_points={
         "console_scripts": [

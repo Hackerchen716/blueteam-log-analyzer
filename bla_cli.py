@@ -36,6 +36,7 @@ from bla.config import (
 from bla.parsers import auto_parse
 from bla.detection import run_detection
 from bla.allowlist import apply_allowlist, load_allowlist
+from bla.rules import set_rule_dirs
 from bla.output import (
     print_terminal_report,
     generate_html_report,
@@ -43,6 +44,7 @@ from bla.output import (
     generate_csv_report,
     generate_ioc_report,
     generate_sarif_report,
+    generate_report_bundle,
 )
 from bla.utils.helpers import reset_counter, safe_print as print, set_syslog_year
 from bla.models import ParseResult, ThreatLevel
@@ -95,9 +97,20 @@ def main():
         help="生成 SARIF 2.1.0 报告（可上传到 GitHub Code Scanning 等）",
     )
     parser.add_argument(
+        "--out",
+        metavar="DIR",
+        help="生成标准报告目录（index.html/report.json/events.csv/iocs.txt/report.sarif）",
+    )
+    parser.add_argument(
         "--config",
         metavar="FILE",
         help="加载自定义阈值 JSON（覆盖暴力破解 / DDoS 等内置阈值）",
+    )
+    parser.add_argument(
+        "--rules",
+        action="append",
+        metavar="DIR",
+        help="加载自定义 YAML 规则目录（可多次指定，当前支持 web_attacks 规则）",
     )
     parser.add_argument(
         "--exit-on",
@@ -172,6 +185,17 @@ def main():
         except Exception as e:
             print(f"❌ 错误：阈值文件加载失败: {e}", file=sys.stderr)
             sys.exit(1)
+
+    rule_dirs = []
+    if os.environ.get("BLA_RULES_DIR"):
+        rule_dirs.extend([p for p in os.environ["BLA_RULES_DIR"].split(os.pathsep) if p])
+    if args.rules:
+        rule_dirs.extend(args.rules)
+    try:
+        set_rule_dirs(rule_dirs)
+    except Exception as e:
+        print(f"❌ 错误：规则目录加载失败: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # 收集所有文件
     files = []
@@ -269,6 +293,8 @@ def main():
         generate_ioc_report(parse_results, summary, args.ioc)
     if args.sarif:
         generate_sarif_report(parse_results, summary, args.sarif)
+    if args.out:
+        generate_report_bundle(parse_results, summary, args.out)
 
     # 退出码：可通过 --exit-on 控制触发等级
     threshold = _EXIT_THRESHOLDS.get(args.exit_on)

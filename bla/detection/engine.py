@@ -334,12 +334,15 @@ def detect_web_attacks(events: List[LogEvent]) -> List[DetectionAlert]:
         "路径/编码绕过":"T1140",
     }
     for attack_type, evts in by_type.items():
-        critical_count = sum(1 for e in evts if e.level == ThreatLevel.CRITICAL)
-        level = (ThreatLevel.CRITICAL if critical_count > 0 else
-                 ThreatLevel.HIGH if len(evts) >= 10 else ThreatLevel.MEDIUM)
+        max_event_level = max((e.level for e in evts), key=lambda lvl: lvl.score)
+        level = max_event_level
+        if len(evts) >= 10 and level.score < ThreatLevel.HIGH.score:
+            level = ThreatLevel.HIGH
         ips = sorted(set(e.ip for e in evts if e.ip))
+        event_rule_ids = sorted(set(e.rule_id for e in evts if e.rule_id))
+        alert_rule_id = event_rule_ids[0] if len(event_rule_ids) == 1 else f"WEB-{attack_type[:4].upper()}"
         alerts.append(DetectionAlert(
-            id="a"+gen_id("wa"), rule_id=f"WEB-{attack_type[:4].upper()}",
+            id="a"+gen_id("wa"), rule_id=alert_rule_id,
             rule_name=f"Web攻击: {attack_type}",
             description=f"检测到 {len(evts)} 次 {attack_type} 攻击尝试",
             level=level, category="Web攻击",
@@ -349,7 +352,7 @@ def detect_web_attacks(events: List[LogEvent]) -> List[DetectionAlert]:
                       f"来源IP: {', '.join(ips[:3])}", f"示例: {evts[0].message}"],
             recommendation=f"修复 {attack_type} 漏洞，部署 WAF，封锁攻击源 IP",
             timestamp=max(e.timestamp for e in evts),
-            confidence="high" if critical_count > 0 else "medium",
+            confidence="high" if level.score >= ThreatLevel.HIGH.score else "medium",
         ))
     return alerts
 

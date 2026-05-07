@@ -16,12 +16,13 @@ from __future__ import annotations
 import re
 import time
 from collections import defaultdict
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import unquote_plus
 
 from .. import config
 from ..models import LogEvent, ParseResult, ParseStats, ThreatLevel
-from ..utils.helpers import gen_id, normalize_timestamp, truncate
+from ..rules import get_web_attack_rules
+from ..utils.helpers import file_size, gen_id, iter_file_lines, normalize_timestamp, truncate
 from .stats import compute_stats
 
 # Combined Log Format
@@ -102,8 +103,28 @@ _ATTACK_PATTERNS: List[Tuple[re.Pattern, ThreatLevel, str, str, str, List[str]]]
 
 
 def parse_web_access(content: str, source_file: str) -> ParseResult:
+    return parse_web_access_lines(
+        content.splitlines(),
+        source_file,
+        file_size_bytes=len(content.encode()),
+    )
+
+
+def parse_web_access_file(path: str, source_file: Optional[str] = None) -> ParseResult:
+    """从文件逐行解析 Web access log，适配较大的访问日志。"""
+    return parse_web_access_lines(
+        iter_file_lines(path),
+        source_file or path,
+        file_size_bytes=file_size(path),
+    )
+
+
+def parse_web_access_lines(
+    lines: Iterable[str],
+    source_file: str,
+    file_size_bytes: int = 0,
+) -> ParseResult:
     t0 = time.time()
-    lines = content.splitlines()
     events: List[LogEvent] = []
 
     # 第一遍：解析所有请求。
@@ -155,7 +176,7 @@ def parse_web_access(content: str, source_file: str) -> ParseResult:
         events        = events,
         stats         = stats,
         parse_time_ms = (time.time() - t0) * 1000,
-        file_size_bytes = len(content.encode()),
+        file_size_bytes = file_size_bytes,
     )
 
 
@@ -192,6 +213,7 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
     cat       = "Web"
     tags: List[str] = []
     mitre: Optional[str] = None
+    rule_id: Optional[str] = None
     rule_name: Optional[str] = None
     display_path = decoded_path or path
     event_msg = f"{method} {display_path} -> {status}"
@@ -206,7 +228,21 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
     ])
     attack_detected = False
 
+    for rule in get_web_attack_rules():
+        if rule.pattern.search(check_str):
+            level     = rule.level
+            cat       = rule.category
+            tags      = list(dict.fromkeys(rule.tags + ["web-attack"]))
+            mitre     = rule.mitre
+            rule_id   = rule.rule_id
+            rule_name = rule.name
+            event_msg = f"{rule.name}: {method} {truncate(display_path, 100)} -> {status}"
+            attack_detected = True
+            break
+
     for pattern, lvl, category, name, attack_id, attack_tags in _ATTACK_PATTERNS:
+        if attack_detected:
+            break
         if pattern.search(check_str):
             level     = lvl
             cat       = category
@@ -268,6 +304,7 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
         },
         tags        = tags,
         mitre_attack= mitre,
+        rule_id     = rule_id,
         rule_name   = rule_name,
     )
 
