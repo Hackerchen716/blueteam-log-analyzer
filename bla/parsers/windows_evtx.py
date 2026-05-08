@@ -119,6 +119,22 @@ def _augment_auth_details(eid: int, details: Dict[str, str]) -> None:
     details["subject_user"] = _pick_first(details, "SubjectUserName")
     details["subject_domain"] = _pick_first(details, "SubjectDomainName")
 
+
+def _augment_4688_details(eid: int, details: Dict[str, str]) -> None:
+    if eid != 4688:
+        return
+
+    parent = _pick_first(details, "ParentProcessName", "CreatorProcessName")
+    child_path = _pick_first(details, "NewProcessName", "ProcessName")
+    child = ""
+    if child_path:
+        child = child_path.replace("/", "\\").rsplit("\\", 1)[-1]
+
+    details["parent_process"] = parent
+    details["child_process"] = child
+    details["child_path"] = child_path
+    details["command_line"] = _pick_first(details, "CommandLine")
+
 # Windows 事件 ID 规则库
 # 格式: event_id -> (level, category, message_fn, tags, mitre, rule_name)
 _WIN_RULES: Dict[int, dict] = {
@@ -413,6 +429,7 @@ def _parse_xml_event(xml_text: str, source_file: str) -> Optional[LogEvent]:
                 details[name] = val.strip()
 
     _augment_auth_details(eid, details)
+    _augment_4688_details(eid, details)
 
     user    = details.get("account_name") or details.get("TargetUserName") or details.get("SubjectUserName") or ""
     ip      = details.get("source_ip") or details.get("IpAddress") or details.get("SourceAddress") or ""

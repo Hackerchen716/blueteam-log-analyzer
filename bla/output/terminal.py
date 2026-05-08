@@ -63,6 +63,20 @@ def _fmt_top(items: list, key: str, limit: int = 3) -> str:
     return ", ".join(f"{item.get(key, '?')}({item.get('count', 0)})" for item in items[:limit])
 
 
+def _truncate_text(text: str, max_len: int) -> str:
+    if max_len <= 0:
+        return ""
+    text = text or ""
+    return text if len(text) <= max_len else text[: max_len - 1] + "…"
+
+
+def _basename(path: str) -> str:
+    s = (path or "").replace("/", "\\")
+    if "\\" in s:
+        return s.rsplit("\\", 1)[-1]
+    return s
+
+
 def print_terminal_report(
     parse_results: List[ParseResult],
     summary: AnalysisSummary,
@@ -120,32 +134,74 @@ def print_terminal_report(
         if r.stats.top_ips:
             top_ip = r.stats.top_ips[0]
             out.write(f"    Top IP:   {WHITE}{top_ip['ip']}{RESET} ({top_ip['count']} 次)\n")
-        if r.stats.windows_logon_stats:
-            win_stats = r.stats.windows_logon_stats
-            out.write(f"    Windows 登录摘要: 4624={win_stats.get('total_success', 0)}  |  4625={win_stats.get('total_failure', 0)}\n")
-            for event_id in ("4624", "4625"):
-                event_stats = win_stats.get("events", {}).get(event_id)
-                if not event_stats:
-                    continue
-                out.write(
-                    f"      EID {event_id} {event_stats.get('event_name', '')}: "
-                    f"账户={_fmt_top(event_stats.get('principals', []), 'principal')}  |  "
-                    f"源IP={_fmt_top(event_stats.get('source_ips', []), 'source_ip')}\n"
-                )
-                logon_types = event_stats.get("logon_types", [])[:3]
-                logon_type_text = ", ".join(
-                    f"{item.get('logon_type', '?')}:{item.get('label', '未知')}({item.get('count', 0)})"
-                    for item in logon_types
-                ) if logon_types else "-"
-                out.write(
-                    f"      登录类型={logon_type_text}  |  "
-                    f"域={_fmt_top(event_stats.get('account_domains', []), 'account_domain')}\n"
-                )
-                if event_id == "4625" and event_stats.get("failure_reasons"):
-                    out.write(
-                        f"      失败原因={_fmt_top(event_stats.get('failure_reasons', []), 'failure_reason')}\n"
-                    )
         out.write("\n")
+
+    has_windows_logon = any(r.stats.windows_logon_stats for r in parse_results)
+    has_windows_4688 = any(r.stats.windows_process_creation_stats for r in parse_results)
+    if has_windows_logon or has_windows_4688:
+        out.write(_section("🔎 专项分析"))
+        for r in parse_results:
+            if not r.stats.windows_logon_stats and not r.stats.windows_process_creation_stats:
+                continue
+            out.write(f"  {BOLD}{CYAN}{r.file_name}{RESET}  {DIM}({r.log_type}){RESET}\n")
+
+            if r.stats.windows_logon_stats:
+                win_stats = r.stats.windows_logon_stats
+                out.write(
+                    f"    {BOLD}EID 4624/4625 登录事件{RESET}  "
+                    f"成功={win_stats.get('total_success', 0)}  |  失败={win_stats.get('total_failure', 0)}  |  "
+                    f"账户={win_stats.get('unique_accounts', 0)}  |  源IP={win_stats.get('unique_source_ips', 0)}\n"
+                )
+                for event_id in ("4624", "4625"):
+                    event_stats = win_stats.get("events", {}).get(event_id)
+                    if not event_stats:
+                        continue
+                    out.write(f"      {DIM}EID {event_id}{RESET}  {BOLD}{event_stats.get('event_name', '')}{RESET}  (总计 {event_stats.get('total', 0)})\n")
+                    out.write(f"        Top账户:     {_fmt_top(event_stats.get('principals', []), 'principal', 5)}\n")
+                    out.write(f"        Top源IP:     {_fmt_top(event_stats.get('source_ips', []), 'source_ip', 5)}\n")
+                    logon_types = event_stats.get("logon_types", [])[:5]
+                    logon_type_text = ", ".join(
+                        f"{item.get('logon_type', '?')}:{item.get('label', '未知')}({item.get('count', 0)})"
+                        for item in logon_types
+                    ) if logon_types else "-"
+                    out.write(f"        登录类型:    {logon_type_text}\n")
+                    out.write(f"        账号域:      {_fmt_top(event_stats.get('account_domains', []), 'account_domain', 5)}\n")
+                    out.write(f"        工作站:      {_fmt_top(event_stats.get('workstations', []), 'workstation', 5)}\n")
+                    if event_id == "4625":
+                        if event_stats.get("failure_reasons"):
+                            out.write(f"        失败原因:    {_fmt_top(event_stats.get('failure_reasons', []), 'failure_reason', 5)}\n")
+                        if event_stats.get("status_codes"):
+                            out.write(f"        Status:      {_fmt_top(event_stats.get('status_codes', []), 'status_code', 5)}\n")
+                        if event_stats.get("sub_status_codes"):
+                            out.write(f"        SubStatus:   {_fmt_top(event_stats.get('sub_status_codes', []), 'sub_status_code', 5)}\n")
+                    out.write("\n")
+
+            if r.stats.windows_process_creation_stats:
+                pstats = r.stats.windows_process_creation_stats
+                out.write(
+                    f"    {BOLD}EID 4688 进程创建{RESET}  "
+                    f"总数={pstats.get('total', 0)}  |  唯一父子对={pstats.get('unique_pairs', 0)}\n"
+                )
+                header = (
+                    f"      {DIM}{'#':<3} {'父进程':<18} {'子进程':<16} {'次数':>4} {'最近时间':<20} {'路径':<1}{RESET}\n"
+                )
+                out.write(header)
+                out.write(f"      {DIM}{'-'*76}{RESET}\n")
+                for idx, item in enumerate(pstats.get('top', [])[:10], 1):
+                    parent_path = item.get("parent_process") or ""
+                    child_name = item.get("child_process") or ""
+                    count = item.get("count", 0)
+                    ts = item.get("time") or "-"
+                    path = item.get("path") or "-"
+                    parent_name = _basename(parent_path) or "(unknown)"
+                    parent_col = _truncate_text(parent_name, 18)
+                    child_col = _truncate_text(child_name or "(unknown)", 16)
+                    ts_col = _truncate_text(ts, 20)
+                    path_col = _truncate_text(path, 24)
+                    out.write(f"      {idx:>2}. {parent_col:<18} {child_col:<16} {count:>4} {ts_col:<20} {path_col}\n")
+                out.write("\n")
+
+            out.write("\n")
 
     # ── ATT&CK 攻击链 ─────────────────────────────────────
     if summary.attack_chain:

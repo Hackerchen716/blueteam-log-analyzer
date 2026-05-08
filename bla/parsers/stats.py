@@ -58,6 +58,7 @@ def compute_stats(events: List[LogEvent]) -> ParseStats:
         stats.time_end   = ts_sorted[-1]
 
     stats.windows_logon_stats = _compute_windows_logon_stats(events)
+    stats.windows_process_creation_stats = _compute_windows_process_creation_stats(events)
     return stats
 
 
@@ -171,3 +172,43 @@ def _compute_windows_logon_stats(events: List[LogEvent]) -> Dict[str, Any]:
         result["events"][event_id] = event_summary
 
     return result
+
+
+def _compute_windows_process_creation_stats(events: List[LogEvent]) -> Dict[str, Any]:
+    proc_events = [e for e in events if e.event_id == "4688"]
+    if not proc_events:
+        return {}
+
+    pair_counter: Counter = Counter()
+    pair_latest: Dict[str, str] = {}
+    pair_paths: Dict[str, str] = {}
+
+    for ev in proc_events:
+        parent = (ev.details.get("parent_process") or "").strip()
+        child = (ev.details.get("child_process") or "").strip() or (ev.process or "")
+        path = (ev.details.get("child_path") or "").strip() or (ev.details.get("NewProcessName") or "").strip()
+
+        key = f"{parent} -> {child}" if parent else f"(unknown) -> {child}"
+        pair_counter[key] += 1
+        if path and key not in pair_paths:
+            pair_paths[key] = path
+        if ev.timestamp:
+            cur = pair_latest.get(key, "")
+            if not cur or ev.timestamp > cur:
+                pair_latest[key] = ev.timestamp
+
+    items = []
+    for key, count in pair_counter.most_common(10):
+        items.append({
+            "parent_process": key.split(" -> ", 1)[0],
+            "child_process": key.split(" -> ", 1)[1] if " -> " in key else key,
+            "count": count,
+            "path": pair_paths.get(key, ""),
+            "time": pair_latest.get(key, ""),
+        })
+
+    return {
+        "total": len(proc_events),
+        "unique_pairs": len(pair_counter),
+        "top": items,
+    }

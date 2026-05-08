@@ -1,0 +1,50 @@
+<Events>
+  <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+    <System>
+      <Provider Name="Microsoft-Windows-Security-Auditing" />
+      <EventID>4688</EventID>
+      <TimeCreated SystemTime="2026-05-06T11:00:00.000Z" />
+      <Channel>Security</Channel>
+      <Computer>WIN-IR-01</Computer>
+    </System>
+    <EventData>
+      <Data Name="SubjectUserName">alice</Data>
+      <Data Name="SubjectDomainName">CORP</Data>
+      <Data Name="NewProcessName">C:\Windows\System32\cmd.exe</Data>
+      <Data Name="CommandLine">cmd.exe /c whoami</Data>
+      <Data Name="ParentProcessName">C:\Windows\System32\w3wp.exe</Data>
+    </EventData>
+  </Event>
+  <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+    <System>
+      <Provider Name="Microsoft-Windows-Security-Auditing" />
+      <EventID>4688</EventID>
+      <TimeCreated SystemTime="2026-05-06T11:00:05.000Z" />
+      <Channel>Security</Channel>
+      <Computer>WIN-IR-01</Computer>
+    </System>
+    <EventData>
+      <Data Name="SubjectUserName">alice</Data>
+      <Data Name="SubjectDomainName">CORP</Data>
+      <Data Name="NewProcessName">C:\Windows\System32\cmd.exe</Data>
+      <Data Name="CommandLine">cmd.exe /c whoami</Data>
+      <Data Name="ParentProcessName">C:\Windows\System32\w3wp.exe</Data>
+    </EventData>
+  </Event>
+  <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+    <System>
+      <Provider Name="Microsoft-Windows-Security-Auditing" />
+      <EventID>4688</EventID>
+      <TimeCreated SystemTime="2026-05-06T11:02:00.000Z" />
+      <Channel>Security</Channel>
+      <Computer>WIN-IR-01</Computer>
+    </System>
+    <EventData>
+      <Data Name="SubjectUserName">SYSTEM</Data>
+      <Data Name="SubjectDomainName">NT AUTHORITY</Data>
+      <Data Name="NewProcessName">C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Data>
+      <Data Name="CommandLine">powershell.exe -NoP -W Hidden -Enc AAAA</Data>
+      <Data Name="ParentProcessName">C:\Windows\System32\services.exe</Data>
+    </EventData>
+  </Event>
+</Events>
