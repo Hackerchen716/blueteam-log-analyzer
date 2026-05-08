@@ -55,6 +55,8 @@ def generate_json_report(
                 "top_users":  r.stats.top_users[:5],
                 "categories": r.stats.categories,
                 "attack_types": r.stats.attack_types,
+                "windows_logon_stats": r.stats.windows_logon_stats,
+                "windows_process_creation_stats": r.stats.windows_process_creation_stats,
             }
             for r in parse_results
         ],

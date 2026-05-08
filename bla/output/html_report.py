@@ -166,7 +166,7 @@ def generate_html_report(
 
     # 时间线 HTML
     timeline_html = ""
-    for entry in summary.timeline[-100:]:
+    for entry in summary.timeline[:100]:
         color = _level_color_hex(entry.level)
         mitre = f'<span class="mitre-tag">{_h(entry.mitre_attack)}</span>' if entry.mitre_attack else ""
         timeline_html += f"""
@@ -256,6 +256,74 @@ def generate_html_report(
           <td>{r.parse_time_ms:.0f}ms</td>
           <td>{_h(r.stats.time_start[:10] if r.stats.time_start else '-')}</td>
         </tr>"""
+
+    # Windows 登录摘要 HTML
+    windows_logon_html = ""
+    for r in parse_results:
+        win_stats = r.stats.windows_logon_stats
+        if not win_stats:
+            continue
+        event_blocks = ""
+        for event_id in ("4624", "4625"):
+            event_stats = win_stats.get("events", {}).get(event_id)
+            if not event_stats:
+                continue
+
+            logon_types = "、".join(
+                f"{item.get('logon_type', '?')}({item.get('label', '未知')}): {item.get('count', 0)}"
+                for item in event_stats.get("logon_types", [])[:5]
+            ) or "-"
+            principals = "、".join(
+                f"{item.get('principal', '?')}({item.get('count', 0)})"
+                for item in event_stats.get("principals", [])[:5]
+            ) or "-"
+            source_ips = "、".join(
+                f"{item.get('source_ip', '?')}({item.get('count', 0)})"
+                for item in event_stats.get("source_ips", [])[:5]
+            ) or "-"
+            domains = "、".join(
+                f"{item.get('account_domain', '?')}({item.get('count', 0)})"
+                for item in event_stats.get("account_domains", [])[:5]
+            ) or "-"
+            processes = "、".join(
+                f"{item.get('process_name', '?')}({item.get('count', 0)})"
+                for item in event_stats.get("process_names", [])[:5]
+            ) or "-"
+            failure_reasons = "、".join(
+                f"{item.get('failure_reason', '?')}({item.get('count', 0)})"
+                for item in event_stats.get("failure_reasons", [])[:5]
+            ) or "-"
+
+            failure_html = (
+                f"<tr><th>失败原因</th><td>{failure_reasons}</td></tr>"
+                if event_id == "4625" else ""
+            )
+            event_blocks += f"""
+            <div class="card" style="margin-bottom:12px;">
+              <h3>EID {event_id} - {event_stats.get('event_name', '')} ({event_stats.get('total', 0)})</h3>
+              <table>
+                <tbody>
+                  <tr><th>账户</th><td>{principals}</td></tr>
+                  <tr><th>账号域</th><td>{domains}</td></tr>
+                  <tr><th>源IP</th><td>{source_ips}</td></tr>
+                  <tr><th>登录类型</th><td>{logon_types}</td></tr>
+                  <tr><th>进程名</th><td>{processes}</td></tr>
+                  {failure_html}
+                </tbody>
+              </table>
+            </div>"""
+
+        windows_logon_html += f"""
+        <h3>{r.file_name}</h3>
+        <div class="card">
+          <div style="margin-bottom:10px; color:#94a3b8;">
+            4624 成功登录: {win_stats.get('total_success', 0)} 条 &nbsp;|&nbsp;
+            4625 登录失败: {win_stats.get('total_failure', 0)} 条 &nbsp;|&nbsp;
+            唯一账户: {win_stats.get('unique_accounts', 0)} &nbsp;|&nbsp;
+            唯一源IP: {win_stats.get('unique_source_ips', 0)}
+          </div>
+          {event_blocks}
+        </div>"""
 
     # 建议 HTML
     recs_html = "".join(f"<li>{_h(r)}</li>" for r in summary.recommendations)
@@ -461,6 +529,9 @@ def generate_html_report(
       <tbody>{files_html}</tbody>
     </table>
   </div>
+
+  <!-- Windows 登录摘要 -->
+  {"<h2>🔐 Windows 登录事件摘要 (4624 / 4625)</h2>" + windows_logon_html if windows_logon_html else ""}
 
   <!-- 建议 -->
   <h2>💡 应急处置建议</h2>

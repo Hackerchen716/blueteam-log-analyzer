@@ -2,6 +2,7 @@
 威胁检测引擎核心逻辑
 """
 from __future__ import annotations
+import datetime
 import re
 from collections import defaultdict
 from typing import List, Dict, Set
@@ -588,7 +589,16 @@ def _dedup_alerts(alerts: List[DetectionAlert]) -> List[DetectionAlert]:
 
 def _build_timeline(events: List[LogEvent]) -> List[TimelineEntry]:
     significant = [e for e in events if e.level.score >= ThreatLevel.MEDIUM.score or e.mitre_attack]
-    significant.sort(key=lambda e: e.timestamp)
+    def ts_epoch(ts: str) -> float:
+        if not ts:
+            return 0.0
+        s = ts.replace("Z", "+00:00")
+        try:
+            return datetime.datetime.fromisoformat(s).timestamp()
+        except Exception:
+            return 0.0
+
+    significant.sort(key=lambda e: (-e.level.score, -ts_epoch(e.timestamp), e.id))
     return [TimelineEntry(timestamp=e.timestamp, level=e.level, category=e.category,
                           message=e.message, event_id=e.id, source_file=e.source_file,
                           mitre_attack=e.mitre_attack)

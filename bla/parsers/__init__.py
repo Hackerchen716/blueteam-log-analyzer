@@ -69,8 +69,8 @@ def auto_parse(file_path: str) -> ParseResult:
 
 def _looks_like_web_log(sample: str) -> bool:
     return bool(re.search(
-        r'\d+\.\d+\.\d+\.\d+.*\[.*\].*"(GET|POST|PUT|DELETE|HEAD|OPTIONS)\s+/',
-        sample, re.I
+        r'^\s*\S+\s+\S+\s+\S+\s+\[[^\]]+\]\s+"(GET|POST|PUT|DELETE|HEAD|OPTIONS)\s+/',
+        sample, re.I | re.M
     ))
 
 
