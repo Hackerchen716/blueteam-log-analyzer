@@ -293,15 +293,11 @@ fi
 
 ---
 
-## 📸 工具展示
+## 终端报告示例
 
-### 分析总览 & 文件解析结果
+关键事件时间线、ATT&CK 技术映射、应急处置建议、Top 攻击源 IP：
 
-![demo1](docs/screenshots/demo1.png)
-
-### 威胁告警详情
-
-![demo2](docs/screenshots/demo2.png)
+![BLA 终端报告示例](docs/screenshots/demo.png)
 
 ---
 
