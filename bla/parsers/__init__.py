@@ -6,14 +6,17 @@ BlueTeam Log Analyzer - 解析器入口
 from __future__ import annotations
 import os
 import re
+import sys
 import time
 from typing import List
 
+from .. import config
 from ..models import ParseResult, LogEvent, ThreatLevel
-from ..utils.helpers import read_file, gen_id
+from ..utils.helpers import gen_id, read_file, read_file_sample, safe_write
 from .windows_evtx import parse_windows_xml, parse_windows_evtx
-from .linux_auth import parse_linux_auth
-from .web_access import parse_web_access
+from .linux_auth import parse_linux_auth, parse_linux_auth_file
+from .web_access import parse_web_access, parse_web_access_file
+from .p0_security import looks_like_p0_security_log, parse_p0_security_file
 from .stats import compute_stats
 
 
@@ -25,6 +28,7 @@ def auto_parse(file_path: str) -> ParseResult:
       - Windows EVTX (.evtx)
       - Linux Auth (/var/log/auth.log, /var/log/secure)
       - Web Access (Apache/Nginx Combined)
+      - HVV / 重保 P0 结构化安全日志
       - 通用文本日志 (fallback)
     """
     fname = os.path.basename(file_path)
@@ -34,24 +38,32 @@ def auto_parse(file_path: str) -> ParseResult:
     if fname_lower.endswith(".evtx"):
         return parse_windows_evtx(file_path)
 
-    # 读取文本内容
-    content = read_file(file_path)
-    sample  = content[:2000].lower()
+    # 先读取文件开头小样本用于类型识别。Linux/Web 日志会走逐行解析，
+    # 避免为了分析大文件把完整内容一次性加载到内存。
+    sample_text = read_file_sample(file_path)
+    sample  = sample_text[:2000].lower()
 
     # Windows XML
     if "<event" in sample and ("xmlns" in sample or "<eventid>" in sample):
+        content = read_file(file_path)
         return parse_windows_xml(content, fname)
 
     # Linux Auth
     if any(kw in fname_lower for kw in ("auth", "secure")) or \
        any(kw in sample for kw in ("sshd", "sudo:", "pam_unix", "useradd")):
-        return parse_linux_auth(content, fname)
+        return parse_linux_auth_file(file_path, fname)
 
     # Web Access
-    if _looks_like_web_log(content[:500]):
-        return parse_web_access(content, fname)
+    if _looks_like_web_log(sample_text[:500]):
+        return parse_web_access_file(file_path, fname)
+
+    # HVV / 重保 P0 结构化安全日志：WAF、VPN、堡垒机、DNS、代理/NAT、
+    # 防火墙、EDR、应用日志等常见 CSV/JSON/key=value 导出。
+    if looks_like_p0_security_log(file_path, sample_text):
+        return parse_p0_security_file(file_path, fname)
 
     # Fallback: 通用日志
+    content = read_file(file_path)
     return _parse_generic(content, fname)
 
 
@@ -68,7 +80,16 @@ def _parse_generic(content: str, source_file: str) -> ParseResult:
     lines = content.splitlines()
     events: List[LogEvent] = []
 
-    for line in lines[:10000]:
+    line_limit = config.THRESHOLDS.generic_parse_line_limit
+    if len(lines) > line_limit:
+        safe_write(
+            f"⚠️  通用解析器只处理前 {line_limit} 行，"
+            f"{source_file} 共 {len(lines)} 行，剩余 {len(lines) - line_limit} 行被截断。\n"
+            "    建议显式指定日志类型，或使用更精确的解析器。\n",
+            sys.stderr,
+        )
+
+    for line in lines[:line_limit]:
         if not line.strip() or len(line) < 10:
             continue
 

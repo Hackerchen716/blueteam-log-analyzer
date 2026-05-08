@@ -9,6 +9,7 @@ from typing import List
 from ..models import (
     ParseResult, AnalysisSummary, DetectionAlert, ThreatLevel, LogEvent
 )
+from ..utils.helpers import safe_stream
 
 # ANSI 颜色
 RESET  = "\033[0m"
@@ -50,8 +51,9 @@ def _hr(char: str = "─", width: int = 80) -> str:
     return GRAY + char * width + RESET
 
 
-def _section(title: str, color: str = CYAN) -> str:
+def _section(title: str, color: str = "") -> str:
     line = "═" * 80
+    color = color or CYAN
     return f"\n{BOLD}{color}{line}\n  {title}\n{line}{RESET}\n"
 
 
@@ -66,12 +68,13 @@ def print_terminal_report(
     summary: AnalysisSummary,
     verbose: bool = False,
     no_color: bool = False,
+    max_alerts: int = 50,
 ) -> None:
     """打印完整的终端分析报告"""
     if no_color:
         _disable_color()
 
-    out = sys.stdout
+    out = safe_stream(sys.stdout)
 
     # ── 标题横幅 ──────────────────────────────────────────
     out.write(f"\n{BOLD}{BLUE}")
@@ -88,6 +91,7 @@ def print_terminal_report(
     out.write(f"  分析文件数:   {WHITE}{summary.files_analyzed}{RESET}\n")
     out.write(f"  总事件数:     {WHITE}{summary.total_events}{RESET}\n")
     out.write(f"  告警数量:     {WHITE}{len(summary.alerts)}{RESET}\n")
+    out.write(f"  关联案件:     {WHITE}{len(summary.incidents)}{RESET}\n")
 
     # 按级别统计
     total_events = sum(r.stats.total for r in parse_results)
@@ -160,12 +164,33 @@ def print_terminal_report(
             else:
                 out.write(f"  {DIM}○ {phase}{RESET}\n")
 
+    # ── 应急案件视图 ──────────────────────────────────────
+    if summary.incidents:
+        out.write(_section("🧩 应急案件视图"))
+        for i, incident in enumerate(summary.incidents[:10], 1):
+            color = _level_color(incident.level)
+            out.write(f"\n  {BOLD}[INC-{i:02d}] {_level_badge(incident.level)} {color}{incident.title}{RESET}\n")
+            out.write(f"       {incident.description}\n")
+            out.write(f"       {DIM}置信度: {incident.confidence}  |  日志源: {', '.join(incident.source_types[:6]) or '?'}  |  事件: {len(incident.affected_events)}{RESET}\n")
+            if incident.evidence:
+                out.write(f"       {GRAY}关键证据:{RESET}\n")
+                for item in incident.evidence[:4]:
+                    out.write(f"         • {item}\n")
+            if incident.next_logs:
+                out.write(f"       {CYAN}建议补采: {', '.join(incident.next_logs[:5])}{RESET}\n")
+            if incident.recommended_actions:
+                out.write(f"       {YELLOW}处置动作: {incident.recommended_actions[0]}{RESET}\n")
+            out.write(f"  {_hr('─', 76)}\n")
+
     # ── 告警详情 ──────────────────────────────────────────
     out.write(_section("🚨 威胁告警"))
     if not summary.alerts:
         out.write(f"  {GREEN}未发现明显威胁告警{RESET}\n")
     else:
-        for i, alert in enumerate(summary.alerts, 1):
+        shown_alerts = summary.alerts if max_alerts <= 0 else summary.alerts[:max_alerts]
+        if max_alerts > 0 and len(summary.alerts) > max_alerts:
+            out.write(f"  {DIM}终端仅展示前 {max_alerts} 个告警；完整结果请查看 --html / --json 报告，或使用 --max-alerts 0。{RESET}\n")
+        for i, alert in enumerate(shown_alerts, 1):
             color = _level_color(alert.level)
             badge = _level_badge(alert.level)
             out.write(f"\n  {BOLD}[{i:02d}] {badge} {color}{alert.rule_name}{RESET}\n")
@@ -181,7 +206,7 @@ def print_terminal_report(
     # ── 时间线（最近20条重要事件）────────────────────────
     if summary.timeline:
         out.write(_section("📅 关键事件时间线（最近20条）"))
-        for entry in summary.timeline[-20:]:
+        for entry in summary.timeline[:20]:
             color = _level_color(entry.level)
             badge = _level_badge(entry.level)
             mitre = f" {DIM}[{entry.mitre_attack}]{RESET}" if entry.mitre_attack else ""
@@ -229,4 +254,6 @@ def print_terminal_report(
 def _disable_color():
     """禁用颜色（重定向输出时使用）"""
     global RESET, BOLD, DIM, RED, ORANGE, YELLOW, GREEN, BLUE, CYAN, WHITE, GRAY
+    global BG_RED, BG_ORANGE, BG_YELLOW, BG_GREEN, BG_BLUE
     RESET = BOLD = DIM = RED = ORANGE = YELLOW = GREEN = BLUE = CYAN = WHITE = GRAY = ""
+    BG_RED = BG_ORANGE = BG_YELLOW = BG_GREEN = BG_BLUE = ""

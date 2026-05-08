@@ -12,13 +12,16 @@ Linux 认证日志解析器
 """
 
 from __future__ import annotations
+import datetime
 import re
 import time
-from collections import defaultdict
-from typing import List, Dict, Optional, Tuple
+from typing import Iterable, List, Optional
 
-from ..models import LogEvent, ParseResult, ParseStats, ThreatLevel
-from ..utils.helpers import gen_id, normalize_timestamp, truncate
+from ..models import LogEvent, ParseResult, ThreatLevel
+from ..utils.helpers import (
+    MONTH_MAP, file_size, gen_id, get_syslog_year_override, iter_file_lines,
+    normalize_timestamp, truncate,
+)
 from .stats import compute_stats
 
 # syslog 标准格式
@@ -45,51 +48,59 @@ _DISCONNECT_RE= re.compile(r'Disconnected from|Disconnecting', re.I)
 
 
 def parse_linux_auth(content: str, source_file: str) -> ParseResult:
+    return parse_linux_auth_lines(
+        content.splitlines(),
+        source_file,
+        file_size_bytes=len(content.encode()),
+    )
+
+
+def parse_linux_auth_file(path: str, source_file: Optional[str] = None) -> ParseResult:
+    """从文件逐行解析 Linux 认证日志，避免大文件一次性读入内存。"""
+    return parse_linux_auth_lines(
+        iter_file_lines(path),
+        source_file or path,
+        file_size_bytes=file_size(path),
+    )
+
+
+def parse_linux_auth_lines(
+    lines: Iterable[str],
+    source_file: str,
+    file_size_bytes: int = 0,
+) -> ParseResult:
+    """解析 Linux 认证日志。
+
+    解析阶段只输出"基础事实"：每条 ``Failed password`` 打 ``failed-login`` 标
+    签、``Accepted password`` 打 ``successful-login``、``sudo COMMAND=`` 打
+    ``sudo-command`` 等等。**不做任何跨行聚合**——暴力破解 / 密码喷洒等基于
+    阈值的判定全部交给 :mod:`bla.detection.engine`，确保规则只有一个真相源。
+    """
     t0 = time.time()
-    lines = content.splitlines()
     events: List[LogEvent] = []
 
-    # 第一遍：解析所有行
-    failed_by_ip: Dict[str, List[LogEvent]] = defaultdict(list)
-    failed_by_user: Dict[str, List[LogEvent]] = defaultdict(list)
+    # 跨年处理：syslog 时间戳不带年份，按字典序排序会把 12 月排在 1 月之后。
+    # 这里维护一个 base_year，每当月份发生回退就 +1，这样跨年日志也能保持
+    # 时间单调递增。优先用 --syslog-year，否则用系统当前年份作为起点。
+    base_year = get_syslog_year_override() or datetime.datetime.now().year
+    last_month_num = 0
 
     for line in lines:
         if not line.strip():
             continue
-        ev = _parse_auth_line(line, source_file)
+        # 在调用 _parse_auth_line 之前先观察月份序列，决定本行该用哪个 year
+        month_match = re.match(r'^(\w{3})\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}', line)
+        if month_match:
+            mon_num = int(MONTH_MAP.get(month_match.group(1), '0'))
+            if mon_num and last_month_num and mon_num < last_month_num - 1:
+                # 月份回退（容忍 1 个月内的乱序），认为跨年了
+                base_year += 1
+            if mon_num:
+                last_month_num = mon_num
+
+        ev = _parse_auth_line(line, source_file, base_year)
         if ev:
             events.append(ev)
-            if "failed-login" in ev.tags:
-                if ev.ip:   failed_by_ip[ev.ip].append(ev)
-                if ev.user: failed_by_user[ev.user].append(ev)
-
-    # 第二遍：暴力破解后处理（升级级别 + 添加标签）
-    for ip, evts in failed_by_ip.items():
-        count = len(evts)
-        if count >= 20:
-            for ev in evts:
-                ev.level = ThreatLevel.CRITICAL
-                if "brute-force" not in ev.tags: ev.tags.append("brute-force")
-                ev.rule_name = "暴力破解攻击"
-        elif count >= 5:
-            for ev in evts:
-                if ev.level.score < ThreatLevel.HIGH.score:
-                    ev.level = ThreatLevel.HIGH
-                if "brute-force" not in ev.tags: ev.tags.append("brute-force")
-                ev.rule_name = "多次登录失败"
-
-    # 密码喷洒检测：同一 IP 针对 ≥5 个不同用户
-    for ip, evts in failed_by_ip.items():
-        unique_users = set(ev.user for ev in evts if ev.user)
-        avg = len(evts) / max(len(unique_users), 1)
-        if len(unique_users) >= 5 and avg <= 3:
-            for ev in evts:
-                if "password-spray" not in ev.tags:
-                    ev.tags.append("password-spray")
-                    ev.rule_name = "密码喷洒攻击"
-                    ev.mitre_attack = "T1110.003"
-                    if ev.level.score < ThreatLevel.HIGH.score:
-                        ev.level = ThreatLevel.HIGH
 
     stats = compute_stats(events)
     return ParseResult(
@@ -98,17 +109,17 @@ def parse_linux_auth(content: str, source_file: str) -> ParseResult:
         events        = events,
         stats         = stats,
         parse_time_ms = (time.time() - t0) * 1000,
-        file_size_bytes = len(content.encode()),
+        file_size_bytes = file_size_bytes,
     )
 
 
-def _parse_auth_line(line: str, source_file: str) -> Optional[LogEvent]:
+def _parse_auth_line(line: str, source_file: str, syslog_year: Optional[int] = None) -> Optional[LogEvent]:
     m = _SYSLOG_RE.match(line)
     if not m:
         return None
 
     ts_raw, host, service, _pid, message = m.groups()
-    ts = normalize_timestamp(ts_raw)
+    ts = normalize_timestamp(ts_raw, syslog_year=syslog_year)
     svc_lower = service.lower()
     msg_lower = message.lower()
 

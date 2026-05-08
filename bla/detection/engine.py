@@ -2,18 +2,40 @@
 威胁检测引擎核心逻辑
 """
 from __future__ import annotations
+import datetime
 import re
 from collections import defaultdict
 from typing import List, Dict, Set
 
+from .. import config
 from ..models import (
     LogEvent, DetectionAlert, TimelineEntry, AttackChainEntry,
     AnalysisSummary, ThreatLevel
 )
-from ..utils.helpers import gen_id
+from ..utils.helpers import gen_id, is_private_ip
+from .correlation import correlate_incidents
+from .enrichment import enrich_events
 
 
-def run_detection(events: List[LogEvent]) -> AnalysisSummary:
+_CONFIDENCE_DOWNGRADE = {"high": "medium", "medium": "low", "low": "low"}
+
+
+def _adjust_for_private_ip(ip: str, confidence: str, evidence: List[str]) -> str:
+    """如果攻击源是私有 IP，置信度下调一档并在 evidence 里标注来源类型。
+
+    内网渗透测试、扫描器、合法运维操作经常会触发同样的特征，但风险显著低于
+    互联网攻击。降级而不是直接抑制，是为了让蓝队仍然能看到事件。
+    """
+    if not ip or not is_private_ip(ip):
+        if ip:
+            evidence.append(f"来源类型: 公网")
+        return confidence
+    evidence.append(f"来源类型: 内网/私有 IP（{ip}）")
+    return _CONFIDENCE_DOWNGRADE.get(confidence, confidence)
+
+
+def run_detection(events: List[LogEvent], profile: str = "default") -> AnalysisSummary:
+    events = enrich_events(events)
     alerts: List[DetectionAlert] = []
     alerts += detect_brute_force(events)
     alerts += detect_password_spray(events)
@@ -25,6 +47,9 @@ def run_detection(events: List[LogEvent]) -> AnalysisSummary:
     alerts += detect_lateral_movement(events)
     alerts += detect_web_attacks(events)
     alerts += detect_reconnaissance(events)
+    alerts += detect_p0_security_events(events)
+    if profile == "cn-hvv":
+        alerts += detect_cn_hvv(events)
     alerts = _dedup_alerts(alerts)
 
     lvl_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -32,7 +57,8 @@ def run_detection(events: List[LogEvent]) -> AnalysisSummary:
 
     timeline     = _build_timeline(events)
     attack_chain = _build_attack_chain(events, alerts)
-    risk_score   = _calc_risk_score(events, alerts)
+    incidents    = correlate_incidents(events, alerts)
+    risk_score   = _calc_risk_score(events, alerts, incidents)
     risk_level   = (ThreatLevel.CRITICAL if risk_score >= 80 else
                     ThreatLevel.HIGH     if risk_score >= 60 else
                     ThreatLevel.MEDIUM   if risk_score >= 40 else
@@ -49,6 +75,7 @@ def run_detection(events: List[LogEvent]) -> AnalysisSummary:
         recommendations = recommendations,
         total_events    = len(events),
         files_analyzed  = len(set(e.source_file for e in events)),
+        incidents       = incidents,
     )
 
 
@@ -60,20 +87,29 @@ def detect_brute_force(events: List[LogEvent]) -> List[DetectionAlert]:
             failed_by_ip[ev.ip].append(ev)
     for ip, evts in failed_by_ip.items():
         n = len(evts)
-        if n < 5:
+        if n < config.THRESHOLDS.brute_force_min:
             continue
-        level = ThreatLevel.CRITICAL if n >= 50 else ThreatLevel.HIGH if n >= 20 else ThreatLevel.MEDIUM
+        if n >= config.THRESHOLDS.brute_force_critical:
+            level = ThreatLevel.CRITICAL
+        elif n >= config.THRESHOLDS.brute_force_high:
+            level = ThreatLevel.HIGH
+        else:
+            level = ThreatLevel.MEDIUM
         users = sorted(set(e.user for e in evts if e.user))
         ts_sorted = sorted(evts, key=lambda e: e.timestamp)
+        evidence = [f"攻击源IP: {ip}", f"失败次数: {n}", f"目标账户数: {len(users)}",
+                    f"时间: {ts_sorted[0].timestamp} ~ {ts_sorted[-1].timestamp}"]
+        confidence = _adjust_for_private_ip(
+            ip, "high" if n >= config.THRESHOLDS.brute_force_high else "medium", evidence
+        )
         alerts.append(DetectionAlert(
             id="a"+gen_id("bf"), rule_id="BRUTE-001", rule_name="暴力破解攻击",
             description=f"来自 {ip} 的暴力破解，共失败 {n} 次，目标: {', '.join(users[:5])}{'...' if len(users)>5 else ''}",
             level=level, category="暴力破解", mitre_attack="T1110.001", mitre_phase="凭据访问",
             affected_events=[e.id for e in evts],
-            evidence=[f"攻击源IP: {ip}", f"失败次数: {n}", f"目标账户数: {len(users)}",
-                      f"时间: {ts_sorted[0].timestamp} ~ {ts_sorted[-1].timestamp}"],
+            evidence=evidence,
             recommendation=f"立即封锁 IP {ip}，检查是否有成功登录，启用账户锁定策略和 MFA",
-            timestamp=ts_sorted[-1].timestamp, confidence="high" if n >= 20 else "medium",
+            timestamp=ts_sorted[-1].timestamp, confidence=confidence,
         ))
     return alerts
 
@@ -86,20 +122,22 @@ def detect_password_spray(events: List[LogEvent]) -> List[DetectionAlert]:
             failed_by_ip[ev.ip].append(ev)
     for ip, evts in failed_by_ip.items():
         unique_users = set(e.user for e in evts if e.user)
-        if len(unique_users) < 5:
+        if len(unique_users) < config.THRESHOLDS.spray_min_unique_users:
             continue
         avg = len(evts) / len(unique_users)
-        if avg > 3:
+        if avg > config.THRESHOLDS.spray_max_avg_per_user:
             continue
+        evidence = [f"攻击源IP: {ip}", f"目标账户数: {len(unique_users)}", f"总尝试: {len(evts)}",
+                    f"目标: {', '.join(list(unique_users)[:5])}"]
+        confidence = _adjust_for_private_ip(ip, "high", evidence)
         alerts.append(DetectionAlert(
             id="a"+gen_id("sp"), rule_id="SPRAY-001", rule_name="密码喷洒攻击",
             description=f"来自 {ip} 的密码喷洒，针对 {len(unique_users)} 个账户，平均每账户 {avg:.1f} 次",
             level=ThreatLevel.HIGH, category="密码喷洒", mitre_attack="T1110.003", mitre_phase="凭据访问",
             affected_events=[e.id for e in evts],
-            evidence=[f"攻击源IP: {ip}", f"目标账户数: {len(unique_users)}", f"总尝试: {len(evts)}",
-                      f"目标: {', '.join(list(unique_users)[:5])}"],
+            evidence=evidence,
             recommendation="密码喷洒绕过锁定策略，检查所有目标账户是否有成功登录，实施异常登录检测",
-            timestamp=max(e.timestamp for e in evts), confidence="high",
+            timestamp=max(e.timestamp for e in evts), confidence=confidence,
         ))
     return alerts
 
@@ -117,7 +155,7 @@ def detect_privilege_escalation(events: List[LogEvent]) -> List[DetectionAlert]:
             timestamp=ev.timestamp, confidence="high",
         ))
     sudo_denied = [e for e in events if "sudo-denied" in e.tags]
-    if len(sudo_denied) >= 3:
+    if len(sudo_denied) >= config.THRESHOLDS.sudo_denied_min:
         alerts.append(DetectionAlert(
             id="a"+gen_id("sd"), rule_id="PRIV-002", rule_name="Sudo 权限滥用尝试",
             description=f"检测到 {len(sudo_denied)} 次 sudo 权限拒绝",
@@ -203,9 +241,9 @@ def detect_defense_evasion(events: List[LogEvent]) -> List[DetectionAlert]:
 
 def detect_credential_access(events: List[LogEvent]) -> List[DetectionAlert]:
     alerts = []
-    mimi = [e for e in events if "malware-indicator" in e.tags or
-            re.search(r'mimikatz|lsadump|sekurlsa|kerberos::ptt|privilege::debug',
-                      e.message + e.raw_line, re.I)]
+    mimi = [e for e in events if
+            re.search(r'mimikatz|lsadump|sekurlsa|kerberos::ptt|privilege::debug|credential.?dump',
+                      e.message + e.raw_line + " ".join(str(v) for v in e.details.values()), re.I)]
     if mimi:
         alerts.append(DetectionAlert(
             id="a"+gen_id("ca"), rule_id="CRED-001", rule_name="Mimikatz / 凭据转储工具",
@@ -303,30 +341,55 @@ def detect_web_attacks(events: List[LogEvent]) -> List[DetectionAlert]:
         "路径/编码绕过":"T1140",
     }
     for attack_type, evts in by_type.items():
-        critical_count = sum(1 for e in evts if e.level == ThreatLevel.CRITICAL)
-        level = (ThreatLevel.CRITICAL if critical_count > 0 else
-                 ThreatLevel.HIGH if len(evts) >= 10 else ThreatLevel.MEDIUM)
+        max_event_level = max((e.level for e in evts), key=lambda lvl: lvl.score)
+        level = max_event_level
+        if len(evts) >= 10 and level.score < ThreatLevel.HIGH.score:
+            level = ThreatLevel.HIGH
         ips = sorted(set(e.ip for e in evts if e.ip))
+        event_rule_ids = sorted(set(e.rule_id for e in evts if e.rule_id))
+        alert_rule_id = event_rule_ids[0] if len(event_rule_ids) == 1 else f"WEB-{attack_type[:4].upper()}"
+        remediation = next((str(e.details.get("rule_remediation")) for e in evts if e.details.get("rule_remediation")), "")
+        confidence_hint = next((str(e.details.get("rule_confidence")) for e in evts if e.details.get("rule_confidence")), "")
+        fp_hints = next((str(e.details.get("rule_false_positive_hints")) for e in evts if e.details.get("rule_false_positive_hints")), "")
+        evidence = [f"类型: {attack_type}", f"次数: {len(evts)}",
+                    f"来源IP: {', '.join(ips[:3])}", f"示例: {evts[0].message}"]
+        if fp_hints:
+            evidence.append(f"误报提示: {fp_hints.replace('|', ', ')}")
         alerts.append(DetectionAlert(
-            id="a"+gen_id("wa"), rule_id=f"WEB-{attack_type[:4].upper()}",
+            id="a"+gen_id("wa"), rule_id=alert_rule_id,
             rule_name=f"Web攻击: {attack_type}",
             description=f"检测到 {len(evts)} 次 {attack_type} 攻击尝试",
             level=level, category="Web攻击",
             mitre_attack=mitre_map.get(attack_type,"T1190"), mitre_phase="初始访问",
             affected_events=[e.id for e in evts],
-            evidence=[f"类型: {attack_type}", f"次数: {len(evts)}",
-                      f"来源IP: {', '.join(ips[:3])}", f"示例: {evts[0].message}"],
-            recommendation=f"修复 {attack_type} 漏洞，部署 WAF，封锁攻击源 IP",
+            evidence=evidence,
+            recommendation=remediation or f"修复 {attack_type} 漏洞，部署 WAF，封锁攻击源 IP",
             timestamp=max(e.timestamp for e in evts),
-            confidence="high" if critical_count > 0 else "medium",
+            confidence=confidence_hint or ("high" if level.score >= ThreatLevel.HIGH.score else "medium"),
         ))
     return alerts
 
 
 def detect_reconnaissance(events: List[LogEvent]) -> List[DetectionAlert]:
     alerts = []
-    scan_events = [e for e in events if any(t in e.tags for t in ("scanning","scanner"))]
-    if len(scan_events) >= 5:
+    volume_events = [e for e in events if e.category == "流量异常" and any(t in e.tags for t in ("scanning", "ddos"))]
+    if volume_events:
+        has_ddos = any("ddos" in e.tags for e in volume_events)
+        ips = sorted(set(e.ip for e in volume_events if e.ip))
+        level = ThreatLevel.CRITICAL if has_ddos else ThreatLevel.MEDIUM
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("rv"), rule_id="RECON-003" if not has_ddos else "RECON-004",
+            rule_name="DDoS/高频请求" if has_ddos else "自动化扫描/高频访问",
+            description=f"检测到 {len(ips)} 个 IP 存在异常高频 Web 请求",
+            level=level, category="侦察", mitre_attack="T1595", mitre_phase="侦察",
+            affected_events=[e.id for e in volume_events],
+            evidence=[e.message for e in volume_events[:5]],
+            recommendation="结合访问路径和业务基线确认是否为扫描、爬取或洪泛攻击，必要时限速或封锁源 IP",
+            timestamp=max(e.timestamp for e in volume_events), confidence="medium",
+        ))
+
+    scan_events = [e for e in events if e.category != "流量异常" and any(t in e.tags for t in ("scanning","scanner"))]
+    if len(scan_events) >= config.THRESHOLDS.scanner_min_events:
         scan_ips = sorted(set(e.ip for e in scan_events if e.ip))
         alerts.append(DetectionAlert(
             id="a"+gen_id("rc"), rule_id="RECON-001", rule_name="自动化扫描/侦察",
@@ -339,7 +402,7 @@ def detect_reconnaissance(events: List[LogEvent]) -> List[DetectionAlert]:
             timestamp=max(e.timestamp for e in scan_events), confidence="medium",
         ))
     recon_events = [e for e in events if "recon" in e.tags]
-    if len(recon_events) >= 10:
+    if len(recon_events) >= config.THRESHOLDS.recon_min_events:
         alerts.append(DetectionAlert(
             id="a"+gen_id("rf"), rule_id="RECON-002", rule_name="敏感文件/路径探测",
             description=f"检测到 {len(recon_events)} 次敏感文件探测",
@@ -353,11 +416,171 @@ def detect_reconnaissance(events: List[LogEvent]) -> List[DetectionAlert]:
     return alerts
 
 
+def detect_cn_hvv(events: List[LogEvent]) -> List[DetectionAlert]:
+    """国内护网/重保常见场景增强检测。"""
+    alerts = []
+
+    hvv_events = [e for e in events if "cn-hvv" in e.tags]
+    if hvv_events:
+        ips = sorted(set(e.ip for e in hvv_events if e.ip))
+        names = sorted(set(e.rule_name or e.category for e in hvv_events))
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("hv"), rule_id="CN-HVV-001", rule_name="护网/重保高频漏洞利用",
+            description=f"检测到 {len(hvv_events)} 条国内实战高频漏洞或 Webshell 相关痕迹",
+            level=ThreatLevel.CRITICAL, category="护网画像",
+            mitre_attack="T1190", mitre_phase="初始访问",
+            affected_events=[e.id for e in hvv_events],
+            evidence=[
+                f"类型: {', '.join(names[:5])}",
+                f"来源IP: {', '.join(ips[:5]) or '?'}",
+                f"示例: {hvv_events[0].message}",
+            ],
+            recommendation="优先核查命中路径是否存在真实漏洞或 Webshell，检查同源 IP 后续登录、命令执行、文件上传和出网行为",
+            timestamp=max(e.timestamp for e in hvv_events), confidence="high",
+        ))
+
+    failed_by_ip: Dict[str, List[LogEvent]] = defaultdict(list)
+    success_by_ip: Dict[str, List[LogEvent]] = defaultdict(list)
+    for ev in events:
+        if ev.ip and any(t in ev.tags for t in ("failed-login", "failed-logon")):
+            failed_by_ip[ev.ip].append(ev)
+        if ev.ip and "successful-login" in ev.tags:
+            success_by_ip[ev.ip].append(ev)
+
+    for ip, successes in success_by_ip.items():
+        failures = failed_by_ip.get(ip, [])
+        if len(failures) < 5:
+            continue
+        evts = failures + successes
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("hs"), rule_id="CN-HVV-002", rule_name="爆破后成功登录",
+            description=f"来源 {ip} 在 {len(failures)} 次失败登录后出现 {len(successes)} 次成功登录",
+            level=ThreatLevel.CRITICAL, category="护网画像",
+            mitre_attack="T1078", mitre_phase="初始访问",
+            affected_events=[e.id for e in evts],
+            evidence=[
+                f"失败次数: {len(failures)}",
+                f"成功账户: {', '.join(sorted(set(e.user for e in successes if e.user))[:5]) or '?'}",
+                f"时间: {min(e.timestamp for e in evts)} ~ {max(e.timestamp for e in evts)}",
+            ],
+            recommendation="立即核查成功登录账户、登录源和后续操作，必要时冻结账户并重置凭据",
+            timestamp=max(e.timestamp for e in evts), confidence="high",
+        ))
+
+    return alerts
+
+
+def detect_p0_security_events(events: List[LogEvent]) -> List[DetectionAlert]:
+    """聚合 HVV/重保 P0 结构化日志里的高价值安全事件。"""
+    alerts: List[DetectionAlert] = []
+
+    _append_p0_alert(
+        alerts, events,
+        rule_id="P0-C2-001",
+        rule_name="P0 可疑命令控制/外联",
+        category="命令控制",
+        mitre_attack="T1071",
+        mitre_phase="命令控制",
+        predicate=lambda e: "c2" in e.tags or "dns-tunnel" in e.tags,
+        recommendation="优先核查源主机进程、DNS/代理/防火墙同时间窗口外联，必要时隔离主机并封禁域名/IP",
+    )
+    _append_p0_alert(
+        alerts, events,
+        rule_id="P0-EXFIL-001",
+        rule_name="P0 疑似数据外传",
+        category="数据外传",
+        mitre_attack="T1041",
+        mitre_phase="数据外传",
+        predicate=lambda e: "exfiltration" in e.tags,
+        recommendation="核查外发账号、源主机、目的地址和传输对象，结合 DLP/代理/防火墙确认数据范围",
+    )
+    _append_p0_alert(
+        alerts, events,
+        rule_id="P0-BASTION-001",
+        rule_name="P0 堡垒机高危命令/文件操作",
+        category="执行",
+        mitre_attack="T1059",
+        mitre_phase="执行",
+        predicate=lambda e: "bastion-command" in e.tags,
+        recommendation="回放堡垒机会话，确认命令授权来源，核查目标主机文件落地、进程执行和后续外联",
+    )
+    _append_p0_alert(
+        alerts, events,
+        rule_id="P0-FW-001",
+        rule_name="P0 防火墙敏感端口暴露/访问",
+        category="横向移动",
+        mitre_attack="T1021",
+        mitre_phase="横向移动",
+        predicate=lambda e: "exposed-service" in e.tags,
+        recommendation="核查策略是否符合重保基线，确认来源是否可信，必要时收敛公网/跨区高危端口访问",
+    )
+    _append_p0_alert(
+        alerts, events,
+        rule_id="P0-EDR-001",
+        rule_name="P0 EDR/XDR 高危终端告警",
+        category="主机告警",
+        mitre_attack="T1204",
+        mitre_phase="执行",
+        predicate=lambda e: "edr" in e.tags and e.level.score >= ThreatLevel.HIGH.score,
+        recommendation="优先查看 EDR 进程树、文件 Hash、网络连接和处置动作，必要时隔离终端并导出取证包",
+    )
+
+    return alerts
+
+
+def _append_p0_alert(
+    alerts: List[DetectionAlert],
+    events: List[LogEvent],
+    rule_id: str,
+    rule_name: str,
+    category: str,
+    mitre_attack: str,
+    mitre_phase: str,
+    predicate,
+    recommendation: str,
+) -> None:
+    evts = [e for e in events if predicate(e)]
+    if not evts:
+        return
+    max_level = max((e.level for e in evts), key=lambda lvl: lvl.score)
+    if max_level.score < ThreatLevel.HIGH.score:
+        max_level = ThreatLevel.HIGH
+    ips = sorted(set(e.ip for e in evts if e.ip))
+    hosts = sorted(set(e.host for e in evts if e.host))
+    evidence = [
+        f"事件数: {len(evts)}",
+        f"IP: {', '.join(ips[:5]) or '?'}",
+        f"主机/目标: {', '.join(hosts[:5]) or '?'}",
+        f"示例: {evts[0].message}",
+    ]
+    alerts.append(DetectionAlert(
+        id="a"+gen_id("p0"),
+        rule_id=rule_id,
+        rule_name=rule_name,
+        description=f"{rule_name}，共 {len(evts)} 条事件",
+        level=max_level,
+        category=category,
+        mitre_attack=mitre_attack,
+        mitre_phase=mitre_phase,
+        affected_events=[e.id for e in evts],
+        evidence=evidence,
+        recommendation=recommendation,
+        timestamp=max(e.timestamp for e in evts),
+        confidence="high" if max_level.score >= ThreatLevel.HIGH.score else "medium",
+    ))
+
+
 def _dedup_alerts(alerts: List[DetectionAlert]) -> List[DetectionAlert]:
-    seen: Set[str] = set()
+    """以 (rule_id, 影响事件集合) 为去重 key。
+
+    早期实现用 description 前 50 字做 key，对于不同 IP 但同类描述的告警会
+    误删（例如 "检测到 X 次..." 这种通用句式），所以改成基于 affected_events
+    的精确去重。
+    """
+    seen: Set = set()
     result = []
     for a in alerts:
-        key = f"{a.rule_id}:{a.description[:50]}"
+        key = (a.rule_id, tuple(sorted(a.affected_events)))
         if key not in seen:
             seen.add(key)
             result.append(a)
@@ -366,10 +589,20 @@ def _dedup_alerts(alerts: List[DetectionAlert]) -> List[DetectionAlert]:
 
 def _build_timeline(events: List[LogEvent]) -> List[TimelineEntry]:
     significant = [e for e in events if e.level.score >= ThreatLevel.MEDIUM.score or e.mitre_attack]
-    significant.sort(key=lambda e: e.timestamp)
+    def ts_epoch(ts: str) -> float:
+        if not ts:
+            return 0.0
+        s = ts.replace("Z", "+00:00")
+        try:
+            return datetime.datetime.fromisoformat(s).timestamp()
+        except Exception:
+            return 0.0
+
+    significant.sort(key=lambda e: (-e.level.score, -ts_epoch(e.timestamp), e.id))
     return [TimelineEntry(timestamp=e.timestamp, level=e.level, category=e.category,
                           message=e.message, event_id=e.id, source_file=e.source_file,
-                          mitre_attack=e.mitre_attack) for e in significant[:500]]
+                          mitre_attack=e.mitre_attack)
+            for e in significant[:config.THRESHOLDS.timeline_max_items]]
 
 
 def _build_attack_chain(events: List[LogEvent], alerts: List[DetectionAlert]) -> List[AttackChainEntry]:
@@ -403,7 +636,7 @@ def _build_attack_chain(events: List[LogEvent], alerts: List[DetectionAlert]) ->
             for p, d in phases.items() if d["count"] > 0]
 
 
-def _calc_risk_score(events: List[LogEvent], alerts: List[DetectionAlert]) -> int:
+def _calc_risk_score(events: List[LogEvent], alerts: List[DetectionAlert], incidents=None) -> int:
     score = 0
     score += sum(1 for e in events if e.level == ThreatLevel.CRITICAL) * 8
     score += sum(1 for e in events if e.level == ThreatLevel.HIGH)     * 4
@@ -414,6 +647,9 @@ def _calc_risk_score(events: List[LogEvent], alerts: List[DetectionAlert]) -> in
     if any(a.rule_id.startswith("EVAS") for a in alerts): score += 25
     if any(a.rule_id.startswith("CRED") for a in alerts): score += 25
     if any(a.rule_id == "BRUTE-001" for a in alerts):     score += 10
+    incidents = incidents or []
+    score += sum(1 for item in incidents if item.level == ThreatLevel.CRITICAL) * 8
+    score += sum(1 for item in incidents if item.confidence == "high") * 4
     return min(100, score)
 
 
@@ -437,6 +673,16 @@ def _gen_recommendations(alerts: List[DetectionAlert]) -> List[str]:
         add("【高危】隔离受影响主机，检查网络分段，审查所有横向移动路径")
     if any(a.rule_id.startswith("WEB") for a in alerts):
         add("【高危】部署 WAF，修复已识别的 Web 漏洞，检查是否有数据泄露")
+    if any(a.rule_id.startswith("P0-C2") for a in alerts):
+        add("【高危】核查 DNS/代理/防火墙外联链路，定位源主机进程并封禁恶意域名或 IP")
+    if any(a.rule_id.startswith("P0-EXFIL") for a in alerts):
+        add("【高危】核查疑似外传流量对应账号、文件和业务系统，评估敏感数据影响范围")
+    if any(a.rule_id.startswith("P0-BASTION") for a in alerts):
+        add("【高危】回放堡垒机会话，确认高危命令是否授权，检查目标主机后续进程和文件变化")
+    if any(a.rule_id.startswith("P0-FW") for a in alerts):
+        add("【高危】收敛公网或跨区敏感端口访问，复核防火墙/NAT 策略和资产暴露面")
+    if any(a.rule_id.startswith("P0-EDR") for a in alerts):
+        add("【高危】优先处置 EDR/XDR 高危终端告警，隔离失陷主机并导出进程树和样本 Hash")
     if any(a.rule_id.startswith("EXEC") for a in alerts):
         add("【中危】启用应用白名单 (AppLocker/WDAC)，限制 PowerShell 执行策略")
     if not recs:

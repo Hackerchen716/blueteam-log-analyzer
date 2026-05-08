@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import datetime
 from typing import List
+from ..ioc import extract_iocs
 from ..models import ParseResult, AnalysisSummary
+from ..utils.helpers import safe_print
 
 
 def generate_json_report(
@@ -11,6 +13,13 @@ def generate_json_report(
     summary: AnalysisSummary,
     output_path: str,
 ) -> None:
+    all_events = []
+    for result in parse_results:
+        all_events.extend(result.events)
+
+    # 高置信度 IOC：只从触发告警的事件中提取，避免把正常运维流量混进列表
+    iocs_high_conf = extract_iocs(all_events, alerts=summary.alerts)
+
     report = {
         "meta": {
             "tool": "BlueTeam Log Analyzer (BLA)",
@@ -51,6 +60,7 @@ def generate_json_report(
             for r in parse_results
         ],
         "alerts": [a.to_dict() for a in summary.alerts],
+        "incidents": [incident.to_dict() for incident in summary.incidents],
         "attack_chain": [
             {
                 "phase":       c.phase,
@@ -71,10 +81,12 @@ def generate_json_report(
             }
             for t in summary.timeline[:200]
         ],
+        "iocs": iocs_high_conf,
+        "iocs_all_events": extract_iocs(all_events),
         "recommendations": summary.recommendations,
     }
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
-    print(f"  [✓] JSON 报告已保存: {output_path}")
+    safe_print(f"  [✓] JSON 报告已保存: {output_path}")

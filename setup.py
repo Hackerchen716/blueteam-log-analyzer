@@ -8,9 +8,12 @@ setup(
     long_description_content_type="text/markdown",
     author="Hackerchen716",
     url="https://github.com/Hackerchen716/blueteam-log-analyzer",
-    license="MIT",
     python_requires=">=3.9",
     packages=find_packages(),
+    include_package_data=True,
+    package_data={
+        "bla.rules": ["*.yaml", "*.yml"],
+    },
     py_modules=["bla_cli"],
     entry_points={
         "console_scripts": [
@@ -18,15 +21,11 @@ setup(
         ],
     },
     install_requires=[],
-    extras_require={
-        "evtx": ["python-evtx>=0.7.4"],
-    },
     classifiers=[
         "Development Status :: 4 - Beta",
         "Environment :: Console",
         "Intended Audience :: Information Technology",
         "Intended Audience :: System Administrators",
-        "License :: OSI Approved :: MIT License",
         "Operating System :: MacOS :: MacOS X",
         "Operating System :: POSIX :: Linux",
         "Operating System :: Microsoft :: Windows",

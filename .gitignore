@@ -39,6 +39,8 @@ Thumbs.db
 # Output files (don't commit reports)
 *.html
 *.json
+!docs/allowlist-example.json
+!tests/fixtures/**/*.json
 *.csv
 !sample_logs/
 
