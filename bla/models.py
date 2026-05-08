@@ -101,6 +101,7 @@ class ParseStats:
     top_users: List[Dict[str, Any]] = field(default_factory=list)
     top_event_ids: List[Dict[str, Any]] = field(default_factory=list)
     attack_types: Dict[str, int] = field(default_factory=dict)
+    windows_logon_stats: Dict[str, Any] = field(default_factory=dict)
     time_start: str = ""
     time_end: str = ""
     parse_errors: int = 0

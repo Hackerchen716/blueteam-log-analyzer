@@ -24,7 +24,7 @@ from .stats import compute_stats
 
 # Combined Log Format
 _COMBINED_RE = re.compile(
-    r'^([\d.]+)\s+'                      # IP
+    r'^([0-9a-fA-F:.]+)\s+'              # IP (IPv4/IPv6)
     r'\S+\s+'                            # ident
     r'(\S+)\s+'                          # user
     r'\[([^\]]+)\]\s+'                   # timestamp
@@ -35,6 +35,17 @@ _COMBINED_RE = re.compile(
     r'(?:"([^"]*)")?'                    # user-agent
 )
 
+_SUSPICIOUS_GENERIC = re.compile(
+    r'(\.\./|%2e%2e|%252e|%2f%2e%2e|%5c%2e%2e|'
+    r'\bwhoami\b|\bid\b|\buname\b|\bcat\b|/etc/passwd|'
+    r'\b(select|union)\b.{0,40}\b(select|from)\b|'
+    r'(\bor\b|\band\b)\s+\d+\s*=\s*\d+|'
+    r'1\s*=\s*1|'
+    r'(\bexec\b|\bxp_cmdshell\b)|'
+    r'(;|%3b|\|\||%7c%7c|&&|%26%26))',
+    re.I
+)
+
 # 攻击模式库（参考 OSTE-WLA / ModSecurity）
 _ATTACK_PATTERNS: List[Tuple[re.Pattern, ThreatLevel, str, str, str, List[str]]] = [
     # (pattern, level, category, name, mitre, tags)
@@ -43,7 +54,9 @@ _ATTACK_PATTERNS: List[Tuple[re.Pattern, ThreatLevel, str, str, str, List[str]]]
 
     (re.compile(r'(union.{1,20}select|select.{1,50}from|insert.{1,20}into|'
                 r'drop.{1,20}table|exec\s*\(|xp_cmdshell|'
-                r';\s*drop|;\s*delete|;\s*update)', re.I),
+                r';\s*drop|;\s*delete|;\s*update|'
+                r'(\bor\b|\band\b)\s+\d+\s*=\s*\d+|'
+                r'1\s*=\s*1)', re.I),
      ThreatLevel.CRITICAL, "Web攻击", "SQL注入", "T1190", ["sqli", "injection"]),
 
     (re.compile(r'(<script|javascript:|onerror\s*=|onload\s*=|'
@@ -55,7 +68,8 @@ _ATTACK_PATTERNS: List[Tuple[re.Pattern, ThreatLevel, str, str, str, List[str]]]
      ThreatLevel.CRITICAL, "Web攻击", "LFI/RFI", "T1083", ["lfi", "rfi", "path-traversal"]),
 
     (re.compile(r'(cmd=|exec=|system\s*\(|passthru|shell_exec|'
-                r'phpinfo\s*\(|eval\s*\(|assert\s*\()', re.I),
+                r'phpinfo\s*\(|eval\s*\(|assert\s*\(|'
+                r'\bwhoami\b|\bid\b|\buname\b)', re.I),
      ThreatLevel.CRITICAL, "Web攻击", "命令注入/代码执行", "T1059", ["rce", "command-injection"]),
 
     (re.compile(r'(\.php\?.*=http|\.php\?.*=ftp|include\s*\(|require\s*\()', re.I),
@@ -169,15 +183,40 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
             break
 
     if not attack_detected:
+        if method.upper() == "POST":
+            if _SUSPICIOUS_GENERIC.search(check_str) or "?" in path:
+                level     = ThreatLevel.HIGH if _SUSPICIOUS_GENERIC.search(check_str) else ThreatLevel.MEDIUM
+                cat       = "Web攻击"
+                tags      = ["suspicious-post", "web-attack"]
+                mitre     = "T1190"
+                rule_name = "可疑 POST 请求"
+                event_msg = f"可疑POST: {truncate(path, 100)} -> {status}"
+            elif status >= 400:
+                level     = ThreatLevel.MEDIUM
+                cat       = "Web"
+                tags      = ["post-error"]
+                rule_name = f"POST 异常响应 {status}"
+                event_msg = f"POST {status}: {truncate(path, 100)}"
+            else:
+                return None
+
+        if _SUSPICIOUS_GENERIC.search(check_str):
+            level     = ThreatLevel.HIGH
+            cat       = "Web攻击"
+            tags      = ["suspicious-params", "web-attack"]
+            mitre     = "T1190"
+            rule_name = "可疑参数/命令特征"
+            event_msg = f"可疑参数: {method} {truncate(path, 100)} -> {status}"
+
         # HTTP 错误码
-        if status == 401 or status == 403:
+        if not tags and (status == 401 or status == 403):
             level     = ThreatLevel.MEDIUM
             cat       = "访问控制"
             tags      = ["access-denied", "authentication"]
             rule_name = f"HTTP {status} 访问拒绝"
             event_msg = f"访问拒绝 {status}: {path}"
 
-        elif status == 404:
+        elif not tags and status == 404:
             # 只标记可疑 404
             if re.search(r'\.(php|asp|aspx|jsp|cgi|sh|py|rb|pl)\b', path, re.I):
                 level     = ThreatLevel.LOW
@@ -188,14 +227,14 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
             else:
                 return None  # 过滤普通 404
 
-        elif status >= 500:
+        elif not tags and status >= 500:
             level     = ThreatLevel.MEDIUM
             cat       = "服务器错误"
             tags      = ["server-error"]
             rule_name = f"HTTP {status} 服务器错误"
             event_msg = f"服务器错误 {status}: {path}"
 
-        elif 200 <= status < 300:
+        elif not tags and 200 <= status < 300:
             return None  # 过滤正常成功请求
 
     return LogEvent(

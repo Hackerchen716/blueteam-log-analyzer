@@ -18,16 +18,117 @@ from collections import defaultdict
 from ..models import LogEvent, ParseResult, ParseStats, ThreatLevel
 from ..utils.helpers import gen_id, normalize_timestamp, truncate
 
+_LOGON_TYPE_MAP = {
+    "2": "交互式",
+    "3": "网络",
+    "4": "批处理",
+    "5": "服务",
+    "7": "解锁",
+    "8": "网络明文",
+    "9": "新凭据",
+    "10": "远程交互/RDP",
+    "11": "缓存交互",
+}
+
+
+def _clean_win_value(value: str) -> str:
+    value = (value or "").strip()
+    return "" if value in ("-", "::1", "127.0.0.1", "::ffff:127.0.0.1") else value
+
+
+def _pick_first(details: Dict[str, str], *keys: str) -> str:
+    for key in keys:
+        value = _clean_win_value(details.get(key, ""))
+        if value:
+            return value
+    return ""
+
+
+def _logon_type_label(logon_type: str) -> str:
+    return _LOGON_TYPE_MAP.get((logon_type or "").strip(), "未知")
+
+
+def _describe_network(details: Dict[str, str]) -> str:
+    ip = _pick_first(details, "IpAddress", "SourceAddress")
+    port = _pick_first(details, "IpPort")
+    workstation = _pick_first(details, "WorkstationName")
+    if ip and port:
+        return f"{ip}:{port}"
+    if ip:
+        return ip
+    if workstation:
+        return workstation
+    return "本地"
+
+
+def _build_4624_message(details: Dict[str, str]) -> str:
+    user = _pick_first(details, "TargetUserName", "SubjectUserName") or "?"
+    domain = _pick_first(details, "TargetDomainName", "SubjectDomainName")
+    domain_prefix = f"{domain}\\" if domain else ""
+    logon_type = details.get("LogonType", "")
+    logon_label = _logon_type_label(logon_type)
+    auth_pkg = _pick_first(details, "AuthenticationPackageName")
+    network = _describe_network(details)
+    auth_part = f" 认证={auth_pkg}" if auth_pkg else ""
+    return (
+        f"登录成功: 账户={domain_prefix}{user} "
+        f"登录类型={logon_type or '?'}({logon_label}) 来源={network}{auth_part}"
+    )
+
+
+def _build_4625_message(details: Dict[str, str]) -> str:
+    user = _pick_first(details, "TargetUserName", "SubjectUserName") or "?"
+    domain = _pick_first(details, "TargetDomainName", "SubjectDomainName")
+    domain_prefix = f"{domain}\\" if domain else ""
+    logon_type = details.get("LogonType", "")
+    logon_label = _logon_type_label(logon_type)
+    network = _describe_network(details)
+    reason = _pick_first(details, "FailureReason")
+    status = _pick_first(details, "Status")
+    sub_status = _pick_first(details, "SubStatus")
+    failure_bits = []
+    if reason:
+        failure_bits.append(reason)
+    if status:
+        failure_bits.append(f"Status={status}")
+    if sub_status:
+        failure_bits.append(f"SubStatus={sub_status}")
+    failure_suffix = f" 失败原因={' | '.join(failure_bits)}" if failure_bits else ""
+    return (
+        f"登录失败: 账户={domain_prefix}{user} "
+        f"登录类型={logon_type or '?'}({logon_label}) 来源={network}{failure_suffix}"
+    )
+
+
+def _augment_auth_details(eid: int, details: Dict[str, str]) -> None:
+    if eid not in (4624, 4625):
+        return
+
+    details["account_name"] = _pick_first(details, "TargetUserName", "SubjectUserName")
+    details["account_domain"] = _pick_first(details, "TargetDomainName", "SubjectDomainName")
+    details["source_ip"] = _pick_first(details, "IpAddress", "SourceAddress")
+    details["source_port"] = _pick_first(details, "IpPort")
+    details["workstation"] = _pick_first(details, "WorkstationName")
+    details["logon_type_label"] = _logon_type_label(details.get("LogonType", ""))
+    details["logon_process"] = _pick_first(details, "LogonProcessName")
+    details["auth_package"] = _pick_first(details, "AuthenticationPackageName")
+    details["process_name"] = _pick_first(details, "ProcessName")
+    details["failure_reason"] = _pick_first(details, "FailureReason")
+    details["status_code"] = _pick_first(details, "Status")
+    details["sub_status_code"] = _pick_first(details, "SubStatus")
+    details["subject_user"] = _pick_first(details, "SubjectUserName")
+    details["subject_domain"] = _pick_first(details, "SubjectDomainName")
+
 # Windows 事件 ID 规则库
 # 格式: event_id -> (level, category, message_fn, tags, mitre, rule_name)
 _WIN_RULES: Dict[int, dict] = {
     # ── 认证 ──────────────────────────────────────────────
     4624: dict(level=ThreatLevel.INFO,     cat="认证",    tags=["logon"],
                mitre="T1078",      rule="登录成功",
-               msg=lambda d: f"登录成功: 用户={d.get('TargetUserName','?')} 类型={d.get('LogonType','?')} 来源={d.get('IpAddress',d.get('WorkstationName','本地'))}"),
+               msg=_build_4624_message),
     4625: dict(level=ThreatLevel.MEDIUM,   cat="认证",    tags=["failed-logon","brute-force"],
                mitre="T1110.001",  rule="登录失败",
-               msg=lambda d: f"登录失败: 用户={d.get('TargetUserName','?')} 来源={d.get('IpAddress','?')} 类型={d.get('LogonType','?')}"),
+               msg=_build_4625_message),
     4648: dict(level=ThreatLevel.MEDIUM,   cat="认证",    tags=["explicit-creds","lateral-movement"],
                mitre="T1550",      rule="显式凭据登录",
                msg=lambda d: f"显式凭据登录: {d.get('SubjectUserName','?')} -> {d.get('TargetServerName','?')}"),
@@ -267,8 +368,10 @@ def _parse_xml_event(xml_text: str, source_file: str) -> Optional[LogEvent]:
                 if name:
                     details[name] = val.strip()
 
-        user    = details.get("SubjectUserName") or details.get("TargetUserName") or ""
-        ip      = details.get("IpAddress") or details.get("SourceAddress") or ""
+        _augment_auth_details(eid, details)
+
+        user    = details.get("account_name") or details.get("TargetUserName") or details.get("SubjectUserName") or ""
+        ip      = details.get("source_ip") or details.get("IpAddress") or details.get("SourceAddress") or ""
         process = details.get("NewProcessName") or details.get("ProcessName") or details.get("Image") or ""
 
         level, cat, msg, tags, mitre, rule_name = _classify_event(eid, details, channel)

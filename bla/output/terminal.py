@@ -55,6 +55,12 @@ def _section(title: str, color: str = CYAN) -> str:
     return f"\n{BOLD}{color}{line}\n  {title}\n{line}{RESET}\n"
 
 
+def _fmt_top(items: list, key: str, limit: int = 3) -> str:
+    if not items:
+        return "-"
+    return ", ".join(f"{item.get(key, '?')}({item.get('count', 0)})" for item in items[:limit])
+
+
 def print_terminal_report(
     parse_results: List[ParseResult],
     summary: AnalysisSummary,
@@ -110,6 +116,31 @@ def print_terminal_report(
         if r.stats.top_ips:
             top_ip = r.stats.top_ips[0]
             out.write(f"    Top IP:   {WHITE}{top_ip['ip']}{RESET} ({top_ip['count']} 次)\n")
+        if r.stats.windows_logon_stats:
+            win_stats = r.stats.windows_logon_stats
+            out.write(f"    Windows 登录摘要: 4624={win_stats.get('total_success', 0)}  |  4625={win_stats.get('total_failure', 0)}\n")
+            for event_id in ("4624", "4625"):
+                event_stats = win_stats.get("events", {}).get(event_id)
+                if not event_stats:
+                    continue
+                out.write(
+                    f"      EID {event_id} {event_stats.get('event_name', '')}: "
+                    f"账户={_fmt_top(event_stats.get('principals', []), 'principal')}  |  "
+                    f"源IP={_fmt_top(event_stats.get('source_ips', []), 'source_ip')}\n"
+                )
+                logon_types = event_stats.get("logon_types", [])[:3]
+                logon_type_text = ", ".join(
+                    f"{item.get('logon_type', '?')}:{item.get('label', '未知')}({item.get('count', 0)})"
+                    for item in logon_types
+                ) if logon_types else "-"
+                out.write(
+                    f"      登录类型={logon_type_text}  |  "
+                    f"域={_fmt_top(event_stats.get('account_domains', []), 'account_domain')}\n"
+                )
+                if event_id == "4625" and event_stats.get("failure_reasons"):
+                    out.write(
+                        f"      失败原因={_fmt_top(event_stats.get('failure_reasons', []), 'failure_reason')}\n"
+                    )
         out.write("\n")
 
     # ── ATT&CK 攻击链 ─────────────────────────────────────
