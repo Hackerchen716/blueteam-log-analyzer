@@ -739,6 +739,126 @@ web_attacks:
         self.assertEqual(len(data["incidents"]), len(summary.incidents))
         self.assertIn("next_logs", data["incidents"][0])
 
+    # ---- 小套餐：incident kill chain 排序 + explain markdown ----------------
+
+    def test_incident_attack_phases_follow_kill_chain_order(self):
+        """incident.attack_phases 必须按 ATT&CK kill chain 顺序，不是字母序。"""
+        from bla.detection.correlation import KILL_CHAIN_ORDER, correlate_incidents
+        from bla.models import LogEvent as _LE
+
+        def _ev(ev_id: str, family: str, level: ThreatLevel) -> _LE:
+            return _LE(
+                id=ev_id, timestamp="2026-05-08T10:00:00", level=level,
+                category="测试", source="t", source_file="t.log",
+                message=f"{family} 事件", raw_line="",
+                ip="9.9.9.9", user="alice", host="host1",
+                details={
+                    "src_ip": "9.9.9.9", "account": "alice", "asset": "host1",
+                    "event_family": family, "source_type": "waf",
+                },
+            )
+
+        # 故意制造命令控制 / 初始访问 / 主机失陷 三个阶段，按字母 / 拼音
+        # 它们的顺序绝对不会等于 ATT&CK kill chain 顺序，便于反向证明。
+        events = [
+            _ev("e1", "command-control", ThreatLevel.CRITICAL),
+            _ev("e2", "initial-access", ThreatLevel.HIGH),
+            _ev("e3", "compromise", ThreatLevel.CRITICAL),
+        ]
+        incidents = correlate_incidents(events, [])
+        self.assertTrue(incidents, "应至少产出一个 incident")
+        phases = incidents[0].attack_phases
+        self.assertEqual(phases, ["初始访问", "主机失陷", "命令控制"])
+        self.assertEqual(len(phases), len(set(phases)),
+                         "incident 阶段不应有重复")
+        # KILL_CHAIN_ORDER 顺序约束（防止后续误改）
+        self.assertLess(KILL_CHAIN_ORDER.index("初始访问"),
+                        KILL_CHAIN_ORDER.index("主机失陷"))
+        self.assertLess(KILL_CHAIN_ORDER.index("主机失陷"),
+                        KILL_CHAIN_ORDER.index("命令控制"))
+
+    def test_html_report_renders_incident_killchain_chips(self):
+        """HTML 报告 incident 卡片必须画出 mini kill chain，命中阶段 chip 高亮。"""
+        from bla.detection.correlation import correlate_incidents
+        from bla.models import LogEvent as _LE
+        from bla.models import ParseResult, ParseStats
+
+        events = [
+            _LE(
+                id="e1", timestamp="2026-05-08T10:00:00",
+                level=ThreatLevel.CRITICAL, category="测试", source="t",
+                source_file="t.log", message="m", raw_line="",
+                ip="9.9.9.9", user="alice", host="h1",
+                details={
+                    "src_ip": "9.9.9.9", "account": "alice", "asset": "h1",
+                    "event_family": "initial-access", "source_type": "waf",
+                },
+            )
+        ]
+        incidents = correlate_incidents(events, [])
+        summary = AnalysisSummary(
+            risk_score=80, risk_level=ThreatLevel.HIGH, alerts=[],
+            timeline=[], attack_chain=[], recommendations=[],
+            total_events=1, files_analyzed=1, incidents=incidents,
+        )
+        result = ParseResult(file_name="t.log", log_type="test",
+                             events=events, stats=ParseStats(total=1))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "report.html"
+            generate_html_report([result], summary, str(path))
+            html = path.read_text(encoding="utf-8")
+        self.assertIn("incident-killchain", html)
+        self.assertIn("kc-chip", html)
+        self.assertIn("kc-hit", html, "命中阶段必须以高亮 chip 渲染")
+        self.assertIn("kc-miss", html, "未命中阶段也要渲染（灰色）")
+
+    def test_explain_markdown_format_renders_ticket_ready_doc(self):
+        """explain --format markdown 应当产出可直接粘贴进工单的 Markdown。"""
+        from bla_cli import _render_incident_markdown, _render_alert_markdown
+
+        incident = {
+            "id": "inc-001",
+            "title": "测试案件",
+            "level": "critical",
+            "confidence": "high",
+            "description": "9.9.9.9 攻击 web1",
+            "affected_event_count": 5,
+            "affected_alerts": ["a1", "a2"],
+            "source_types": ["waf", "edr"],
+            "attack_phases": ["初始访问", "主机失陷"],
+            "source_ips": ["9.9.9.9"],
+            "accounts": ["alice"],
+            "assets": ["web1"],
+            "evidence": ["日志源: waf, edr", "命中规则: WEB-SQLI"],
+            "recommended_actions": ["隔离主机", "重置密码"],
+            "next_logs": ["EDR 进程树"],
+            "timeline": [
+                {"timestamp": "2026-05-08T10:00:00", "level": "critical",
+                 "source_file": "waf.log", "message": "SQL 注入命中"},
+            ],
+        }
+        md = _render_incident_markdown(incident)
+        self.assertIn("## 案件 inc-001：测试案件", md)
+        self.assertIn("**级别**：critical", md)
+        self.assertIn("**攻击阶段**：初始访问 → 主机失陷", md)
+        self.assertIn("- [ ] 隔离主机", md)
+        self.assertIn("| 时间 | 级别 | 来源 | 描述 |", md)
+        self.assertIn("SQL 注入命中", md)
+
+        alert_md = _render_alert_markdown({
+            "id": "a1", "rule_id": "WEB-SQLI", "rule_name": "SQL注入",
+            "level": "critical", "confidence": "high",
+            "mitre_attack": "T1190", "mitre_phase": "初始访问",
+            "affected_event_count": 1, "timestamp": "2026-05-08T10:00:00",
+            "description": "...", "evidence": ["payload=union select"],
+            "recommendation": "部署 WAF",
+        })
+        self.assertIn("## 告警 a1：SQL注入", alert_md)
+        self.assertIn("**MITRE**：T1190 / 初始访问", alert_md)
+        self.assertIn("- payload=union select", alert_md)
+        self.assertIn("部署 WAF", alert_md)
+
 
 if __name__ == "__main__":
     unittest.main()

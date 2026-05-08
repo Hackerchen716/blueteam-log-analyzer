@@ -28,6 +28,23 @@ _FAMILY_PHASE = {
     "other": "其他",
 }
 
+# 按 ATT&CK kill chain 顺序定义阶段权重，用于 incident.attack_phases 排序，
+# 这样 HTML / explain 输出的攻击链一定是从"侦察"走到"数据外传"，符合
+# 蓝队复盘的阅读习惯，而不是按字母序。
+KILL_CHAIN_ORDER = (
+    "侦察",
+    "初始访问",
+    "身份突破",
+    "执行",
+    "主机失陷",
+    "横向移动",
+    "命令控制",
+    "数据外传",
+    "网络活动",
+    "其他",
+)
+_PHASE_INDEX = {phase: idx for idx, phase in enumerate(KILL_CHAIN_ORDER)}
+
 
 def correlate_incidents(events: Sequence[LogEvent], alerts: Sequence[DetectionAlert]) -> List[Incident]:
     """Build incident-level cases from related alerts/events."""
@@ -145,7 +162,12 @@ def _build_incident(index: int, events: Sequence[LogEvent], alerts: Sequence[Det
     assets = _sorted_values(event.details.get("asset") or event.host for event in events)
     source_types = _sorted_values(event.details.get("source_type") for event in events)
     families = _sorted_values(event.details.get("event_family") for event in events)
-    phases = [_FAMILY_PHASE.get(family, family) for family in families]
+    raw_phases = [_FAMILY_PHASE.get(family, family) for family in families]
+    # 按 ATT&CK kill chain 顺序去重排序，未知阶段排在已知之后
+    phases = sorted(
+        dict.fromkeys(raw_phases),
+        key=lambda phase: (_PHASE_INDEX.get(phase, len(_PHASE_INDEX)), phase),
+    )
     confidence = _confidence(events, alerts, source_types, families)
     title = _title(source_ips, assets, source_types, phases, max_level)
     description = _description(source_ips, accounts, assets, source_types, phases, alerts, events)

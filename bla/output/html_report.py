@@ -208,6 +208,7 @@ def generate_html_report(
     chain_html = "".join(chain_parts)
 
     # Incident/case HTML
+    from ..detection.correlation import KILL_CHAIN_ORDER as _INCIDENT_KILL_CHAIN
     incidents_html = ""
     for i, incident in enumerate(summary.incidents, 1):
         color = _level_color_hex(incident.level)
@@ -218,6 +219,19 @@ def generate_html_report(
             f"<li><span>{_h(item.timestamp)}</span>{_h(item.message)}</li>"
             for item in incident.timeline[:6]
         )
+        # incident 级 mini kill chain：每个阶段一格，命中亮色，未命中灰色
+        hit_phases = set(incident.attack_phases)
+        chain_chips = []
+        visible_phases = [p for p in _INCIDENT_KILL_CHAIN if p != "其他"]
+        for idx, phase in enumerate(visible_phases):
+            cls = "kc-chip kc-hit" if phase in hit_phases else "kc-chip kc-miss"
+            kc_color = color if phase in hit_phases else "#475569"
+            chain_chips.append(
+                f'<span class="{cls}" style="border-color:{kc_color};color:{kc_color};">{_h(phase)}</span>'
+            )
+            if idx < len(visible_phases) - 1:
+                chain_chips.append('<span class="kc-sep">›</span>')
+        kill_chain_html = "".join(chain_chips)
         incidents_html += f"""
         <div class="incident-card" style="border-left-color:{color};">
           <div class="incident-head">
@@ -226,9 +240,9 @@ def generate_html_report(
             <span class="phase-tag">置信度 {_h(incident.confidence)}</span>
           </div>
           <p>{_h(incident.description)}</p>
+          <div class="incident-killchain">{kill_chain_html}</div>
           <div class="incident-meta">
             <span>日志源: {_h(', '.join(incident.source_types[:8]) or '?')}</span>
-            <span>阶段: {_h(', '.join(incident.attack_phases[:8]) or '?')}</span>
             <span>事件: {len(incident.affected_events)}</span>
           </div>
           <div class="incident-grid">
@@ -379,6 +393,10 @@ def generate_html_report(
   .next-logs code {{ background: #111827; border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; color: var(--accent); }}
   .mini-timeline {{ margin: 8px 0 0 16px; color: var(--text2); }}
   .mini-timeline span {{ color: var(--accent); margin-right: 8px; }}
+  .incident-killchain {{ display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin: 10px 0 6px; }}
+  .kc-chip {{ display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid; font-size: 11px; line-height: 1.6; }}
+  .kc-chip.kc-miss {{ opacity: 0.5; }}
+  .kc-sep {{ color: var(--text2); font-size: 12px; }}
   .alert-header {{ display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }}
   .alert-num {{ color: var(--text2); font-size: 11px; }}
   .alert-desc {{ margin-bottom: 8px; }}

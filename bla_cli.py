@@ -163,7 +163,10 @@ def _cmd_explain(argv: List[str]) -> None:
         description="从 JSON 报告解释某个 alert_id 或 incident_id 的证据与处置建议",
     )
     parser.add_argument("id", help="告警 ID（如 awa1）或案件 ID（如 inc-001）")
-    parser.add_argument("--report", default="report.json", help="由 --json 或 --out 生成的 JSON 报告，默认 report.json")
+    parser.add_argument("--report", default="report.json",
+                        help="由 --json 或 --out 生成的 JSON 报告，默认 report.json")
+    parser.add_argument("--format", choices=("text", "markdown"), default="text",
+                        help="输出格式：text（默认）或 markdown（适合直接粘贴进工单/复盘文档）")
     args = parser.parse_args(argv)
 
     try:
@@ -176,33 +179,123 @@ def _cmd_explain(argv: List[str]) -> None:
     target_id = args.id
     for incident in report.get("incidents", []):
         if incident.get("id") == target_id:
-            print(f"[案件] {incident.get('title')}")
-            print(f"级别: {incident.get('level')}  置信度: {incident.get('confidence')}")
-            print(incident.get("description", ""))
-            print("\n关键证据:")
-            for item in incident.get("evidence", []):
-                print(f"  - {item}")
-            print("\n建议补采:")
-            for item in incident.get("next_logs", []):
-                print(f"  - {item}")
-            print("\n处置动作:")
-            for item in incident.get("recommended_actions", []):
-                print(f"  - {item}")
+            if args.format == "markdown":
+                print(_render_incident_markdown(incident))
+            else:
+                _print_incident_text(incident)
             sys.exit(0)
 
     for alert in report.get("alerts", []):
         if alert.get("id") == target_id or alert.get("rule_id") == target_id:
-            print(f"[告警] {alert.get('rule_name')}")
-            print(f"规则: {alert.get('rule_id')}  级别: {alert.get('level')}  置信度: {alert.get('confidence')}")
-            print(alert.get("description", ""))
-            print("\n证据:")
-            for item in alert.get("evidence", []):
-                print(f"  - {item}")
-            print(f"\n建议: {alert.get('recommendation', '')}")
+            if args.format == "markdown":
+                print(_render_alert_markdown(alert))
+            else:
+                _print_alert_text(alert)
             sys.exit(0)
 
     print(f"❌ 报告中未找到 ID: {target_id}", file=sys.stderr)
     sys.exit(1)
+
+
+def _print_incident_text(incident: dict) -> None:
+    print(f"[案件] {incident.get('title')}")
+    print(f"级别: {incident.get('level')}  置信度: {incident.get('confidence')}")
+    print(incident.get("description", ""))
+    print("\n关键证据:")
+    for item in incident.get("evidence", []):
+        print(f"  - {item}")
+    print("\n建议补采:")
+    for item in incident.get("next_logs", []):
+        print(f"  - {item}")
+    print("\n处置动作:")
+    for item in incident.get("recommended_actions", []):
+        print(f"  - {item}")
+
+
+def _print_alert_text(alert: dict) -> None:
+    print(f"[告警] {alert.get('rule_name')}")
+    print(f"规则: {alert.get('rule_id')}  级别: {alert.get('level')}  置信度: {alert.get('confidence')}")
+    print(alert.get("description", ""))
+    print("\n证据:")
+    for item in alert.get("evidence", []):
+        print(f"  - {item}")
+    print(f"\n建议: {alert.get('recommendation', '')}")
+
+
+def _render_incident_markdown(incident: dict) -> str:
+    """渲染 incident 为可直接粘贴进工单 / 复盘文档的 Markdown。"""
+    phases = incident.get("attack_phases", [])
+    source_types = incident.get("source_types", [])
+    source_ips = incident.get("source_ips", [])
+    accounts = incident.get("accounts", [])
+    assets = incident.get("assets", [])
+    timeline = incident.get("timeline", [])
+
+    lines = [
+        f"## 案件 {incident.get('id', '?')}：{incident.get('title', '')}",
+        "",
+        f"- **级别**：{incident.get('level', '?')}",
+        f"- **置信度**：{incident.get('confidence', '?')}",
+        f"- **影响事件**：{incident.get('affected_event_count', 0)} 条",
+        f"- **关联告警**：{len(incident.get('affected_alerts', []))} 个",
+        f"- **日志源**：{', '.join(source_types) or '?'}",
+        f"- **攻击阶段**：{' → '.join(phases) or '?'}",
+        f"- **源 IP**：{', '.join(source_ips[:5]) or '?'}",
+        f"- **账号**：{', '.join(accounts[:5]) or '?'}",
+        f"- **资产**：{', '.join(assets[:5]) or '?'}",
+        "",
+        "### 描述",
+        "",
+        incident.get("description", ""),
+        "",
+        "### 关键证据",
+        "",
+    ]
+    lines.extend(f"- {item}" for item in incident.get("evidence", []))
+    if not incident.get("evidence"):
+        lines.append("- （无）")
+    lines.extend(["", "### 处置动作", ""])
+    lines.extend(f"- [ ] {item}" for item in incident.get("recommended_actions", []))
+    if not incident.get("recommended_actions"):
+        lines.append("- [ ] （待补充）")
+    lines.extend(["", "### 待补采日志", ""])
+    lines.extend(f"- {item}" for item in incident.get("next_logs", []))
+    if not incident.get("next_logs"):
+        lines.append("- （无）")
+    if timeline:
+        lines.extend(["", "### 关键事件时间线", "", "| 时间 | 级别 | 来源 | 描述 |", "|---|---|---|---|"])
+        for item in timeline[:20]:
+            ts = (item.get("timestamp") or "").replace("|", "\\|")
+            level = (item.get("level") or "").replace("|", "\\|")
+            src = (item.get("source_file") or "").replace("|", "\\|")
+            msg = (item.get("message") or "").replace("|", "\\|").replace("\n", " ")
+            lines.append(f"| {ts} | {level} | {src} | {msg} |")
+    return "\n".join(lines)
+
+
+def _render_alert_markdown(alert: dict) -> str:
+    lines = [
+        f"## 告警 {alert.get('id', '?')}：{alert.get('rule_name', '')}",
+        "",
+        f"- **规则**：{alert.get('rule_id', '?')}",
+        f"- **级别**：{alert.get('level', '?')}",
+        f"- **置信度**：{alert.get('confidence', '?')}",
+        f"- **MITRE**：{alert.get('mitre_attack', '?')} / {alert.get('mitre_phase', '?')}",
+        f"- **影响事件**：{alert.get('affected_event_count', 0)} 条",
+        f"- **时间**：{alert.get('timestamp', '?')}",
+        "",
+        "### 描述",
+        "",
+        alert.get("description", ""),
+        "",
+        "### 证据",
+        "",
+    ]
+    lines.extend(f"- {item}" for item in alert.get("evidence", []))
+    if not alert.get("evidence"):
+        lines.append("- （无）")
+    lines.extend(["", "### 处置建议", "", alert.get("recommendation", "")])
+    return "\n".join(lines)
 
 
 def _collect_files(paths: List[str]) -> List[str]:

@@ -259,9 +259,11 @@ def print_terminal_report(
             out.write(f"       {YELLOW}建议: {alert.recommendation}{RESET}\n")
             out.write(f"  {_hr('─', 76)}\n")
 
-    # ── 时间线（最近20条重要事件）────────────────────────
+    # ── 时间线（按风险/时间排序的 Top 20 事件）─────────────
+    # _build_timeline 已按 (-level.score, -timestamp) 排序，所以取前 20
+    # 实际是"风险最高/最新的 20 条"，标题随排序语义同步。
     if summary.timeline:
-        out.write(_section("📅 关键事件时间线（最近20条）"))
+        out.write(_section("📅 关键事件时间线 Top 20（按风险/时间）"))
         for entry in summary.timeline[:20]:
             color = _level_color(entry.level)
             badge = _level_badge(entry.level)

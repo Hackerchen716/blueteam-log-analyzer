@@ -13,6 +13,6 @@
     "level": "critical",
     "confidence": "high",
     "source_types": ["application", "dns", "edr", "proxy", "waf"],
-    "attack_phases": ["命令控制", "主机失陷", "初始访问"]
+    "attack_phases": ["初始访问", "主机失陷", "命令控制"]
   }
 }
