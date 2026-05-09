@@ -11,6 +11,8 @@
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![Offline](https://img.shields.io/badge/Mode-100%25%20Offline-orange)](https://github.com/Hackerchen716/blueteam-log-analyzer)
 
+[![PyPI](https://img.shields.io/pypi/v/blueteam-log-analyzer?label=PyPI)](https://pypi.org/project/blueteam-log-analyzer/)
+
 **BLA** 是一款面向蓝队应急响应场景的日志分析工具，支持 Windows 事件日志、Linux 认证日志、Web 访问日志等多种格式，内置 70+ 条威胁检测规则，完全离线运行，无需任何第三方服务。
 
 ---
