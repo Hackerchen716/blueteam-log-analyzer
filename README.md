@@ -1,5 +1,9 @@
 # BlueTeam Log Analyzer (BLA)
 
+<p align="center">
+  <img src="docs/assets/bla-banner.png" alt="BlueTeam Log Analyzer Banner" width="760">
+</p>
+
 > 蓝队应急响应日志分析工具 | Blue Team Incident Response Log Analyzer
 
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue)](https://www.python.org/)
@@ -109,35 +113,27 @@ bla --list-log-sources
 - Python 3.9 或更高版本
 - 操作系统：Windows 10/11、macOS 12+、Ubuntu 20.04+（及其他主流 Linux 发行版）
 
-### macOS / Linux
+### PyPI 安装（推荐）
 
 ```bash
-# 克隆仓库
-git clone https://github.com/Hackerchen716/blueteam-log-analyzer.git
-cd blueteam-log-analyzer
-
-# 方法一：直接运行（无需安装）
-python3 bla_cli.py --help
-
-# 方法二：安装为系统命令 bla
-chmod +x install.sh
-./install.sh
+pip install blueteam-log-analyzer
 ```
 
-### Windows
+安装完成后可直接使用 `bla` 命令：
 
-```powershell
-# 克隆仓库
+```bash
+bla --help
+bla --version
+```
+
+### 从源码运行（开发者）
+
+macOS / Linux / Windows PowerShell：
+
+```bash
 git clone https://github.com/Hackerchen716/blueteam-log-analyzer.git
 cd blueteam-log-analyzer
-
-# 方法一：直接运行
-python bla_cli.py --help
-
-# 方法二：运行安装程序（需管理员权限）
-install.bat
-
-# 方法三：将 bla.cmd 所在目录加入 PATH，即可全局使用 bla 命令
+python3 bla_cli.py --help
 ```
 
 ### 可选：EVTX 二进制解析支持
@@ -470,44 +466,28 @@ blueteam-log-analyzer/
 │   └── access.log          # Web 攻击示例日志（SQLi/XSS/LFI/扫描）
 ├── tests/
 │   └── test_regressions.py # 安全与解析回归测试
-├── install.sh              # macOS/Linux 安装脚本
-├── install.bat             # Windows 安装脚本
-├── bla.cmd                 # Windows 快捷启动脚本
 ├── setup.py                # Python 包安装配置
 └── README.md
 ```
 
 ---
 
-## 设计原则
+## 参与贡献
 
-- **准确率优先**：规则基于真实攻击场景设计，参考 Hayabusa、DeepBlueCLI、Sigma 等成熟项目的检测逻辑
-- **完全离线**：无网络请求，无外部 API 调用，适合隔离网络和保密环境
-- **零依赖**：Python 3.9+ 标准库即可运行，EVTX 二进制解析为可选依赖
-- **高性能**：Linux/Web 日志逐行解析，多文件可并行处理
-- **可扩展**：核心聚合规则使用 Python，Web 攻击特征支持 YAML 外置扩展
+欢迎提交 Issue / Pull Request，一起完善 BLA 在蓝队日志分析、护网、重保值守和应急响应场景下的实用能力。
 
----
+当前需要的优化方向：
 
-## 参考与致谢
+- **日志解析**：补充更多常见安全设备、主机、Web 服务与业务日志格式。
+- **检测规则**：完善 Web 攻击、爆破、横向移动、权限变更、可疑执行、日志清除等蓝队常见场景。
+- **误报压制**：改进 allowlist、基线、可信扫描器、维护窗口等机制。
+- **报告输出**：优化 HTML / JSON / CSV / IOC / SARIF 报告，让结果更适合值守、复盘和工单流转。
+- **样本与测试**：补充脱敏样本、单元测试、回归测试和性能测试。
+- **易用性与部署**：改进安装体验、文档、Docker 镜像、本地 Web UI 等。
 
-本项目在设计和规则制定过程中参考了以下优秀开源项目，特此致谢：
+请不要提交真实客户日志、敏感 IP、账号、Cookie、Token、业务数据或未脱敏截图。
 
-| 项目 | 参考内容 | 许可证 |
-|------|---------|--------|
-| [Hayabusa](https://github.com/Yamato-Security/hayabusa) | Windows 事件日志检测规则体系、Event ID 覆盖范围 | GPL-3.0 |
-| [Chainsaw](https://github.com/WithSecureLabs/chainsaw) | EVTX 快速分析思路、Sigma 规则集成方式 | Apache-2.0 |
-| [DeepBlueCLI](https://github.com/sans-blue-team/deepbluecli) | PowerShell 检测规则、LOLBins 检测逻辑 | MIT |
-| [OSTE-Web-Log-Analyzer](https://github.com/OSTEsayed/OSTE-Web-Log-Analyzer) | Web 攻击检测模式（SQLi/XSS/LFI） | MIT |
-| [Sigma](https://github.com/SigmaHQ/sigma) | 通用检测规则格式参考、MITRE ATT&CK 映射方法 | DRL-1.1 |
-
-> **注意**：本项目为独立实现，未直接复制上述项目的代码。检测规则参考了上述项目的检测思路和攻击模式，并根据实际应急响应场景进行了重新设计和实现。
-
----
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request。如需添加新的 Web 检测规则，可优先参考 `bla/rules/web_attacks.yaml`；如需添加跨事件聚合规则，请参考 `bla/detection/engine.py`。
+交流与合作：`hackerchen7@proton.me`
 
 ---
 
