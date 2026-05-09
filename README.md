@@ -1,7 +1,7 @@
 # BlueTeam Log Analyzer (BLA)
 
 <p align="center">
-  <img src="docs/assets/bla-banner.png" alt="BlueTeam Log Analyzer Banner" width="760">
+  <img src="docs/assets/bla-banner.png" alt="BlueTeam Log Analyzer Banner" width="680">
 </p>
 
 > 蓝队应急响应日志分析工具 | Blue Team Incident Response Log Analyzer
