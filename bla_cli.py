@@ -487,7 +487,7 @@ def main():
     parser.add_argument(
         "--version",
         action="version",
-        version="BLA 1.0.0",
+        version="BLA 1.0.1",
     )
 
     args = parser.parse_args()
