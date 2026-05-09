@@ -1,9 +1,23 @@
 """CSV 报告输出"""
 from __future__ import annotations
+
 import csv
 from typing import List
-from ..models import ParseResult, AnalysisSummary
+
+from ..models import AnalysisSummary, ParseResult
 from ..utils.helpers import safe_print
+
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _csv_safe(value) -> str:
+    """Return a spreadsheet-safe CSV cell value."""
+    if value is None:
+        return ""
+    text = str(value)
+    if text.lstrip(" \t\r\n").startswith(_FORMULA_PREFIXES):
+        return "'" + text
+    return text
 
 
 def generate_csv_report(
@@ -31,32 +45,32 @@ def generate_csv_report(
 
         for ev in all_events:
             writer.writerow({
-                "timestamp":   ev.timestamp,
-                "level":       ev.level.value,
-                "category":    ev.category,
-                "rule_name":   ev.rule_name or "",
-                "message":     ev.message,
-                "source_file": ev.source_file,
-                "event_id":    ev.event_id or "",
-                "user":        ev.user or "",
-                "host":        ev.host or "",
-                "ip":          ev.ip or "",
-                "process":     ev.process or "",
-                "source_type":  ev.details.get("source_type", ""),
-                "src_ip":       ev.details.get("src_ip", ""),
-                "dst_ip":       ev.details.get("dst_ip", ""),
-                "asset":        ev.details.get("asset", ""),
-                "account":      ev.details.get("account", ""),
-                "action":       ev.details.get("action", ""),
-                "status":       ev.details.get("status", ""),
-                "url":          ev.details.get("url", ""),
-                "command":      ev.details.get("command", ""),
-                "bytes_out":    ev.details.get("bytes_out", ""),
-                "asset_role":   ev.details.get("asset_role", ""),
-                "event_family": ev.details.get("event_family", ""),
-                "mitre_attack":ev.mitre_attack or "",
-                "tags":        "|".join(ev.tags),
-                "raw_line":    ev.raw_line[:200],
+                "timestamp":   _csv_safe(ev.timestamp),
+                "level":       _csv_safe(ev.level.value),
+                "category":    _csv_safe(ev.category),
+                "rule_name":   _csv_safe(ev.rule_name or ""),
+                "message":     _csv_safe(ev.message),
+                "source_file": _csv_safe(ev.source_file),
+                "event_id":    _csv_safe(ev.event_id or ""),
+                "user":        _csv_safe(ev.user or ""),
+                "host":        _csv_safe(ev.host or ""),
+                "ip":          _csv_safe(ev.ip or ""),
+                "process":     _csv_safe(ev.process or ""),
+                "source_type":  _csv_safe(ev.details.get("source_type", "")),
+                "src_ip":       _csv_safe(ev.details.get("src_ip", "")),
+                "dst_ip":       _csv_safe(ev.details.get("dst_ip", "")),
+                "asset":        _csv_safe(ev.details.get("asset", "")),
+                "account":      _csv_safe(ev.details.get("account", "")),
+                "action":       _csv_safe(ev.details.get("action", "")),
+                "status":       _csv_safe(ev.details.get("status", "")),
+                "url":          _csv_safe(ev.details.get("url", "")),
+                "command":      _csv_safe(ev.details.get("command", "")),
+                "bytes_out":    _csv_safe(ev.details.get("bytes_out", "")),
+                "asset_role":   _csv_safe(ev.details.get("asset_role", "")),
+                "event_family": _csv_safe(ev.details.get("event_family", "")),
+                "mitre_attack": _csv_safe(ev.mitre_attack or ""),
+                "tags":        _csv_safe("|".join(ev.tags)),
+                "raw_line":    _csv_safe(ev.raw_line[:200]),
             })
 
     safe_print(f"  [✓] CSV 报告已保存: {output_path}  ({len(all_events)} 条事件)")

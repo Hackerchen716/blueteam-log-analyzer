@@ -3,11 +3,13 @@ HTML 报告输出
 生成独立单文件 HTML 报告（内嵌 CSS/JS，无需网络）
 """
 from __future__ import annotations
+
 import datetime
 from html import escape
 from typing import List
+
 from ..ioc import extract_iocs
-from ..models import ParseResult, AnalysisSummary, ThreatLevel
+from ..models import AnalysisSummary, ParseResult, ThreatLevel
 from ..utils.helpers import safe_print
 
 
@@ -309,26 +311,26 @@ def generate_html_report(
             ) or "-"
 
             failure_html = (
-                f"<tr><th>失败原因</th><td>{failure_reasons}</td></tr>"
+                f"<tr><th>失败原因</th><td>{_h(failure_reasons)}</td></tr>"
                 if event_id == "4625" else ""
             )
             event_blocks += f"""
             <div class="card" style="margin-bottom:12px;">
-              <h3>EID {event_id} - {event_stats.get('event_name', '')} ({event_stats.get('total', 0)})</h3>
+              <h3>EID {event_id} - {_h(event_stats.get('event_name', ''))} ({event_stats.get('total', 0)})</h3>
               <table>
                 <tbody>
-                  <tr><th>账户</th><td>{principals}</td></tr>
-                  <tr><th>账号域</th><td>{domains}</td></tr>
-                  <tr><th>源IP</th><td>{source_ips}</td></tr>
-                  <tr><th>登录类型</th><td>{logon_types}</td></tr>
-                  <tr><th>进程名</th><td>{processes}</td></tr>
+                  <tr><th>账户</th><td>{_h(principals)}</td></tr>
+                  <tr><th>账号域</th><td>{_h(domains)}</td></tr>
+                  <tr><th>源IP</th><td>{_h(source_ips)}</td></tr>
+                  <tr><th>登录类型</th><td>{_h(logon_types)}</td></tr>
+                  <tr><th>进程名</th><td>{_h(processes)}</td></tr>
                   {failure_html}
                 </tbody>
               </table>
             </div>"""
 
         windows_logon_html += f"""
-        <h3>{r.file_name}</h3>
+        <h3>{_h(r.file_name)}</h3>
         <div class="card">
           <div style="margin-bottom:10px; color:#94a3b8;">
             4624 成功登录: {win_stats.get('total_success', 0)} 条 &nbsp;|&nbsp;

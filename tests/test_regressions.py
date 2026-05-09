@@ -1,3 +1,4 @@
+import csv
 import io
 import json as _json
 import sys
@@ -12,11 +13,17 @@ from bla.detection.engine import _dedup_alerts
 from bla.ioc import extract_iocs, format_ioc_report
 from bla.log_sources import LOG_SOURCE_PRIORITIES, format_log_source_priorities
 from bla.models import (
-    AnalysisSummary, DetectionAlert, ThreatLevel, TimelineEntry,
+    AnalysisSummary,
+    DetectionAlert,
+    LogEvent,
+    ParseResult,
+    ParseStats,
+    ThreatLevel,
 )
+from bla.output.bundle import generate_report_bundle
+from bla.output.csv_report import generate_csv_report
 from bla.output.html_report import generate_html_report
 from bla.output.json_report import generate_json_report
-from bla.output.bundle import generate_report_bundle
 from bla.output.sarif_report import generate_sarif_report
 from bla.output.terminal import print_terminal_report
 from bla.parsers import _parse_generic, auto_parse
@@ -230,6 +237,69 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
         self.assertNotIn("cdn.jsdelivr", html)
         self.assertNotIn("new Chart", html)
+
+    def test_html_report_escapes_windows_logon_summary_fields(self):
+        xml = (
+            "<Event><System><EventID>4625</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:02:03.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">&lt;img src=x onerror=alert(1)&gt;</Data>"
+            "<Data Name=\"TargetDomainName\">ACME</Data>"
+            "<Data Name=\"IpAddress\">1.2.3.4</Data>"
+            "<Data Name=\"LogonType\">3</Data>"
+            "<Data Name=\"FailureReason\">bad</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "security.xml")
+        summary = run_detection(result.events)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "report.html"
+            generate_html_report([result], summary, str(report_path))
+            html = report_path.read_text(encoding="utf-8")
+
+        self.assertNotIn("<img src=x onerror=alert(1)>", html)
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", html)
+
+    def test_csv_report_neutralizes_spreadsheet_formulas(self):
+        event = LogEvent(
+            id="evt-1",
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.HIGH,
+            category="测试",
+            source="fixture",
+            source_file="events.log",
+            message="=HYPERLINK(\"http://evil.test\")",
+            raw_line="-2+3",
+            user="+cmd",
+            host="@host",
+            process="\t=calc",
+            details={"command": " @SUM(1+1)", "url": "https://example.test/path"},
+        )
+        result = ParseResult("events.log", "Fixture", [event], ParseStats(total=1))
+        summary = AnalysisSummary(
+            risk_score=0,
+            risk_level=ThreatLevel.INFO,
+            alerts=[],
+            timeline=[],
+            attack_chain=[],
+            recommendations=[],
+            total_events=1,
+            files_analyzed=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "events.csv"
+            generate_csv_report([result], summary, str(csv_path))
+            with open(csv_path, newline="", encoding="utf-8-sig") as f:
+                row = next(csv.DictReader(f))
+
+        self.assertEqual(row["message"], "'=HYPERLINK(\"http://evil.test\")")
+        self.assertEqual(row["user"], "'+cmd")
+        self.assertEqual(row["host"], "'@host")
+        self.assertEqual(row["process"], "'\t=calc")
+        self.assertEqual(row["command"], "' @SUM(1+1)")
+        self.assertEqual(row["raw_line"], "'-2+3")
+        self.assertEqual(row["url"], "https://example.test/path")
 
     def test_windows_event_with_malformed_logon_type_is_not_dropped(self):
         xml = (
@@ -815,7 +885,7 @@ web_attacks:
 
     def test_explain_markdown_format_renders_ticket_ready_doc(self):
         """explain --format markdown 应当产出可直接粘贴进工单的 Markdown。"""
-        from bla_cli import _render_incident_markdown, _render_alert_markdown
+        from bla_cli import _render_alert_markdown, _render_incident_markdown
 
         incident = {
             "id": "inc-001",
