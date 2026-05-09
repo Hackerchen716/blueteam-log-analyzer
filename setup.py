@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="blueteam-log-analyzer",
-    version="1.0.0",
+    version="1.0.1",
     description="BlueTeam Log Analyzer - 蓝队应急响应日志分析工具",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
