@@ -493,7 +493,7 @@ def main():
     parser.add_argument(
         "--version",
         action="version",
-        version="BLA 1.0.2",
+        version="BLA 1.0.3",
     )
 
     args = parser.parse_args()
