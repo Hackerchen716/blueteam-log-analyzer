@@ -153,6 +153,7 @@ class DetectionAlert:
             "recommendation": self.recommendation,
             "timestamp": self.timestamp,
             "confidence": self.confidence,
+            "affected_events": self.affected_events,
             "affected_event_count": len(self.affected_events),
         }
 
@@ -206,6 +207,7 @@ class Incident:
             "level": self.level.value,
             "confidence": self.confidence,
             "affected_alerts": self.affected_alerts,
+            "affected_events": self.affected_events,
             "affected_event_count": len(self.affected_events),
             "source_ips": self.source_ips,
             "accounts": self.accounts,

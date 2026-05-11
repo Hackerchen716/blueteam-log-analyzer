@@ -23,7 +23,7 @@ def generate_json_report(
     report = {
         "meta": {
             "tool": "BlueTeam Log Analyzer (BLA)",
-            "version": "1.0.2",
+            "version": "1.0.3",
             "generated_at": datetime.datetime.now().isoformat(),
             "files_analyzed": summary.files_analyzed,
         },

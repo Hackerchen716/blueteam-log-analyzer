@@ -108,8 +108,8 @@ _ATTACK_PATTERNS: List[Tuple[re.Pattern, ThreatLevel, str, str, str, List[str]]]
      ThreatLevel.MEDIUM, "信息收集", "敏感文件探测", "T1083", ["recon", "sensitive-file"]),
 
     (re.compile(r'(nikto|sqlmap|nmap|masscan|nessus|openvas|acunetix|'
-                r'burp.?suite|dirbuster|gobuster|wfuzz|hydra|medusa|'
-                r'metasploit|w3af)', re.I),
+                r'burp.?suite|dirbuster|gobuster|dirsearch|ffuf|feroxbuster|wfuzz|hydra|medusa|'
+                r'metasploit|w3af|python-requests|curl/|\bcurl\b|wget/|\bwget\b)', re.I),
      ThreatLevel.HIGH, "扫描器", "安全扫描器", "T1595", ["scanner", "reconnaissance"]),
 ]
 

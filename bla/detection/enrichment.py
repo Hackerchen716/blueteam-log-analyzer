@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from ..models import LogEvent
 from ..utils.helpers import is_private_ip
+from .scanners import detect_scanner_tool
 
 
 SENSITIVE_PORTS = {
@@ -31,6 +32,8 @@ def enrich_events(events: Iterable[LogEvent]) -> List[LogEvent]:
 
     for event in enriched:
         normalized = _normalize_event(event)
+        user_agent = str(event.details.get("user_agent") or "")
+        scanner_tool = detect_scanner_tool(user_agent)
         event.details.update(normalized)
         event.details.update({
             "src_ip_scope": _ip_scope(normalized.get("src_ip", "")),
@@ -44,6 +47,23 @@ def enrich_events(events: Iterable[LogEvent]) -> List[LogEvent]:
             "same_asset_event_count": str(asset_counts.get(normalized.get("asset"), 0)),
             "sensitive_port": "true" if event.port in SENSITIVE_PORTS else "false",
         })
+        if scanner_tool:
+            event.details["scanner_tool"] = scanner_tool
+            if "scanner" not in event.tags:
+                event.tags.append("scanner")
+            if "reconnaissance" not in event.tags:
+                event.tags.append("reconnaissance")
+            if "扫描工具:" not in event.message:
+                method = event.details.get("method", "")
+                path = event.details.get("decoded_path") or event.details.get("path") or event.details.get("sample") or ""
+                parts = [f"扫描工具: {scanner_tool}"]
+                if user_agent:
+                    parts.append(f"User-Agent: {user_agent}")
+                if method:
+                    parts.append(f"请求方法: {method}")
+                if path:
+                    parts.append(f"典型路径: {path}")
+                event.message = f"{event.message} ({'; '.join(parts)})"
     return enriched
 
 
