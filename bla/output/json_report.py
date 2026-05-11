@@ -23,7 +23,7 @@ def generate_json_report(
     report = {
         "meta": {
             "tool": "BlueTeam Log Analyzer (BLA)",
-            "version": "1.0.0",
+            "version": "1.0.2",
             "generated_at": datetime.datetime.now().isoformat(),
             "files_analyzed": summary.files_analyzed,
         },
@@ -60,6 +60,7 @@ def generate_json_report(
             }
             for r in parse_results
         ],
+        "events": [event.to_dict() for event in all_events],
         "alerts": [a.to_dict() for a in summary.alerts],
         "incidents": [incident.to_dict() for incident in summary.incidents],
         "attack_chain": [

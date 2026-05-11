@@ -255,7 +255,7 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
                 "rule_false_positive_hints": "|".join(rule.false_positive_hints or []),
                 "rule_evidence_fields": "|".join(rule.evidence_fields or []),
             }
-            event_msg = f"{rule.name}: {method} {truncate(display_path, 100)} -> {status}"
+            event_msg = f"{rule.name}: {method} {display_path} -> {status}"
             attack_detected = True
             break
 
@@ -268,7 +268,7 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
             tags      = list(dict.fromkeys(attack_tags + ["web-attack"]))
             mitre     = attack_id
             rule_name = name
-            event_msg = f"{name}: {method} {truncate(display_path, 100)} -> {status}"
+            event_msg = f"{name}: {method} {display_path} -> {status}"
             attack_detected = True
             break
 
@@ -280,13 +280,13 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
                 tags      = ["suspicious-post", "web-attack"]
                 mitre     = "T1190"
                 rule_name = "可疑 POST 请求"
-                event_msg = f"可疑POST: {truncate(path, 100)} -> {status}"
+                event_msg = f"可疑POST: {display_path} -> {status}"
             elif status >= 400:
                 level     = ThreatLevel.MEDIUM
                 cat       = "Web"
                 tags      = ["post-error"]
                 rule_name = f"POST 异常响应 {status}"
-                event_msg = f"POST {status}: {truncate(path, 100)}"
+                event_msg = f"POST {status}: {display_path}"
             else:
                 return None
 
@@ -296,7 +296,7 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
             tags      = ["suspicious-params", "web-attack"]
             mitre     = "T1190"
             rule_name = "可疑参数/命令特征"
-            event_msg = f"可疑参数: {method} {truncate(path, 100)} -> {status}"
+            event_msg = f"可疑参数: {method} {display_path} -> {status}"
 
         # HTTP 错误码
         if not tags and (status == 401 or status == 403):

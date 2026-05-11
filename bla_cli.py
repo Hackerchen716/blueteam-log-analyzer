@@ -474,6 +474,12 @@ def main():
         help="终端报告最多展示的告警数，0 表示全部展示（默认: 50）",
     )
     parser.add_argument(
+        "--full", "--no-truncate", "--evidence",
+        dest="full_evidence",
+        action="store_true",
+        help="终端输出完整证据字段，包括完整 URL/Payload/User-Agent/Referer/原始日志行",
+    )
+    parser.add_argument(
         "--no-color",
         action="store_true",
         help="禁用终端彩色输出",
@@ -487,7 +493,7 @@ def main():
     parser.add_argument(
         "--version",
         action="version",
-        version="BLA 1.0.1",
+        version="BLA 1.0.2",
     )
 
     args = parser.parse_args()
@@ -573,7 +579,14 @@ def main():
     print(f"✓ 检测完成，发现 {len(summary.alerts)} 个告警\n")
 
     # 输出报告
-    print_terminal_report(parse_results, summary, args.verbose, args.no_color, args.max_alerts)
+    print_terminal_report(
+        parse_results,
+        summary,
+        args.verbose,
+        args.no_color,
+        args.max_alerts,
+        args.full_evidence,
+    )
 
     if args.html:
         generate_html_report(parse_results, summary, args.html)

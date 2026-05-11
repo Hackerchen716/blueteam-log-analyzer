@@ -110,7 +110,7 @@ def generate_sarif_report(
                     "driver": {
                         "name": "BlueTeam Log Analyzer",
                         "informationUri": "https://github.com/Hackerchen716/blueteam-log-analyzer",
-                        "version": "1.0.0",
+                        "version": "1.0.2",
                         "rules": list(rules_by_id.values()),
                     }
                 },

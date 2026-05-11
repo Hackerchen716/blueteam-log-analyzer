@@ -70,6 +70,11 @@ def _truncate_text(text: str, max_len: int) -> str:
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
 
 
+def _evidence_text(text: str, full: bool, max_len: int = 220) -> str:
+    """Terminal keeps summaries compact unless full evidence output is requested."""
+    return text if full else _truncate_text(text, max_len)
+
+
 def _basename(path: str) -> str:
     s = (path or "").replace("/", "\\")
     if "\\" in s:
@@ -83,6 +88,7 @@ def print_terminal_report(
     verbose: bool = False,
     no_color: bool = False,
     max_alerts: int = 50,
+    full_evidence: bool = False,
 ) -> None:
     """打印完整的终端分析报告"""
     if no_color:
@@ -90,11 +96,15 @@ def print_terminal_report(
 
     out = safe_stream(sys.stdout)
 
+    event_by_id = {}
+    for result in parse_results:
+        event_by_id.update({event.id: event for event in result.events})
+
     # ── 标题横幅 ──────────────────────────────────────────
     out.write(f"\n{BOLD}{BLUE}")
     out.write("╔══════════════════════════════════════════════════════════════════════════════╗\n")
     out.write("║         BlueTeam Log Analyzer (BLA)  -  Blue Team Incident Response          ║\n")
-    out.write("║                    Version 1.0.0  |  100% Offline  |  No AI                  ║\n")
+    out.write("║                    Version 1.0.2  |  100% Offline  |  No AI                  ║\n")
     out.write("╚══════════════════════════════════════════════════════════════════════════════╝\n")
     out.write(RESET)
 
@@ -254,8 +264,30 @@ def print_terminal_report(
             out.write(f"       {DIM}MITRE: {alert.mitre_attack}  |  阶段: {alert.mitre_phase}  |  "
                       f"置信度: {alert.confidence}  |  时间: {alert.timestamp}{RESET}\n")
             out.write(f"       {GRAY}证据:{RESET}\n")
-            for ev in alert.evidence[:3]:
-                out.write(f"         • {ev}\n")
+            evidence_items = alert.evidence if full_evidence else alert.evidence[:3]
+            for ev in evidence_items:
+                out.write(f"         • {_evidence_text(ev, full_evidence)}\n")
+            if not full_evidence and len(alert.evidence) > 3:
+                out.write(f"         {DIM}… 还有 {len(alert.evidence) - 3} 条证据；使用 --full / --no-truncate 查看完整证据。{RESET}\n")
+            if full_evidence and alert.level.score >= ThreatLevel.HIGH.score:
+                out.write(f"       {GRAY}完整事件证据:{RESET}\n")
+                for event_id in alert.affected_events[:5]:
+                    event = event_by_id.get(event_id)
+                    if not event:
+                        continue
+                    method = event.details.get("method", "")
+                    path = event.details.get("decoded_path") or event.details.get("path", "")
+                    status = event.details.get("status", "")
+                    ua = event.details.get("user_agent", "")
+                    referer = event.details.get("referer", "")
+                    if method or path or status:
+                        out.write(f"         - 请求: {method} {path} -> {status}\n")
+                    if ua:
+                        out.write(f"           User-Agent: {ua}\n")
+                    if referer:
+                        out.write(f"           Referer: {referer}\n")
+                    if event.raw_line:
+                        out.write(f"           原始日志: {event.raw_line}\n")
             out.write(f"       {YELLOW}建议: {alert.recommendation}{RESET}\n")
             out.write(f"  {_hr('─', 76)}\n")
 
@@ -268,7 +300,8 @@ def print_terminal_report(
             color = _level_color(entry.level)
             badge = _level_badge(entry.level)
             mitre = f" {DIM}[{entry.mitre_attack}]{RESET}" if entry.mitre_attack else ""
-            out.write(f"  {DIM}{entry.timestamp}{RESET}  {badge}  {color}{entry.message}{RESET}{mitre}\n")
+            message = _evidence_text(entry.message, full_evidence, 180)
+            out.write(f"  {DIM}{entry.timestamp}{RESET}  {badge}  {color}{message}{RESET}{mitre}\n")
 
     # ── 应急处置建议 ──────────────────────────────────────
     out.write(_section("💡 应急处置建议"))
