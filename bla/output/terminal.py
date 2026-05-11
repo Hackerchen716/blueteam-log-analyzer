@@ -104,7 +104,7 @@ def print_terminal_report(
     out.write(f"\n{BOLD}{BLUE}")
     out.write("╔══════════════════════════════════════════════════════════════════════════════╗\n")
     out.write("║         BlueTeam Log Analyzer (BLA)  -  Blue Team Incident Response          ║\n")
-    out.write("║                    Version 1.0.2  |  100% Offline  |  No AI                  ║\n")
+    out.write("║                    Version 1.0.3  |  100% Offline  |  No AI                  ║\n")
     out.write("╚══════════════════════════════════════════════════════════════════════════════╝\n")
     out.write(RESET)
 
@@ -271,7 +271,7 @@ def print_terminal_report(
                 out.write(f"         {DIM}… 还有 {len(alert.evidence) - 3} 条证据；使用 --full / --no-truncate 查看完整证据。{RESET}\n")
             if full_evidence and alert.level.score >= ThreatLevel.HIGH.score:
                 out.write(f"       {GRAY}完整事件证据:{RESET}\n")
-                for event_id in alert.affected_events[:5]:
+                for event_id in alert.affected_events:
                     event = event_by_id.get(event_id)
                     if not event:
                         continue
@@ -280,6 +280,9 @@ def print_terminal_report(
                     status = event.details.get("status", "")
                     ua = event.details.get("user_agent", "")
                     referer = event.details.get("referer", "")
+                    scanner_tool = event.details.get("scanner_tool", "")
+                    if scanner_tool:
+                        out.write(f"         - 扫描工具: {scanner_tool}\n")
                     if method or path or status:
                         out.write(f"         - 请求: {method} {path} -> {status}\n")
                     if ua:
