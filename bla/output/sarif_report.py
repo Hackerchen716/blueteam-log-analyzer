@@ -68,6 +68,7 @@ def _build_result(alert: DetectionAlert, source_file: str) -> Dict[str, Any]:
         "properties": {
             "confidence": alert.confidence,
             "evidence": alert.evidence,
+            "affected_events": alert.affected_events,
             "affected_event_count": len(alert.affected_events),
             "timestamp": alert.timestamp,
         },
@@ -110,7 +111,7 @@ def generate_sarif_report(
                     "driver": {
                         "name": "BlueTeam Log Analyzer",
                         "informationUri": "https://github.com/Hackerchen716/blueteam-log-analyzer",
-                        "version": "1.0.2",
+                        "version": "1.0.3",
                         "rules": list(rules_by_id.values()),
                     }
                 },
