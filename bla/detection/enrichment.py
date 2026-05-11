@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from ..models import LogEvent
 from ..utils.helpers import is_private_ip
+from .scanners import detect_scanner_tool
 
 
 SENSITIVE_PORTS = {
@@ -31,6 +32,7 @@ def enrich_events(events: Iterable[LogEvent]) -> List[LogEvent]:
 
     for event in enriched:
         normalized = _normalize_event(event)
+        scanner_tool = detect_scanner_tool(str(event.details.get("user_agent") or ""))
         event.details.update(normalized)
         event.details.update({
             "src_ip_scope": _ip_scope(normalized.get("src_ip", "")),
@@ -44,6 +46,8 @@ def enrich_events(events: Iterable[LogEvent]) -> List[LogEvent]:
             "same_asset_event_count": str(asset_counts.get(normalized.get("asset"), 0)),
             "sensitive_port": "true" if event.port in SENSITIVE_PORTS else "false",
         })
+        if scanner_tool:
+            event.details["scanner_tool"] = scanner_tool
     return enriched
 
 
