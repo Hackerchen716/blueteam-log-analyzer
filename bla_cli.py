@@ -17,12 +17,10 @@ BlueTeam Log Analyzer (BLA) - CLI 入口
 import sys
 import os
 import argparse
-import glob
 import json
 import tempfile
 import time
 import tracemalloc
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List
 
@@ -35,25 +33,23 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from bla.config import (
-    load_thresholds, load_thresholds_from_env, set_thresholds,
+from bla.__version__ import __version__
+from bla.core import (
+    AnalysisError,
+    AnalysisOptions,
+    AnalysisOutputs,
+    collect_files,
+    parse_files,
+    run_analysis,
+    write_reports,
 )
 from bla.log_sources import format_log_source_priorities
-from bla.parsers import auto_parse
 from bla.detection import run_detection
-from bla.detection.enrichment import enrich_events
-from bla.allowlist import apply_allowlist, load_allowlist
-from bla.rules import set_rule_dirs, validate_web_attack_rules
+from bla.rules import validate_web_attack_rules
 from bla.output import (
     print_terminal_report,
-    generate_html_report,
-    generate_json_report,
-    generate_csv_report,
-    generate_ioc_report,
-    generate_sarif_report,
-    generate_report_bundle,
 )
-from bla.utils.helpers import reset_counter, safe_print as print, set_syslog_year
+from bla.utils.helpers import reset_counter, safe_print as print
 from bla.models import ParseResult, ThreatLevel
 
 
@@ -299,56 +295,11 @@ def _render_alert_markdown(alert: dict) -> str:
 
 
 def _collect_files(paths: List[str]) -> List[str]:
-    files = []
-    for path in paths:
-        if os.path.isfile(path):
-            files.append(path)
-        elif os.path.isdir(path):
-            for root, _, fnames in os.walk(path):
-                for fname in fnames:
-                    if not fname.startswith("."):
-                        files.append(os.path.join(root, fname))
-        else:
-            files.extend(glob.glob(path))
-    return sorted(set(files))
+    return collect_files(paths)
 
 
 def _parse_files(files: List[str], jobs: int = 0, quiet: bool = False) -> List[ParseResult]:
-    parse_results: List[ParseResult] = []
-    workers = jobs if jobs > 0 else min(8, max(1, len(files)))
-    if len(files) <= 1 or workers == 1:
-        for i, fpath in enumerate(files, 1):
-            fname = os.path.basename(fpath)
-            if not quiet:
-                print(f"  [{i}/{len(files)}] 解析: {fname} ...", end=" ", flush=True)
-            try:
-                result = auto_parse(fpath)
-                parse_results.append(result)
-                if not quiet:
-                    print(f"✓ ({result.stats.total} 事件)")
-            except Exception as e:
-                if not quiet:
-                    print(f"✗ 错误: {e}")
-                continue
-    else:
-        if not quiet:
-            print(f"  并行解析（{workers} 个线程）...")
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            future_to_path = {pool.submit(auto_parse, fpath): fpath for fpath in files}
-            done = 0
-            for future in as_completed(future_to_path):
-                done += 1
-                fpath = future_to_path[future]
-                fname = os.path.basename(fpath)
-                try:
-                    result = future.result()
-                    parse_results.append(result)
-                    if not quiet:
-                        print(f"  [{done}/{len(files)}] ✓ {fname} ({result.stats.total} 事件)")
-                except Exception as e:
-                    if not quiet:
-                        print(f"  [{done}/{len(files)}] ✗ {fname}: {e}")
-    return parse_results
+    return parse_files(files, jobs=jobs, quiet=quiet, print_fn=print)
 
 
 def _make_synthetic_p0_log(size_mb: int) -> Path:
@@ -493,7 +444,7 @@ def main():
     parser.add_argument(
         "--version",
         action="version",
-        version="BLA 1.0.3",
+        version=f"BLA {__version__}",
     )
 
     args = parser.parse_args()
@@ -513,27 +464,6 @@ def main():
         if args.syslog_year < 1970 or args.syslog_year > 2100:
             print("❌ 错误：--syslog-year 必须在 1970 到 2100 之间", file=sys.stderr)
             sys.exit(1)
-        set_syslog_year(args.syslog_year)
-
-    # 阈值加载顺序：内置默认 → 环境变量 → --config 文件
-    set_thresholds(load_thresholds_from_env())
-    if args.config:
-        try:
-            set_thresholds(load_thresholds(args.config))
-        except Exception as e:
-            print(f"❌ 错误：阈值文件加载失败: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    rule_dirs = []
-    if os.environ.get("BLA_RULES_DIR"):
-        rule_dirs.extend([p for p in os.environ["BLA_RULES_DIR"].split(os.pathsep) if p])
-    if args.rules:
-        rule_dirs.extend(args.rules)
-    try:
-        set_rule_dirs(rule_dirs)
-    except Exception as e:
-        print(f"❌ 错误：规则目录加载失败: {e}", file=sys.stderr)
-        sys.exit(1)
 
     # 收集所有文件
     files = _collect_files(args.paths)
@@ -544,37 +474,33 @@ def main():
 
     print(f"\n🔍 开始分析 {len(files)} 个文件...\n")
 
-    # 解析所有文件
-    reset_counter()
-    parse_results = _parse_files(files, args.jobs)
-
-    if not parse_results:
-        print("\n❌ 所有文件解析失败", file=sys.stderr)
+    try:
+        run_result = run_analysis(
+            AnalysisOptions(
+                paths=files,
+                profile=args.profile,
+                jobs=args.jobs,
+                config_path=args.config,
+                rule_dirs=args.rules or [],
+                allowlist_path=args.allowlist,
+                syslog_year=args.syslog_year,
+            ),
+            quiet=False,
+            print_fn=print,
+        )
+    except AnalysisError as e:
+        print(f"\n❌ {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ 分析流程失败: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # 先归一化/富化字段，白名单和后续检测都能用 source_type、asset、event_family 等稳定字段。
-    for result in parse_results:
-        enrich_events(result.events)
+    parse_results = run_result.parse_results
+    summary = run_result.summary
+    if run_result.suppressed_events:
+        print(f"\n✓ 白名单过滤完成，压制 {run_result.suppressed_events} 条事件")
 
-    if args.allowlist:
-        try:
-            allowlist = load_allowlist(args.allowlist)
-            parse_results, suppressed = apply_allowlist(parse_results, allowlist)
-            print(f"\n✓ 白名单过滤完成，压制 {suppressed} 条事件\n")
-        except Exception as e:
-            print(f"\n❌ 白名单加载失败: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    # 合并所有事件
-    all_events = []
-    for r in parse_results:
-        all_events.extend(r.events)
-
-    print(f"\n✓ 解析完成，共 {len(all_events)} 条事件\n")
-    print("🔎 运行威胁检测引擎...\n")
-
-    # 运行检测
-    summary = run_detection(all_events, profile=args.profile)
+    print(f"\n✓ 解析完成，共 {summary.total_events} 条事件\n")
 
     print(f"✓ 检测完成，发现 {len(summary.alerts)} 个告警\n")
 
@@ -588,18 +514,18 @@ def main():
         args.full_evidence,
     )
 
-    if args.html:
-        generate_html_report(parse_results, summary, args.html)
-    if args.json:
-        generate_json_report(parse_results, summary, args.json)
-    if args.csv:
-        generate_csv_report(parse_results, summary, args.csv)
-    if args.ioc:
-        generate_ioc_report(parse_results, summary, args.ioc)
-    if args.sarif:
-        generate_sarif_report(parse_results, summary, args.sarif)
-    if args.out:
-        generate_report_bundle(parse_results, summary, args.out)
+    write_reports(
+        parse_results,
+        summary,
+        AnalysisOutputs(
+            html=args.html,
+            json=args.json,
+            csv=args.csv,
+            ioc=args.ioc,
+            sarif=args.sarif,
+            bundle_dir=args.out,
+        ),
+    )
 
     # 退出码：可通过 --exit-on 控制触发等级
     threshold = _EXIT_THRESHOLDS.get(args.exit_on)

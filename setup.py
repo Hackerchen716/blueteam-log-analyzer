@@ -1,10 +1,16 @@
-from setuptools import setup, find_packages
+from pathlib import Path
+
+from setuptools import find_packages, setup
+
+ROOT = Path(__file__).parent
+version_ns = {}
+exec((ROOT / "bla" / "__version__.py").read_text(encoding="utf-8"), version_ns)
 
 setup(
     name="blueteam-log-analyzer",
-    version="1.0.3",
+    version=version_ns["__version__"],
     description="BlueTeam Log Analyzer - 蓝队应急响应日志分析工具",
-    long_description=open("README.md", encoding="utf-8").read(),
+    long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     author="Hackerchen716",
     url="https://github.com/Hackerchen716/blueteam-log-analyzer",

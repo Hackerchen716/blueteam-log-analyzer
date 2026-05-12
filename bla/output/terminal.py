@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 from typing import List
 
+from ..__version__ import __version__
 from ..models import (
     ParseResult, AnalysisSummary, DetectionAlert, ThreatLevel, LogEvent
 )
@@ -104,7 +105,7 @@ def print_terminal_report(
     out.write(f"\n{BOLD}{BLUE}")
     out.write("╔══════════════════════════════════════════════════════════════════════════════╗\n")
     out.write("║         BlueTeam Log Analyzer (BLA)  -  Blue Team Incident Response          ║\n")
-    out.write("║                    Version 1.0.3  |  100% Offline  |  No AI                  ║\n")
+    out.write(f"║                    Version {__version__:<6} |  100% Offline  |  No AI                  ║\n")
     out.write("╚══════════════════════════════════════════════════════════════════════════════╝\n")
     out.write(RESET)
 

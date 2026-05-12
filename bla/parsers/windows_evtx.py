@@ -139,10 +139,10 @@ def _augment_4688_details(eid: int, details: Dict[str, str]) -> None:
 # 格式: event_id -> (level, category, message_fn, tags, mitre, rule_name)
 _WIN_RULES: Dict[int, dict] = {
     # ── 认证 ──────────────────────────────────────────────
-    4624: dict(level=ThreatLevel.INFO,     cat="认证",    tags=["logon"],
+    4624: dict(level=ThreatLevel.INFO,     cat="认证",    tags=["logon", "successful-login", "authentication"],
                mitre="T1078",      rule="登录成功",
                msg=_build_4624_message),
-    4625: dict(level=ThreatLevel.MEDIUM,   cat="认证",    tags=["failed-logon","brute-force"],
+    4625: dict(level=ThreatLevel.MEDIUM,   cat="认证",    tags=["failed-logon", "failed-login", "brute-force", "authentication"],
                mitre="T1110.001",  rule="登录失败",
                msg=_build_4625_message),
     4648: dict(level=ThreatLevel.MEDIUM,   cat="认证",    tags=["explicit-creds","lateral-movement"],

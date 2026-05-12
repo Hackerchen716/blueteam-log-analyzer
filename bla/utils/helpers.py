@@ -4,19 +4,23 @@ import ipaddress
 import os
 import re
 import sys
+import threading
 from typing import Iterator, Optional
 
 _counter = 0
+_counter_lock = threading.Lock()
 _syslog_year_override: Optional[int] = None
 
 def gen_id(prefix: str = "evt") -> str:
     global _counter
-    _counter += 1
-    return f"{prefix}-{_counter:06d}"
+    with _counter_lock:
+        _counter += 1
+        return f"{prefix}-{_counter:06d}"
 
 def reset_counter():
     global _counter
-    _counter = 0
+    with _counter_lock:
+        _counter = 0
 
 def set_syslog_year(year: Optional[int]):
     """Set the year used for syslog timestamps that do not include one."""

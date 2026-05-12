@@ -132,6 +132,8 @@ def _in_maintenance_window(event: LogEvent, windows: List[Dict[str, Any]]) -> bo
     if not ts:
         return False
     for window in windows:
+        if not _has_window_constraints(window):
+            continue
         start = str(window.get("start") or "")
         end = str(window.get("end") or "")
         if start and ts < start:
@@ -145,7 +147,26 @@ def _in_maintenance_window(event: LogEvent, windows: List[Dict[str, Any]]) -> bo
 
 
 def _suppression_matches(event: LogEvent, rule: Dict[str, Any]) -> bool:
+    if not _has_scope_constraints(rule):
+        return False
     return _scope_matches(event, rule)
+
+
+def _has_window_constraints(window: Dict[str, Any]) -> bool:
+    if window.get("start") or window.get("end"):
+        return True
+    return _has_scope_constraints(window)
+
+
+def _has_scope_constraints(scope: Dict[str, Any]) -> bool:
+    for key in (
+        "ips", "users", "hosts", "processes", "rule_names", "rule_ids",
+        "event_ids", "source_types", "tags", "messages", "paths",
+    ):
+        value = scope.get(key)
+        if value:
+            return True
+    return False
 
 
 def _scope_matches(event: LogEvent, scope: Dict[str, Any]) -> bool:

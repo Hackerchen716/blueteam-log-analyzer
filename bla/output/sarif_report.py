@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
+from ..__version__ import __version__
 from ..models import AnalysisSummary, DetectionAlert, ParseResult, ThreatLevel
 from ..utils.helpers import safe_print
 
@@ -92,7 +93,7 @@ def generate_sarif_report(
     for result in parse_results:
         ids = {ev.id for ev in result.events}
         for alert in summary.alerts:
-            if alert.rule_id in file_for_alert.get(alert.id, ""):
+            if alert.id in file_for_alert:
                 continue
             if any(eid in ids for eid in alert.affected_events):
                 file_for_alert[alert.id] = result.file_name
@@ -111,7 +112,7 @@ def generate_sarif_report(
                     "driver": {
                         "name": "BlueTeam Log Analyzer",
                         "informationUri": "https://github.com/Hackerchen716/blueteam-log-analyzer",
-                        "version": "1.0.3",
+                        "version": __version__,
                         "rules": list(rules_by_id.values()),
                     }
                 },

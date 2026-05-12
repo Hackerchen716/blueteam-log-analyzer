@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import datetime
 from typing import List
+from ..__version__ import __version__
 from ..ioc import extract_iocs
 from ..models import ParseResult, AnalysisSummary
 from ..utils.helpers import safe_print
@@ -23,7 +24,7 @@ def generate_json_report(
     report = {
         "meta": {
             "tool": "BlueTeam Log Analyzer (BLA)",
-            "version": "1.0.3",
+            "version": __version__,
             "generated_at": datetime.datetime.now().isoformat(),
             "files_analyzed": summary.files_analyzed,
         },

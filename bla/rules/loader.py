@@ -47,6 +47,14 @@ def set_rule_dirs(paths: Iterable[str]) -> None:
         if not os.path.isdir(abspath):
             raise ValueError(f"规则目录不存在: {path}")
         normalized.append(abspath)
+    validation = validate_web_attack_rules(normalized)
+    if validation["errors"]:
+        messages = "; ".join(
+            f"{item['source']}::{item['rule']}: {item['message']}"
+            for item in validation["issues"]
+            if item["severity"] == "error"
+        )
+        raise ValueError(f"规则校验失败: {messages}")
     _RULE_DIRS = tuple(normalized)
     reset_rule_cache()
 

@@ -1,13 +1,17 @@
 import csv
 import io
 import json as _json
+import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from bla.__version__ import __version__
 from bla.allowlist import apply_allowlist
 from bla.config import THRESHOLDS, Thresholds, load_thresholds, set_thresholds
+from bla.core import AnalysisOptions, run_analysis
 from bla.detection import run_detection
 from bla.detection.engine import _dedup_alerts
 from bla.ioc import extract_iocs, format_ioc_report
@@ -32,7 +36,7 @@ from bla.parsers.p0_security import parse_p0_security_json, parse_p0_security_li
 from bla.parsers.web_access import parse_web_access
 from bla.parsers.windows_evtx import _parse_xml_event, parse_windows_xml
 from bla.rules import reset_rule_cache, set_rule_dirs, validate_web_attack_rules
-from bla.utils.helpers import is_private_ip, normalize_timestamp, reset_counter, set_syslog_year
+from bla.utils.helpers import gen_id, is_private_ip, normalize_timestamp, reset_counter, set_syslog_year
 
 
 class RegressionTests(unittest.TestCase):
@@ -316,6 +320,31 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(event.event_id, "4625")
         self.assertEqual(event.user, "bob")
 
+    def test_windows_successful_logon_feeds_cn_hvv_success_after_bruteforce(self):
+        xml = "".join(
+            "<Event><System><EventID>4625</EventID>"
+            f"<TimeCreated SystemTime=\"2024-03-15T01:02:{i:02d}.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">alice</Data>"
+            "<Data Name=\"IpAddress\">8.8.8.8</Data>"
+            "<Data Name=\"LogonType\">3</Data></EventData></Event>"
+            for i in range(5)
+        )
+        xml += (
+            "<Event><System><EventID>4624</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:03:00.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">alice</Data>"
+            "<Data Name=\"IpAddress\">8.8.8.8</Data>"
+            "<Data Name=\"LogonType\">3</Data></EventData></Event>"
+        )
+
+        result = parse_windows_xml(xml, "Security.xml")
+        summary = run_detection(result.events, profile="cn-hvv")
+
+        self.assertTrue(any("successful-login" in event.tags for event in result.events if event.event_id == "4624"))
+        self.assertTrue(any(alert.rule_id == "CN-HVV-002" for alert in summary.alerts))
+
     def test_syslog_year_can_be_overridden_for_historical_logs(self):
         try:
             set_syslog_year(2024)
@@ -372,6 +401,24 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(suppressed, 1)
         self.assertEqual(len(filtered[0].events), 1)
         self.assertEqual(filtered[0].events[0].ip, "9.9.9.9")
+
+    def test_empty_allowlist_objects_do_not_suppress_everything(self):
+        event = LogEvent(
+            id="evt-allow-1",
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.HIGH,
+            category="测试",
+            source="fixture",
+            source_file="events.log",
+            message="danger",
+            raw_line="danger",
+        )
+        result = ParseResult("events.log", "Fixture", [event], ParseStats(total=1, high=1))
+
+        for allowlist in ({"suppressions": [{}]}, {"maintenance_windows": [{}]}):
+            filtered, suppressed = apply_allowlist([result], allowlist)
+            self.assertEqual(suppressed, 0)
+            self.assertEqual(len(filtered[0].events), 1)
 
     def test_terminal_report_can_cap_large_alert_lists(self):
         content = "".join(
@@ -458,6 +505,13 @@ class RegressionTests(unittest.TestCase):
         self.assertFalse(is_private_ip("172.32.0.1"))
         self.assertFalse(is_private_ip("203.0.113.50"))
         self.assertFalse(is_private_ip("198.51.100.70"))
+
+    def test_event_id_generation_is_thread_safe(self):
+        reset_counter()
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            ids = list(pool.map(lambda _i: gen_id("thr"), range(1000)))
+        self.assertEqual(len(ids), 1000)
+        self.assertEqual(len(set(ids)), 1000)
 
     def test_cross_year_syslog_lines_advance_year_on_month_rollback(self):
         """12 月之后出现 1 月份事件，应自动 +1 年。"""
@@ -620,6 +674,40 @@ class RegressionTests(unittest.TestCase):
         # 至少一个 result level 是 "error"（CRITICAL/HIGH 都映射到 error）
         self.assertTrue(any(r["level"] == "error" for r in run["results"]))
 
+    def test_sarif_keeps_first_matching_source_file_for_cross_file_alert(self):
+        event_a = LogEvent(
+            id="e-a", timestamp="2024-03-15T10:00:00", level=ThreatLevel.HIGH,
+            category="测试", source="fixture", source_file="first.log",
+            message="first", raw_line="first",
+        )
+        event_b = LogEvent(
+            id="e-b", timestamp="2024-03-15T10:01:00", level=ThreatLevel.HIGH,
+            category="测试", source="fixture", source_file="second.log",
+            message="second", raw_line="second",
+        )
+        alert = DetectionAlert(
+            id="a-cross", rule_id="TEST-001", rule_name="跨文件告警",
+            description="cross file", level=ThreatLevel.HIGH, category="测试",
+            mitre_attack="T1190", mitre_phase="初始访问",
+            affected_events=["e-a", "e-b"], evidence=[],
+            recommendation="", timestamp="2024-03-15T10:01:00", confidence="high",
+        )
+        summary = AnalysisSummary(
+            risk_score=0, risk_level=ThreatLevel.INFO, alerts=[alert],
+            timeline=[], attack_chain=[], recommendations=[],
+            total_events=2, files_analyzed=2,
+        )
+        result_a = ParseResult("first.log", "Fixture", [event_a], ParseStats(total=1))
+        result_b = ParseResult("second.log", "Fixture", [event_b], ParseStats(total=1))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sarif_path = Path(tmp) / "report.sarif"
+            generate_sarif_report([result_a, result_b], summary, str(sarif_path))
+            data = _json.loads(sarif_path.read_text(encoding="utf-8"))
+
+        uri = data["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        self.assertEqual(uri, "first.log")
+
     def test_ioc_drops_boring_paths_but_keeps_attack_paths(self):
         """IOC 路径列表只保留有意义的路径，过滤 / 和 /index.html 这类噪音。"""
         content = (
@@ -709,6 +797,30 @@ web_attacks:
         alert = next(a for a in summary.alerts if a.rule_name == "Web攻击: 单元测试自定义规则")
         self.assertEqual(alert.rule_id, "WEB-CUSTOM-UNIT")
 
+    def test_invalid_custom_yaml_rule_fails_fast(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_dir = Path(tmp) / "rules"
+            rules_dir.mkdir()
+            (rules_dir / "bad.yaml").write_text(
+                """
+web_attacks:
+  - id: WEB-BAD
+    name: Bad regex
+    severity: high
+    mitre: T1190
+    tags: [bad]
+    patterns:
+      - '['
+""",
+                encoding="utf-8",
+            )
+            try:
+                with self.assertRaises(ValueError):
+                    set_rule_dirs([str(rules_dir)])
+            finally:
+                set_rule_dirs([])
+                reset_rule_cache()
+
     def test_web_alert_preserves_highest_event_level(self):
         """Web 聚合告警不应把单条 HIGH 事件降成 MEDIUM。"""
         content = (
@@ -793,6 +905,19 @@ web_attacks:
 
         self.assertEqual(len(summary.alerts), 0)
         self.assertEqual(len(summary.incidents), 0)
+
+    def test_sample_access_log_does_not_create_near_duplicate_incidents(self):
+        path = Path(__file__).parents[1] / "sample_logs" / "access.log"
+        result = auto_parse(str(path))
+        summary = run_detection(result.events)
+
+        for idx, left in enumerate(summary.incidents):
+            left_events = set(left.affected_events)
+            for right in summary.incidents[idx + 1:]:
+                right_events = set(right.affected_events)
+                smaller = min(len(left_events), len(right_events))
+                overlap = len(left_events & right_events)
+                self.assertLess(overlap / smaller if smaller else 0, 0.8)
 
     def test_json_report_contains_incident_case_view(self):
         """JSON 报告必须包含 incident，便于 explain/API/二次处理。"""
@@ -928,6 +1053,47 @@ web_attacks:
         self.assertIn("**MITRE**：T1190 / 初始访问", alert_md)
         self.assertIn("- payload=union select", alert_md)
         self.assertIn("部署 WAF", alert_md)
+
+    def test_analysis_pipeline_can_be_called_directly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "access.log"
+            path.write_text(
+                "9.9.9.9 - - [15/Mar/2024:10:01:00 +0800] "
+                "\"GET /download.php?file=../../etc/passwd HTTP/1.1\" 200 10 \"-\" \"curl/8\"\n",
+                encoding="utf-8",
+            )
+            result = run_analysis(AnalysisOptions(paths=[str(path)]))
+
+        self.assertEqual(len(result.parse_results), 1)
+        self.assertGreaterEqual(len(result.summary.alerts), 1)
+        self.assertEqual(result.summary.files_analyzed, 1)
+
+    def test_version_surfaces_are_consistent(self):
+        repo = Path(__file__).parents[1]
+        completed = subprocess.run(
+            [sys.executable, "bla_cli.py", "--version"],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertIn(__version__, completed.stdout)
+
+        summary = AnalysisSummary(
+            risk_score=0, risk_level=ThreatLevel.INFO, alerts=[],
+            timeline=[], attack_chain=[], recommendations=[],
+            total_events=0, files_analyzed=0,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = Path(tmp) / "report.json"
+            sarif_path = Path(tmp) / "report.sarif"
+            generate_json_report([], summary, str(json_path))
+            generate_sarif_report([], summary, str(sarif_path))
+            report = _json.loads(json_path.read_text(encoding="utf-8"))
+            sarif = _json.loads(sarif_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["meta"]["version"], __version__)
+        self.assertEqual(sarif["runs"][0]["tool"]["driver"]["version"], __version__)
 
 
 if __name__ == "__main__":

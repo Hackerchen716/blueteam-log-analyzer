@@ -142,14 +142,35 @@ def _is_incident_candidate(events: Sequence[LogEvent], alerts: Sequence[Detectio
 
 def _drop_subset_incidents(incidents: Sequence[Incident]) -> List[Incident]:
     kept: List[Incident] = []
-    kept_event_sets: List[Set[str]] = []
     for incident in incidents:
         current = set(incident.affected_events)
-        if current and any(current.issubset(existing) for existing in kept_event_sets):
+        if current and any(_is_duplicate_incident(incident, existing) for existing in kept):
             continue
         kept.append(incident)
-        kept_event_sets.append(current)
     return kept
+
+
+def _is_duplicate_incident(candidate: Incident, existing: Incident) -> bool:
+    current = set(candidate.affected_events)
+    previous = set(existing.affected_events)
+    if not current or not previous:
+        return False
+    if current.issubset(previous):
+        return True
+    overlap = len(current & previous)
+    smaller = min(len(current), len(previous))
+    if smaller == 0 or overlap / smaller < 0.8:
+        return False
+    same_entities = bool(
+        set(candidate.source_ips) & set(existing.source_ips)
+        or set(candidate.assets) & set(existing.assets)
+        or set(candidate.accounts) & set(existing.accounts)
+    )
+    return (
+        same_entities
+        and candidate.source_types == existing.source_types
+        and candidate.attack_phases == existing.attack_phases
+    )
 
 
 def _build_incident(index: int, events: Sequence[LogEvent], alerts: Sequence[DetectionAlert]) -> Incident:

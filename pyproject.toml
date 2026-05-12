@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blueteam-log-analyzer"
-version = "1.0.3"
+dynamic = ["version"]
 description = "BlueTeam Log Analyzer - 蓝队应急响应日志分析工具"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -56,6 +56,9 @@ include = ["bla*"]
 
 [tool.setuptools.package-data]
 "bla.rules" = ["*.yaml", "*.yml"]
+
+[tool.setuptools.dynamic]
+version = {attr = "bla.__version__.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
