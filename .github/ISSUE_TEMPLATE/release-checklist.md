@@ -19,8 +19,9 @@ assignees: ""
 - [ ] `python3 -m unittest discover -s tests -v`
 - [ ] `python3 bla_cli.py validate-rules --strict-metadata`
 - [ ] sample log smoke tests pass with `--exit-on none`
+- [ ] `bla ssh --help` confirms Remote Workspace CLI wiring
 - [ ] `python3 -m build`
-- [ ] wheel/sdist include `bla/rules/web_attacks.yaml`
+- [ ] wheel/sdist include `bla/rules/web_attacks.yaml` and `bla/remote/ssh_workspace.py`
 
 ## Publishing
 

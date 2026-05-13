@@ -24,6 +24,13 @@ import tracemalloc
 from pathlib import Path
 from typing import List, Optional
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 # Windows 10+ 启用 ANSI 颜色支持
 if sys.platform == "win32":
     import ctypes
@@ -63,7 +70,7 @@ _EXIT_THRESHOLDS = {
 
 
 def _dispatch_subcommand(argv: List[str]) -> bool:
-    if len(argv) < 2 or argv[1] not in {"validate-rules", "benchmark", "explain"}:
+    if len(argv) < 2 or argv[1] not in {"validate-rules", "benchmark", "explain", "ssh"}:
         return False
     command = argv[1]
     if command == "validate-rules":
@@ -72,7 +79,38 @@ def _dispatch_subcommand(argv: List[str]) -> bool:
         _cmd_benchmark(argv[2:])
     elif command == "explain":
         _cmd_explain(argv[2:])
+    elif command == "ssh":
+        _cmd_ssh(argv[2:])
     return True
+
+
+def _cmd_ssh(argv: List[str]) -> None:
+    from bla.remote import RemoteWorkspace, SSHClient
+
+    parser = argparse.ArgumentParser(
+        prog="bla ssh",
+        description="通过 SSH 打开远程日志工作台；目标机不需要安装 Python、pip 或 BLA",
+    )
+    parser.add_argument("target", help="SSH 目标，例如 root@192.168.1.20 或 ~/.ssh/config 中的主机别名")
+    parser.add_argument("-p", "--port", type=int, help="SSH 端口")
+    parser.add_argument("-i", "--identity-file", help="SSH 私钥路径")
+    parser.add_argument("--workdir", default=".", help="进入远程工作台后的初始目录，默认远程登录目录")
+    parser.add_argument("--connect-timeout", type=int, default=10, help="SSH 连接超时秒数，默认 10")
+    args = parser.parse_args(argv)
+
+    client = SSHClient(
+        target=args.target,
+        port=args.port,
+        identity_file=args.identity_file,
+        connect_timeout=args.connect_timeout,
+    )
+    workspace = RemoteWorkspace(client, initial_cwd=args.workdir, print_fn=print)
+    try:
+        workspace.start()
+    except RuntimeError as e:
+        print(f"❌ 远程工作台启动失败: {e}", file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0)
 
 
 def _cmd_validate_rules(argv: List[str]) -> None:

@@ -44,5 +44,5 @@ setup(
         "Topic :: System :: Logging",
         "Topic :: System :: Monitoring",
     ],
-    keywords="blueteam, incident-response, log-analysis, security, SIEM, DFIR, threat-detection",
+    keywords="blueteam, incident-response, log-analysis, security, SIEM, DFIR, threat-detection, remote-collection, ssh",
 )

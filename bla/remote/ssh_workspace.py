@@ -1,0 +1,430 @@
+"""Interactive SSH workspace.
+
+The remote side only needs a normal shell and common read-only utilities. BLA
+keeps parsing, detection, correlation, and report generation on the local host.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Callable, List, Optional, Sequence
+
+from ..core import AnalysisError, AnalysisOptions, AnalysisOutputs, run_analysis, write_reports
+from ..output import print_terminal_report
+from ..parsers import list_parser_names
+
+PrintFn = Callable[..., None]
+
+
+@dataclass
+class RemoteCommandResult:
+    returncode: int
+    stdout: bytes = b""
+    stderr: bytes = b""
+
+    @property
+    def text(self) -> str:
+        return self.stdout.decode("utf-8", errors="replace")
+
+    @property
+    def error_text(self) -> str:
+        return self.stderr.decode("utf-8", errors="replace")
+
+
+class SSHClient:
+    """Small OpenSSH wrapper with no Python dependency on the target host."""
+
+    def __init__(
+        self,
+        target: str,
+        port: Optional[int] = None,
+        identity_file: Optional[str] = None,
+        connect_timeout: int = 10,
+    ) -> None:
+        self.target = target
+        self.port = port
+        self.identity_file = identity_file
+        self.connect_timeout = connect_timeout
+
+    def run(self, command: str, timeout: Optional[int] = 60) -> RemoteCommandResult:
+        args = self._base_args()
+        args.append(command)
+        completed = subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+        return RemoteCommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+    def fetch_file(self, remote_path: str, local_path: str, cwd: str) -> None:
+        remote_cmd = _remote_cd_command(cwd, f"test -f {_qp(remote_path)} && cat -- {_qp(remote_path)}")
+        args = self._base_args()
+        args.append(remote_cmd)
+        with open(local_path, "wb") as out:
+            completed = subprocess.run(
+                args,
+                stdout=out,
+                stderr=subprocess.PIPE,
+                timeout=None,
+                check=False,
+            )
+        if completed.returncode != 0:
+            err = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(err or f"无法读取远程文件: {remote_path}")
+
+    def capture_command(self, command: str, local_path: str, cwd: str, timeout: Optional[int] = None) -> None:
+        remote_cmd = _remote_cd_command(cwd, command)
+        args = self._base_args()
+        args.append(remote_cmd)
+        with open(local_path, "wb") as out:
+            completed = subprocess.run(
+                args,
+                stdout=out,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                check=False,
+            )
+        if completed.returncode != 0:
+            err = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(err or f"远程命令失败: {command}")
+
+    def _base_args(self) -> List[str]:
+        args = [
+            "ssh",
+            "-o",
+            f"ConnectTimeout={self.connect_timeout}",
+            "-o",
+            "BatchMode=no",
+        ]
+        if self.port:
+            args.extend(["-p", str(self.port)])
+        if self.identity_file:
+            args.extend(["-i", self.identity_file])
+        args.append(self.target)
+        return args
+
+
+class RemoteWorkspace:
+    """A tiny shell-like remote workspace for log-first incident response."""
+
+    def __init__(
+        self,
+        client: SSHClient,
+        initial_cwd: str = ".",
+        print_fn: Optional[PrintFn] = None,
+    ) -> None:
+        self.client = client
+        self.cwd = initial_cwd or "."
+        self.print = print_fn if print_fn is not None else print
+
+    def start(self) -> None:
+        self.cwd = self._resolve_remote_cwd(self.cwd)
+        self.print(f"已连接 {self.client.target}，远程目标无需安装 Python/pip/BLA。")
+        self.print("输入 help 查看命令；在远程目录中直接执行 bla access.log 即可本地分析。")
+        while True:
+            try:
+                line = input(f"bla@{self.client.target}:{self.cwd}$ ")
+            except EOFError:
+                self.print("")
+                return
+            except KeyboardInterrupt:
+                self.print("")
+                continue
+            if self.execute_line(line) == 130:
+                return
+
+    def execute_line(self, line: str) -> int:
+        line = line.strip()
+        if not line:
+            return 0
+        try:
+            parts = _split_workspace_line(line)
+        except ValueError as e:
+            self.print(f"解析命令失败: {e}", file=sys.stderr)
+            return 2
+        if not parts:
+            return 0
+
+        command, args = parts[0], parts[1:]
+        if command in {"exit", "quit"}:
+            return 130
+        if command == "help":
+            self._print_help()
+            return 0
+        if command == "pwd":
+            self.print(self.cwd)
+            return 0
+        if command == "cd":
+            return self._cmd_cd(args)
+        if command == "ls":
+            return self._cmd_ls(args)
+        if command == "tail":
+            return self._cmd_tail(args)
+        if command == "find":
+            return self._cmd_find(args)
+        if command == "bla":
+            return self._cmd_bla(args)
+        if command == "collect":
+            self.print("collect linux/windows 会在后续 collector 里接上；当前原型先支持 bla 远程文件本地分析。")
+            return 0
+
+        self.print(f"不支持远程任意命令: {command}。可用命令: help, ls, cd, pwd, find, tail, bla, exit")
+        return 2
+
+    def _cmd_cd(self, args: Sequence[str]) -> int:
+        target = args[0] if args else "."
+        result = self.client.run(_remote_cd_command(self.cwd, f"cd {_qp(target)} && pwd -P"))
+        if result.returncode != 0:
+            self._print_remote_error(result)
+            return result.returncode
+        new_cwd = result.text.strip().splitlines()[-1] if result.text.strip() else ""
+        if not new_cwd:
+            self.print("远程目录解析失败", file=sys.stderr)
+            return 1
+        self.cwd = new_cwd
+        return 0
+
+    def _cmd_ls(self, args: Sequence[str]) -> int:
+        flags = []
+        paths = []
+        for item in args:
+            if item.startswith("-"):
+                if item not in {"-l", "-a", "-h", "-la", "-al", "-lh", "-lah", "-alh"}:
+                    self.print(f"不支持的 ls 参数: {item}", file=sys.stderr)
+                    return 2
+                flags.append(item)
+            else:
+                paths.append(item)
+        flag_text = " ".join(flags) if flags else "-lah"
+        target = paths[0] if paths else "."
+        result = self.client.run(_remote_cd_command(self.cwd, f"ls {flag_text} -- {_qp(target)}"))
+        return self._print_result(result)
+
+    def _cmd_tail(self, args: Sequence[str]) -> int:
+        if not args:
+            self.print("用法: tail FILE [N]", file=sys.stderr)
+            return 2
+        path = args[0]
+        count = 80
+        if len(args) > 1:
+            try:
+                count = max(1, min(1000, int(args[1])))
+            except ValueError:
+                self.print("tail 行数必须是数字", file=sys.stderr)
+                return 2
+        result = self.client.run(_remote_cd_command(self.cwd, f"tail -n {count} -- {_qp(path)}"))
+        return self._print_result(result)
+
+    def _cmd_find(self, args: Sequence[str]) -> int:
+        base = "."
+        pattern = "*"
+        if len(args) == 1:
+            pattern = args[0]
+        elif len(args) >= 2:
+            base, pattern = args[0], args[1]
+        result = self.client.run(
+            _remote_cd_command(self.cwd, f"find {_qp(base)} -maxdepth 3 -type f -name {_q(pattern)} | sort | head -200")
+        )
+        return self._print_result(result)
+
+    def _cmd_bla(self, args: Sequence[str]) -> int:
+        parser = argparse.ArgumentParser(prog="bla", add_help=True)
+        parser.add_argument("paths", nargs="+", help="远程日志文件路径")
+        parser.add_argument("--out", metavar="DIR", help="本地标准报告目录")
+        parser.add_argument("--html", metavar="FILE", help="本地 HTML 报告")
+        parser.add_argument("--json", metavar="FILE", help="本地 JSON 报告")
+        parser.add_argument("--csv", metavar="FILE", help="本地 CSV 事件列表")
+        parser.add_argument("--ioc", metavar="FILE", help="本地 IOC 清单")
+        parser.add_argument("--sarif", metavar="FILE", help="本地 SARIF 报告")
+        parser.add_argument("--profile", choices=("default", "cn-hvv"), default="default")
+        parser.add_argument("--type", choices=["auto"] + list_parser_names(), default="auto")
+        parser.add_argument("--exit-on", choices=("none", "critical", "high", "medium"), default="none")
+        parser.add_argument("--rules", action="append", metavar="DIR")
+        parser.add_argument("--allowlist", metavar="FILE")
+        parser.add_argument("--config", metavar="FILE")
+        parser.add_argument("--max-alerts", type=int, default=50)
+        parser.add_argument("--full", "--no-truncate", "--evidence", dest="full_evidence", action="store_true")
+        parser.add_argument("--no-color", action="store_true")
+        parser.add_argument("--syslog-year", type=int)
+        try:
+            parsed = parser.parse_args(list(args))
+        except SystemExit as e:
+            return int(e.code or 0)
+
+        with tempfile.TemporaryDirectory(prefix="bla-remote-") as tmp:
+            local_paths = []
+            labels = {}
+            for remote_item in parsed.paths:
+                try:
+                    local_path, label = self._materialize_remote_source(remote_item, tmp)
+                except RuntimeError as e:
+                    self.print(f"读取远程输入失败: {remote_item}: {e}", file=sys.stderr)
+                    return 1
+                local_paths.append(local_path)
+                labels[Path(local_path).name] = label
+
+            self.print(f"\n开始本地分析 {len(local_paths)} 个远程输入...\n")
+            try:
+                run_result = run_analysis(
+                    AnalysisOptions(
+                        paths=local_paths,
+                        profile=parsed.profile,
+                        parser_name=None if parsed.type == "auto" else parsed.type,
+                        config_path=parsed.config,
+                        rule_dirs=parsed.rules or [],
+                        allowlist_path=parsed.allowlist,
+                        syslog_year=parsed.syslog_year,
+                    ),
+                    quiet=False,
+                    print_fn=self.print,
+                )
+            except AnalysisError as e:
+                self.print(f"分析失败: {e}", file=sys.stderr)
+                return 1
+            except Exception as e:
+                self.print(f"分析流程失败: {e}", file=sys.stderr)
+                return 1
+
+            self._annotate_remote_sources(run_result.parse_results, labels)
+            self.print(f"\n解析完成，共 {run_result.summary.total_events} 条事件")
+            self.print(f"检测完成，发现 {len(run_result.summary.alerts)} 个告警\n")
+            print_terminal_report(
+                run_result.parse_results,
+                run_result.summary,
+                verbose=False,
+                no_color=parsed.no_color,
+                max_alerts=parsed.max_alerts,
+                full_evidence=parsed.full_evidence,
+            )
+            write_reports(
+                run_result.parse_results,
+                run_result.summary,
+                AnalysisOutputs(
+                    html=parsed.html,
+                    json=parsed.json,
+                    csv=parsed.csv,
+                    ioc=parsed.ioc,
+                    sarif=parsed.sarif,
+                    bundle_dir=parsed.out,
+                ),
+            )
+        return 0
+
+    def _materialize_remote_source(self, remote_item: str, tmp: str) -> tuple[str, str]:
+        if remote_item.startswith("journalctl:"):
+            unit = remote_item.split(":", 1)[1].strip()
+            if not unit:
+                raise RuntimeError("journalctl: 后面需要服务名，例如 journalctl:ssh")
+            safe_unit = "".join(ch if ch.isalnum() or ch in "._@-" else "_" for ch in unit)
+            local_path = os.path.join(tmp, f"journalctl-{safe_unit}.log")
+            command = f"journalctl -u {_q(unit)} --no-pager -o short"
+            self.client.capture_command(command, local_path, self.cwd)
+            return local_path, f"{self.client.target}:journalctl:{unit}"
+
+        display_path = self._display_path(remote_item)
+        basename = PurePosixPath(display_path).name or "remote.log"
+        local_path = _unique_path(tmp, basename)
+        self.client.fetch_file(remote_item, local_path, self.cwd)
+        return local_path, f"{self.client.target}:{display_path}"
+
+    def _annotate_remote_sources(self, parse_results, labels: dict[str, str]) -> None:
+        for result in parse_results:
+            original_name = result.file_name
+            label = labels.get(original_name)
+            if not label:
+                continue
+            result.file_name = label
+            for event in result.events:
+                if event.source_file == original_name:
+                    event.source_file = label
+                if event.source == original_name:
+                    event.source = label
+
+    def _resolve_remote_cwd(self, target: str) -> str:
+        result = self.client.run(f"cd {_qp(target)} && pwd -P")
+        if result.returncode != 0:
+            raise RuntimeError(result.error_text.strip() or f"无法进入远程目录: {target}")
+        cwd = result.text.strip().splitlines()[-1] if result.text.strip() else ""
+        if not cwd:
+            raise RuntimeError("远程 pwd 未返回目录")
+        return cwd
+
+    def _display_path(self, path: str) -> str:
+        if path.startswith("/"):
+            return path
+        if self.cwd == "/":
+            return "/" + path
+        return self.cwd.rstrip("/") + "/" + path
+
+    def _print_help(self) -> None:
+        self.print(
+            "\n".join([
+                "Remote Workspace 命令:",
+                "  ls [PATH]                 查看远程目录",
+                "  cd PATH                   切换远程目录",
+                "  pwd                       显示远程当前目录",
+                "  find [PATH] [PATTERN]     查找远程日志文件，默认当前目录、最多 3 层",
+                "  tail FILE [N]             查看远程文件最后 N 行，默认 80",
+                "  bla FILE [--out DIR]      拉回远程文件并在本机分析",
+                "  bla journalctl:ssh        拉回远程 journalctl 输出并在本机分析",
+                "  exit                      退出",
+            ])
+        )
+
+    def _print_result(self, result: RemoteCommandResult) -> int:
+        if result.stdout:
+            self.print(result.text.rstrip())
+        if result.returncode != 0:
+            self._print_remote_error(result)
+        return result.returncode
+
+    def _print_remote_error(self, result: RemoteCommandResult) -> None:
+        message = result.error_text.strip() or result.text.strip() or f"远程命令失败，退出码 {result.returncode}"
+        self.print(message, file=sys.stderr)
+
+
+def _q(value: str) -> str:
+    return shlex.quote(value)
+
+
+def _split_workspace_line(line: str) -> List[str]:
+    lexer = shlex.shlex(line, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.escape = ""
+    return list(lexer)
+
+
+def _qp(value: str) -> str:
+    if value == "~":
+        return "~"
+    if value.startswith("~/"):
+        rest = value[2:]
+        if all(ch.isalnum() or ch in "._/-" for ch in rest):
+            return "~/" + rest
+    return _q(value)
+
+
+def _remote_cd_command(cwd: str, command: str) -> str:
+    return f"cd {_qp(cwd)} && {command}"
+
+
+def _unique_path(directory: str, basename: str) -> str:
+    candidate = Path(directory) / basename
+    if not candidate.exists():
+        return str(candidate)
+    stem = candidate.stem
+    suffix = candidate.suffix
+    for idx in range(2, 1000):
+        next_candidate = Path(directory) / f"{stem}-{idx}{suffix}"
+        if not next_candidate.exists():
+            return str(next_candidate)
+    raise RuntimeError(f"临时文件命名冲突: {basename}")

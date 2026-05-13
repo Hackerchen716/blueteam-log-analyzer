@@ -33,6 +33,9 @@ jobs:
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
 
+      - name: Smoke test Remote Workspace CLI
+        run: python bla_cli.py ssh --help
+
       - name: Smoke test on sample logs
         # 样本日志包含故意构造的暴力破解 / Web 攻击，bla 命中严重告警时退出码为 1，
         # 这是期望行为而不是 CI 失败。允许 0 或 1，其它退出码才视为故障。
@@ -42,6 +45,8 @@ jobs:
           python bla_cli.py sample_logs/auth.log --no-color --max-alerts 5
           rc=$?; [ $rc -eq 0 ] || [ $rc -eq 1 ] || exit $rc
           python bla_cli.py sample_logs/access.log --no-color --max-alerts 5
+          rc=$?; [ $rc -eq 0 ] || [ $rc -eq 1 ] || exit $rc
+          python bla_cli.py sample_logs/remote_ssh_auth.log --no-color --max-alerts 5
           rc=$?; [ $rc -eq 0 ] || [ $rc -eq 1 ] || exit $rc
 
       - name: Build package

@@ -44,11 +44,15 @@ jobs:
               names = archive.namelist()
               if "bla/rules/web_attacks.yaml" not in names:
                   raise SystemExit("Wheel is missing bla/rules/web_attacks.yaml")
+              if "bla/remote/ssh_workspace.py" not in names:
+                  raise SystemExit("Wheel is missing bla/remote/ssh_workspace.py")
 
           with tarfile.open(sdists[0]) as archive:
               names = archive.getnames()
               if not any(name.endswith("/bla/rules/web_attacks.yaml") for name in names):
                   raise SystemExit("Source distribution is missing bla/rules/web_attacks.yaml")
+              if not any(name.endswith("/bla/remote/ssh_workspace.py") for name in names):
+                  raise SystemExit("Source distribution is missing bla/remote/ssh_workspace.py")
           PY
 
       - name: Publish to PyPI

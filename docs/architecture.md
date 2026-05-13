@@ -25,6 +25,7 @@ input/source
 | Detector Registry | `bla/detection/` | 聚合事件并生成 `DetectionAlert` | 不读取文件，不生成报告 |
 | Correlation | `bla/detection/correlation.py` | 将 alerts/events 关联成 incident | 不改写原始事件 |
 | Output | `bla/output/` | 生成 HTML、JSON、CSV、IOC、SARIF 和 bundle | 不重新执行检测逻辑 |
+| Remote Workspace | `bla/remote/` | 通过 SSH 打开远程日志工作台，并把远程输入拉回本机分析 | 目标机不安装 Python/pip/BLA，不开放任意命令 |
 | Collector/Triage | future `bla/collectors/`, `bla/triage/` | 只读采集和主机排查 | 不执行自动修复，不允许任意命令 |
 
 ## 扩展约定
@@ -41,10 +42,11 @@ input/source
 ## 后续演进
 
 1. 保持 `bla <path>` 兼容，同时逐步增加更清晰的子命令入口。
-2. Remote Collector 输出内存日志内容，复用 `parse_content()` 或 pipeline。
-3. Host Triage 独立定义结构化 findings，再与 incident 关联。
-4. P0 厂商日志逐步拆分到 adapter 层，避免单个解析器持续膨胀。
-5. 大文件场景优先补齐 Windows XML、CSV、JSON 数组等流式处理路径。
+2. Remote Workspace 先提供 `bla ssh` 交互入口，远程只执行白名单只读命令，本地复用 pipeline。
+3. Remote Collector 输出内存日志内容，复用 `parse_content()` 或 pipeline。
+4. Host Triage 独立定义结构化 findings，再与 incident 关联。
+5. P0 厂商日志逐步拆分到 adapter 层，避免单个解析器持续膨胀。
+6. 大文件场景优先补齐 Windows XML、CSV、JSON 数组等流式处理路径。
 
 ## Python 适用边界
 

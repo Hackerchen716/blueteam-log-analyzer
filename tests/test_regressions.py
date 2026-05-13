@@ -39,6 +39,8 @@ from bla.parsers.web_access import parse_web_access
 from bla.parsers.windows_evtx import _parse_xml_event, parse_windows_xml
 from bla.rules import reset_rule_cache, set_rule_dirs, validate_web_attack_rules
 from bla.rules.loader import _parse_simple_yaml
+from bla.remote import RemoteWorkspace
+from bla.remote.ssh_workspace import _split_workspace_line
 from bla.utils.helpers import gen_id, is_private_ip, normalize_timestamp, reset_counter, set_syslog_year
 
 
@@ -1382,6 +1384,129 @@ web_attacks:
         self.assertEqual(len(result.parse_results), 1)
         self.assertGreaterEqual(len(result.summary.alerts), 1)
         self.assertEqual(result.summary.files_analyzed, 1)
+
+    def test_remote_workspace_bla_fetches_file_and_analyzes_locally(self):
+        class FakeSSH:
+            target = "web01"
+
+            def __init__(self):
+                self.fetches = []
+                self.commands = []
+
+            def run(self, command, timeout=60):
+                self.commands.append(command)
+                return type("Result", (), {
+                    "returncode": 0,
+                    "stdout": b"/var/log/nginx\n",
+                    "stderr": b"",
+                    "text": "/var/log/nginx\n",
+                    "error_text": "",
+                })()
+
+            def fetch_file(self, remote_path, local_path, cwd):
+                self.fetches.append((remote_path, cwd))
+                Path(local_path).write_text(
+                    "9.9.9.9 - - [15/Mar/2024:10:01:00 +0800] "
+                    "\"GET /download.php?file=../../etc/passwd HTTP/1.1\" 200 10 \"-\" \"curl/8\"\n",
+                    encoding="utf-8",
+                )
+
+        fake = FakeSSH()
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout", output):
+            workspace = RemoteWorkspace(fake, initial_cwd="/var/log/nginx", print_fn=lambda *a, **k: print(*a, **k))
+            code = workspace.execute_line(f"bla access.log --out {tmp}/case --exit-on none --no-color")
+            report = Path(tmp) / "case" / "report.json"
+
+            self.assertEqual(code, 0)
+            self.assertTrue(report.exists())
+            data = _json.loads(report.read_text(encoding="utf-8"))
+
+        self.assertEqual(fake.fetches, [("access.log", "/var/log/nginx")])
+        self.assertGreaterEqual(len(data["alerts"]), 1)
+        self.assertEqual(data["files"][0]["name"], "web01:/var/log/nginx/access.log")
+        self.assertEqual(data["events"][0]["source_file"], "web01:/var/log/nginx/access.log")
+        self.assertNotIn("python", " ".join(fake.commands).lower())
+        self.assertIn("开始本地分析", output.getvalue())
+
+    def test_remote_workspace_cd_and_ls_use_whitelisted_remote_commands(self):
+        class FakeSSH:
+            target = "web01"
+
+            def __init__(self):
+                self.commands = []
+
+            def run(self, command, timeout=60):
+                self.commands.append(command)
+                if "pwd -P" in command:
+                    stdout = b"/var/log\n"
+                else:
+                    stdout = b"auth.log\nsecure\n"
+                return type("Result", (), {
+                    "returncode": 0,
+                    "stdout": stdout,
+                    "stderr": b"",
+                    "text": stdout.decode(),
+                    "error_text": "",
+                })()
+
+        fake = FakeSSH()
+        workspace = RemoteWorkspace(fake, initial_cwd="/", print_fn=lambda *a, **k: None)
+
+        self.assertEqual(workspace.execute_line("cd /var/log"), 0)
+        self.assertEqual(workspace.cwd, "/var/log")
+        self.assertEqual(workspace.execute_line("ls"), 0)
+        self.assertEqual(workspace.execute_line("cd ~"), 0)
+        self.assertEqual(workspace.execute_line("uname -a"), 2)
+        self.assertTrue(any("cd / && cd /var/log && pwd -P" in command for command in fake.commands))
+        self.assertTrue(any("ls -lah -- ." in command for command in fake.commands))
+        self.assertTrue(any("cd /var/log && cd ~ && pwd -P" in command for command in fake.commands))
+
+    def test_remote_workspace_command_split_keeps_windows_paths(self):
+        parts = _split_workspace_line(r"bla access.log --out C:\Users\runner\AppData\Local\Temp\case")
+
+        self.assertEqual(parts, [
+            "bla",
+            "access.log",
+            "--out",
+            r"C:\Users\runner\AppData\Local\Temp\case",
+        ])
+
+    def test_remote_workspace_can_analyze_journalctl_unit_output(self):
+        class FakeSSH:
+            target = "web01"
+
+            def __init__(self):
+                self.captures = []
+
+            def run(self, command, timeout=60):
+                return type("Result", (), {
+                    "returncode": 0,
+                    "stdout": b"/var/log\n",
+                    "stderr": b"",
+                    "text": "/var/log\n",
+                    "error_text": "",
+                })()
+
+            def capture_command(self, command, local_path, cwd, timeout=None):
+                self.captures.append((command, cwd))
+                Path(local_path).write_text(
+                    "Mar 15 10:01:00 web01 sshd[123]: "
+                    "Failed password for root from 9.9.9.9 port 22 ssh2\n",
+                    encoding="utf-8",
+                )
+
+        fake = FakeSSH()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout", io.StringIO()):
+            workspace = RemoteWorkspace(fake, initial_cwd="/var/log", print_fn=lambda *a, **k: print(*a, **k))
+            code = workspace.execute_line(f"bla journalctl:ssh --out {tmp}/case --exit-on none --no-color")
+            data = _json.loads((Path(tmp) / "case" / "report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(fake.captures, [("journalctl -u ssh --no-pager -o short", "/var/log")])
+        self.assertEqual(data["files"][0]["name"], "web01:journalctl:ssh")
+        self.assertEqual(data["events"][0]["source_file"], "web01:journalctl:ssh")
+        self.assertEqual(data["events"][0]["category"], "SSH")
 
     def test_version_surfaces_are_consistent(self):
         repo = Path(__file__).parents[1]
