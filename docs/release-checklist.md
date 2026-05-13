@@ -29,6 +29,7 @@ Use this checklist before publishing a GitHub Release or uploading to PyPI.
 
 - Confirm the package name is `blueteam-log-analyzer`.
 - Confirm PyPI Trusted Publishing is configured for this GitHub repository, the `publish.yml` workflow, and the `pypi` GitHub environment.
-- Publish by creating the GitHub Release, or run the publish workflow manually after the release has been validated.
+- Prefer one publish path per version: create the GitHub Release and let the publish workflow upload to PyPI.
+- Do not manually upload with `twine` before creating the GitHub Release unless the publish workflow is intentionally skipped.
 - After upload, install from PyPI in a fresh environment and run `bla --version`.
 - Smoke test `bla validate-rules` from the installed package.

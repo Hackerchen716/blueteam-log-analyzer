@@ -27,5 +27,6 @@ assignees: ""
 - [ ] Git tag created as `vX.Y.Z`
 - [ ] GitHub Release created with notes and artifacts
 - [ ] PyPI Trusted Publishing is configured for `.github/workflows/publish.yml` and the `pypi` GitHub environment
+- [ ] Only one PyPI publish path is used for this version: GitHub Release workflow preferred, no prior manual `twine` upload
 - [ ] PyPI publish workflow completed
 - [ ] Fresh PyPI install smoke tested
