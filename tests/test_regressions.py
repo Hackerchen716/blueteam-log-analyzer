@@ -5,13 +5,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from bla.__version__ import __version__
 from bla.allowlist import apply_allowlist
 from bla.config import THRESHOLDS, Thresholds, load_thresholds, set_thresholds
-from bla.core import AnalysisOptions, run_analysis
+from bla.core import AnalysisError, AnalysisOptions, run_analysis
 from bla.detection import DetectorRegistry, DetectorSpec, list_detector_names, run_detection
 from bla.detection.engine import _dedup_alerts
 from bla.ioc import extract_iocs, format_ioc_report
@@ -344,6 +345,111 @@ class RegressionTests(unittest.TestCase):
 
         self.assertTrue(any("successful-login" in event.tags for event in result.events if event.event_id == "4624"))
         self.assertTrue(any(alert.rule_id == "CN-HVV-002" for alert in summary.alerts))
+
+    def test_evtx_missing_python_evtx_blocks_empty_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            evtx_path = Path(tmp) / "Security.evtx"
+            evtx_path.write_bytes(b"ElfFile\x00\x00")
+
+            real_import = __import__
+
+            def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+                if name.startswith("Evtx"):
+                    raise ImportError("No module named Evtx")
+                return real_import(name, globals, locals, fromlist, level)
+
+            with mock.patch("builtins.__import__", side_effect=fake_import):
+                with self.assertRaises(AnalysisError) as ctx:
+                    run_analysis(AnalysisOptions(paths=[str(evtx_path)]), quiet=True)
+
+        msg = str(ctx.exception)
+        self.assertIn("python-evtx", msg)
+        self.assertIn("未被解析", msg)
+
+    def test_windows_system_account_creation_is_not_persistence_alert(self):
+        xml = (
+            "<Event><System><EventID>4720</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T14:16:33.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">WDAGUtilityAccount</Data>"
+            "<Data Name=\"TargetDomainName\">WIN</Data>"
+            "<Data Name=\"SubjectUserName\">MINWINPC$</Data>"
+            "<Data Name=\"SubjectDomainName\">WIN</Data></EventData></Event>"
+        )
+        event = _parse_xml_event(xml, "Security.xml")
+        self.assertIsNotNone(event)
+        self.assertEqual(event.level, ThreatLevel.INFO)
+        self.assertNotIn("account-creation", event.tags)
+        self.assertEqual(event.details.get("account_sensitivity"), "system-initialization")
+
+        summary = run_detection([event])
+        self.assertFalse(any(alert.rule_id == "PERS-003" for alert in summary.alerts))
+
+    def test_windows_low_risk_group_add_does_not_raise_privilege_alert(self):
+        xml = (
+            "<Event><System><EventID>4732</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T14:16:40.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">Users</Data>"
+            "<Data Name=\"TargetDomainName\">Builtin</Data>"
+            "<Data Name=\"MemberName\">-</Data>"
+            "<Data Name=\"MemberSid\">S-1-5-21-1-2-3-1001</Data>"
+            "<Data Name=\"SubjectUserName\">Administrator</Data>"
+            "<Data Name=\"SubjectDomainName\">WIN</Data></EventData></Event>"
+        )
+        event = _parse_xml_event(xml, "Security.xml")
+        self.assertIsNotNone(event)
+        self.assertEqual(event.level, ThreatLevel.INFO)
+        self.assertNotIn("privilege-escalation", event.tags)
+        self.assertEqual(event.details.get("group_sensitivity"), "low")
+        self.assertIn("S-1-5-21-1-2-3-1001", event.message)
+
+        summary = run_detection([event])
+        self.assertFalse(any(alert.rule_id == "PRIV-001" for alert in summary.alerts))
+
+    def test_windows_admin_group_add_keeps_operator_and_privilege_alert(self):
+        xml = (
+            "<Event><System><EventID>4732</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:01:37.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">Administrators</Data>"
+            "<Data Name=\"TargetDomainName\">Builtin</Data>"
+            "<Data Name=\"MemberName\">-</Data>"
+            "<Data Name=\"MemberSid\">S-1-5-21-1-2-3-1002</Data>"
+            "<Data Name=\"SubjectUserName\">Administrator</Data>"
+            "<Data Name=\"SubjectDomainName\">WIN</Data></EventData></Event>"
+        )
+        event = _parse_xml_event(xml, "Security.xml")
+        self.assertIsNotNone(event)
+        self.assertEqual(event.level, ThreatLevel.HIGH)
+        self.assertIn("group-add", event.tags)
+        self.assertEqual(event.details.get("group_sensitivity"), "privileged")
+        self.assertIn("Builtin\\Administrators", event.message)
+
+        summary = run_detection([event])
+        alert = next(a for a in summary.alerts if a.rule_id == "PRIV-001")
+        self.assertTrue(any("Administrator" in item for item in alert.evidence))
+        self.assertTrue(any("目标组: Builtin\\Administrators" in item for item in alert.evidence))
+
+    def test_local_machine_explicit_creds_do_not_become_pass_the_hash(self):
+        xml = "".join(
+            "<Event><System><EventID>4648</EventID>"
+            f"<TimeCreated SystemTime=\"2026-05-13T00:44:{i:02d}.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"SubjectUserName\">MINWINPC$</Data>"
+            "<Data Name=\"SubjectDomainName\">WIN</Data>"
+            "<Data Name=\"TargetServerName\">localhost</Data>"
+            "<Data Name=\"TargetUserName\">MINWINPC$</Data>"
+            "<Data Name=\"TargetDomainName\">WIN</Data></EventData></Event>"
+            for i in range(3)
+        )
+        result = parse_windows_xml(xml, "Security.xml")
+        self.assertEqual(len(result.events), 3)
+        self.assertTrue(all("local-explicit-creds" in event.tags for event in result.events))
+        self.assertTrue(all("explicit-creds" not in event.tags for event in result.events))
+
+        summary = run_detection(result.events)
+        self.assertFalse(any(alert.rule_id == "LAT-002" for alert in summary.alerts))
 
     def test_syslog_year_can_be_overridden_for_historical_logs(self):
         try:

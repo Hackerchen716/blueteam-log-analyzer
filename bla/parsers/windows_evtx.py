@@ -30,6 +30,39 @@ _LOGON_TYPE_MAP = {
     "11": "缓存交互",
 }
 
+_LOW_RISK_WINDOWS_GROUPS = {
+    "none",
+    "users",
+    "domain users",
+    "guests",
+    "iis_iusrs",
+}
+
+_PRIVILEGED_WINDOWS_GROUPS = {
+    "administrators",
+    "domain admins",
+    "enterprise admins",
+    "schema admins",
+    "account operators",
+    "server operators",
+    "backup operators",
+    "print operators",
+    "remote desktop users",
+    "remote management users",
+    "dnsadmins",
+    "hyper-v administrators",
+}
+
+_WINDOWS_BUILTIN_CREATED_ACCOUNTS = {
+    "defaultaccount",
+    "guest",
+    "wdagutilityaccount",
+}
+
+
+class MissingOptionalDependency(RuntimeError):
+    """Raised when a parser cannot run because an optional dependency is absent."""
+
 
 def _clean_win_value(value: str) -> str:
     value = (value or "").strip()
@@ -42,6 +75,43 @@ def _pick_first(details: Dict[str, str], *keys: str) -> str:
         if value:
             return value
     return ""
+
+
+def _norm_win_name(value: str) -> str:
+    value = (value or "").strip().strip("\\/")
+    if "\\" in value:
+        value = value.rsplit("\\", 1)[-1]
+    if "/" in value:
+        value = value.rsplit("/", 1)[-1]
+    return value.lower()
+
+
+def _account_label(details: Dict[str, str], domain_key: str, user_key: str) -> str:
+    user = _pick_first(details, user_key)
+    domain = _pick_first(details, domain_key)
+    if not user:
+        return "?"
+    return f"{domain}\\{user}" if domain else user
+
+
+def _target_account_label(details: Dict[str, str]) -> str:
+    return _account_label(details, "TargetDomainName", "TargetUserName")
+
+
+def _subject_account_label(details: Dict[str, str]) -> str:
+    return _account_label(details, "SubjectDomainName", "SubjectUserName")
+
+
+def _group_label(details: Dict[str, str]) -> str:
+    group = _pick_first(details, "TargetUserName")
+    domain = _pick_first(details, "TargetDomainName")
+    if not group:
+        return "?"
+    return f"{domain}\\{group}" if domain else group
+
+
+def _member_label(details: Dict[str, str]) -> str:
+    return _pick_first(details, "MemberName", "MemberSid", "TargetSid") or "?"
 
 
 def _logon_type_label(logon_type: str) -> str:
@@ -120,6 +190,41 @@ def _augment_auth_details(eid: int, details: Dict[str, str]) -> None:
     details["subject_domain"] = _pick_first(details, "SubjectDomainName")
 
 
+def _augment_account_management_details(eid: int, details: Dict[str, str]) -> None:
+    if eid not in (4720, 4722, 4723, 4724, 4725, 4726, 4728, 4729, 4732, 4738, 4756):
+        return
+
+    details["subject_user"] = _pick_first(details, "SubjectUserName")
+    details["subject_domain"] = _pick_first(details, "SubjectDomainName")
+    details["subject_account"] = _subject_account_label(details)
+    details["target_user"] = _pick_first(details, "TargetUserName")
+    details["target_domain"] = _pick_first(details, "TargetDomainName")
+    details["target_account"] = _target_account_label(details)
+    details["target_sid"] = _pick_first(details, "TargetSid")
+    if eid in (4728, 4729, 4732, 4756):
+        details["group_name"] = _pick_first(details, "TargetUserName")
+        details["group_domain"] = _pick_first(details, "TargetDomainName")
+        details["group_account"] = _group_label(details)
+        details["member_name"] = _member_label(details)
+        details["member_sid"] = _pick_first(details, "MemberSid")
+        _classify_group_change_details(details)
+    elif eid == 4720:
+        _classify_account_creation_details(details)
+
+
+def _augment_explicit_credential_details(eid: int, details: Dict[str, str]) -> None:
+    if eid != 4648:
+        return
+    details["subject_user"] = _pick_first(details, "SubjectUserName")
+    details["subject_domain"] = _pick_first(details, "SubjectDomainName")
+    details["subject_account"] = _subject_account_label(details)
+    details["target_user"] = _pick_first(details, "TargetUserName")
+    details["target_domain"] = _pick_first(details, "TargetDomainName")
+    details["target_account"] = _target_account_label(details)
+    details["target_server"] = _pick_first(details, "TargetServerName")
+    details["source_ip"] = _pick_first(details, "IpAddress")
+
+
 def _augment_4688_details(eid: int, details: Dict[str, str]) -> None:
     if eid != 4688:
         return
@@ -135,6 +240,45 @@ def _augment_4688_details(eid: int, details: Dict[str, str]) -> None:
     details["child_path"] = child_path
     details["command_line"] = _pick_first(details, "CommandLine")
 
+
+def _classify_group_change_details(details: Dict[str, str]) -> None:
+    group = _norm_win_name(details.get("group_name", ""))
+    if group in _PRIVILEGED_WINDOWS_GROUPS:
+        details["group_sensitivity"] = "privileged"
+        details["evidence_strength"] = "high"
+        return
+    if group in _LOW_RISK_WINDOWS_GROUPS:
+        details["group_sensitivity"] = "low"
+        details["evidence_strength"] = "low"
+        details["false_positive_hint"] = "Windows built-in or default group membership change; verify baseline before escalation."
+        return
+    details["group_sensitivity"] = "unknown"
+    details["evidence_strength"] = "medium"
+
+
+def _classify_account_creation_details(details: Dict[str, str]) -> None:
+    target = _norm_win_name(details.get("target_user", ""))
+    subject = _norm_win_name(details.get("subject_user", ""))
+    subject_sid = details.get("SubjectUserSid", "")
+    if target in _WINDOWS_BUILTIN_CREATED_ACCOUNTS and (subject.endswith("$") or subject_sid == "S-1-5-18"):
+        details["account_sensitivity"] = "system-initialization"
+        details["evidence_strength"] = "low"
+        details["false_positive_hint"] = "Known Windows built-in account created by system or machine account during initialization."
+    else:
+        details["account_sensitivity"] = "new-local-account"
+        details["evidence_strength"] = "high"
+
+
+def _is_local_explicit_credential_use(details: Dict[str, str]) -> bool:
+    target_server = _norm_win_name(details.get("target_server") or details.get("TargetServerName", ""))
+    source_ip = _clean_win_value(details.get("source_ip") or details.get("IpAddress", ""))
+    subject = _norm_win_name(details.get("subject_user") or details.get("SubjectUserName", ""))
+    if target_server in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    if subject.endswith("$") and not source_ip:
+        return True
+    return False
+
 # Windows 事件 ID 规则库
 # 格式: event_id -> (level, category, message_fn, tags, mitre, rule_name)
 _WIN_RULES: Dict[int, dict] = {
@@ -147,7 +291,7 @@ _WIN_RULES: Dict[int, dict] = {
                msg=_build_4625_message),
     4648: dict(level=ThreatLevel.MEDIUM,   cat="认证",    tags=["explicit-creds","lateral-movement"],
                mitre="T1550",      rule="显式凭据登录",
-               msg=lambda d: f"显式凭据登录: {d.get('SubjectUserName','?')} -> {d.get('TargetServerName','?')}"),
+               msg=lambda d: f"显式凭据登录: {_subject_account_label(d)} -> {d.get('TargetServerName','?')}"),
     4672: dict(level=ThreatLevel.INFO,     cat="权限",    tags=["privilege","admin"],
                mitre="T1078.002",  rule="特权账户登录",
                msg=lambda d: f"特权登录: {d.get('SubjectUserName','?')} 获得特殊权限"),
@@ -182,7 +326,7 @@ _WIN_RULES: Dict[int, dict] = {
     # ── 账户管理 ──────────────────────────────────────────
     4720: dict(level=ThreatLevel.HIGH,     cat="账户管理",tags=["account-creation","persistence"],
                mitre="T1136",      rule="创建用户账户",
-               msg=lambda d: f"创建新账户: {d.get('TargetUserName','?')} 由 {d.get('SubjectUserName','?')}"),
+               msg=lambda d: f"创建新账户: {_target_account_label(d)} 由 {_subject_account_label(d)}"),
     4722: dict(level=ThreatLevel.MEDIUM,   cat="账户管理",tags=["account-enabled"],
                mitre="T1078",      rule="账户已启用",
                msg=lambda d: f"账户启用: {d.get('TargetUserName','?')}"),
@@ -191,7 +335,7 @@ _WIN_RULES: Dict[int, dict] = {
                msg=lambda d: f"密码修改: {d.get('TargetUserName','?')}"),
     4724: dict(level=ThreatLevel.HIGH,     cat="账户管理",tags=["password-reset","privilege-escalation"],
                mitre="T1098",      rule="密码重置",
-               msg=lambda d: f"密码重置: {d.get('TargetUserName','?')} 由 {d.get('SubjectUserName','?')}"),
+               msg=lambda d: f"密码重置: {_target_account_label(d)} 由 {_subject_account_label(d)}"),
     4725: dict(level=ThreatLevel.MEDIUM,   cat="账户管理",tags=["account-disabled"],
                mitre="T1531",      rule="账户已禁用",
                msg=lambda d: f"账户禁用: {d.get('TargetUserName','?')}"),
@@ -200,13 +344,13 @@ _WIN_RULES: Dict[int, dict] = {
                msg=lambda d: f"删除账户: {d.get('TargetUserName','?')}"),
     4728: dict(level=ThreatLevel.HIGH,     cat="账户管理",tags=["group-add","privilege-escalation"],
                mitre="T1098.001",  rule="添加到全局组",
-               msg=lambda d: f"添加到全局组: {d.get('MemberName','?')} -> {d.get('TargetUserName','?')}"),
+               msg=lambda d: f"添加到全局组: {_member_label(d)} -> {_group_label(d)}"),
     4732: dict(level=ThreatLevel.HIGH,     cat="账户管理",tags=["group-add","privilege-escalation"],
                mitre="T1098.001",  rule="添加到本地组",
-               msg=lambda d: f"添加到本地组: {d.get('MemberName','?')} -> {d.get('TargetUserName','?')}"),
+               msg=lambda d: f"添加到本地组: {_member_label(d)} -> {_group_label(d)}"),
     4756: dict(level=ThreatLevel.HIGH,     cat="账户管理",tags=["group-add","privilege-escalation"],
                mitre="T1098.001",  rule="添加到通用组",
-               msg=lambda d: f"添加到通用组: {d.get('MemberName','?')} -> {d.get('TargetUserName','?')}"),
+               msg=lambda d: f"添加到通用组: {_member_label(d)} -> {_group_label(d)}"),
 
     # ── 进程 ──────────────────────────────────────────────
     4688: dict(level=ThreatLevel.INFO,     cat="进程",    tags=["process-creation"],
@@ -343,6 +487,35 @@ def _classify_event(eid: int, details: Dict[str, str], channel: str) -> Tuple[Th
     level = rule["level"]
     msg   = rule["msg"](details)
     tags  = list(rule["tags"])
+    mitre = rule.get("mitre")
+    rule_name = rule.get("rule")
+
+    if eid in (4728, 4732, 4756):
+        sensitivity = details.get("group_sensitivity", "unknown")
+        if sensitivity == "low":
+            level = ThreatLevel.INFO
+            tags = [tag for tag in tags if tag not in ("group-add", "privilege-escalation")]
+            tags.append("baseline-change")
+            mitre = None
+        elif sensitivity == "unknown":
+            level = ThreatLevel.MEDIUM
+            tags = [tag for tag in tags if tag != "privilege-escalation"]
+            details.setdefault("false_positive_hint", "Group is not in the privileged-group baseline; verify business baseline before escalation.")
+
+    if eid == 4720 and details.get("account_sensitivity") == "system-initialization":
+        level = ThreatLevel.INFO
+        tags = [tag for tag in tags if tag not in ("account-creation", "persistence")]
+        tags.append("system-initialization")
+        mitre = None
+
+    if eid == 4648 and _is_local_explicit_credential_use(details):
+        level = ThreatLevel.INFO
+        tags = [tag for tag in tags if tag not in ("explicit-creds", "lateral-movement")]
+        tags.append("local-explicit-creds")
+        details["credential_use_scope"] = "local-system"
+        details["evidence_strength"] = "low"
+        details["false_positive_hint"] = "Localhost or machine-account explicit credential use; not enough evidence for Pass-the-Hash or lateral movement."
+        mitre = None
 
     # 动态级别升级
     if eid == 4625:
@@ -373,7 +546,7 @@ def _classify_event(eid: int, details: Dict[str, str], channel: str) -> Tuple[Th
             level = ThreatLevel.CRITICAL
             tags.append("lsass-dump")
 
-    return level, rule["cat"], msg, tags, rule.get("mitre"), rule.get("rule")
+    return level, rule["cat"], msg, tags, mitre, rule_name
 
 
 def _safe_int(value: str, default: int = 0) -> int:
@@ -429,9 +602,14 @@ def _parse_xml_event(xml_text: str, source_file: str) -> Optional[LogEvent]:
                 details[name] = val.strip()
 
     _augment_auth_details(eid, details)
+    _augment_account_management_details(eid, details)
+    _augment_explicit_credential_details(eid, details)
     _augment_4688_details(eid, details)
 
-    user    = details.get("account_name") or details.get("TargetUserName") or details.get("SubjectUserName") or ""
+    if eid in (4720, 4722, 4723, 4724, 4725, 4726, 4728, 4729, 4732, 4738, 4756):
+        user = details.get("subject_user") or details.get("target_user") or ""
+    else:
+        user = details.get("account_name") or details.get("TargetUserName") or details.get("SubjectUserName") or ""
     ip      = details.get("source_ip") or details.get("IpAddress") or details.get("SourceAddress") or ""
     process = details.get("NewProcessName") or details.get("ProcessName") or details.get("Image") or ""
 
@@ -489,7 +667,7 @@ def parse_windows_xml(content: str, source_file: str) -> ParseResult:
 def parse_windows_evtx(path: str) -> ParseResult:
     """
     解析二进制 EVTX 文件（需要 python-evtx）
-    如未安装则返回提示事件
+    如未安装则抛出阻断型错误，避免生成"看似分析完成"的空报告。
     """
     try:
         import Evtx.Evtx as evtx
@@ -518,21 +696,13 @@ def parse_windows_evtx(path: str) -> ParseResult:
             stats         = stats,
             parse_time_ms = (time.time() - t0) * 1000,
         )
-    except ImportError:
-        hint = LogEvent(
-            id="hint-evtx", timestamp="", level=ThreatLevel.INFO,
-            category="提示", source="Parser", source_file=path,
-            message=(
-                "检测到 .evtx 二进制格式。\n"
-                "方法1 (推荐): pip install python-evtx 后重新运行\n"
-                "方法2: wevtutil epl Security out.xml /lf:true  (Windows)\n"
-                "方法3: python-evtx 附带的 evtx_dump.py 转换为 XML"
-            ),
-            raw_line="",
-            details={}, tags=["info"],
-        )
-        stats = _compute_stats([])
-        return ParseResult(file_name=path, log_type="Windows EVTX (需转换)", events=[hint], stats=stats)
+    except ImportError as exc:
+        raise MissingOptionalDependency(
+            "缺少可选依赖 python-evtx，EVTX 二进制日志未被解析。"
+            "请先执行 python3 -m pip install python-evtx 后重新运行；"
+            "如果目标主机不方便安装 Python，可在 Windows 上用 "
+            "wevtutil epl Security out.xml /lf:true 导出 XML 后再分析。"
+        ) from exc
 
 
 def _compute_stats(events: List[LogEvent]) -> ParseStats:

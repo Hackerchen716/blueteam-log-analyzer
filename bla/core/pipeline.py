@@ -85,6 +85,7 @@ def parse_files(
     print_fn: Optional[PrintFn] = None,
 ) -> List[ParseResult]:
     parse_results: List[ParseResult] = []
+    errors: List[str] = []
     workers = jobs if jobs > 0 else min(8, max(1, len(files)))
     emit = print_fn if print_fn is not None else print
     if len(files) <= 1 or workers == 1:
@@ -98,8 +99,9 @@ def parse_files(
                 if not quiet:
                     emit(f"✓ ({result.stats.total} 事件)")
             except Exception as e:
+                errors.append(f"{fname}: {e}")
                 if not quiet:
-                    emit(f"✗ 错误: {e}")
+                    emit(f"✗ 错误: {e}", flush=True)
                 continue
     else:
         if not quiet:
@@ -115,8 +117,14 @@ def parse_files(
                     if not quiet:
                         emit(f"  [{done}/{len(files)}] ✓ {fname} ({result.stats.total} 事件)")
                 except Exception as e:
+                    errors.append(f"{fname}: {e}")
                     if not quiet:
-                        emit(f"  [{done}/{len(files)}] ✗ {fname}: {e}")
+                        emit(f"  [{done}/{len(files)}] ✗ {fname}: {e}", flush=True)
+    if errors and not parse_results:
+        joined = "\n- ".join(errors)
+        if quiet:
+            raise AnalysisError(f"所有文件解析失败；请先处理解析错误：\n- {joined}")
+        raise AnalysisError("所有文件解析失败；请先处理上方解析错误。")
     return parse_results
 
 

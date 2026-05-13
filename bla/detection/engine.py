@@ -141,13 +141,28 @@ def detect_password_spray(events: List[LogEvent]) -> List[DetectionAlert]:
 
 def detect_privilege_escalation(events: List[LogEvent]) -> List[DetectionAlert]:
     alerts = []
-    group_events = [e for e in events if any(t in e.tags for t in ("group-add",)) and e.event_id in ("4728","4732","4756")]
+    group_events = [
+        e for e in events
+        if any(t in e.tags for t in ("group-add",))
+        and e.event_id in ("4728","4732","4756")
+        and e.details.get("group_sensitivity") == "privileged"
+    ]
     for ev in group_events:
+        operator = ev.details.get("subject_account") or ev.details.get("subject_user") or ev.user or "?"
+        group = ev.details.get("group_account") or ev.details.get("group_name") or "?"
+        member = ev.details.get("member_name") or ev.details.get("member_sid") or "?"
         alerts.append(DetectionAlert(
             id="a"+gen_id("pe"), rule_id="PRIV-001", rule_name="账户添加到特权组",
             description=ev.message, level=ThreatLevel.HIGH, category="权限提升",
             mitre_attack="T1098.001", mitre_phase="权限提升", affected_events=[ev.id],
-            evidence=[ev.message, f"操作者: {ev.user or '?'}", f"时间: {ev.timestamp}"],
+            evidence=[
+                ev.message,
+                f"操作者: {operator}",
+                f"目标组: {group}",
+                f"成员: {member}",
+                f"证据强度: {ev.details.get('evidence_strength') or 'high'}",
+                f"时间: {ev.timestamp}",
+            ],
             recommendation="验证此操作是否经过授权，检查添加的账户是否为合法管理员",
             timestamp=ev.timestamp, confidence="high",
         ))
@@ -195,12 +210,20 @@ def detect_persistence(events: List[LogEvent]) -> List[DetectionAlert]:
             recommendation="检查计划任务执行内容，验证是否为合法维护任务",
             timestamp=ev.timestamp, confidence="medium",
         ))
-    for ev in [e for e in events if "account-creation" in e.tags]:
+    for ev in [e for e in events if "account-creation" in e.tags and e.details.get("account_sensitivity") != "system-initialization"]:
+        target = ev.details.get("target_account") or ev.details.get("target_user") or ev.user or "?"
+        operator = ev.details.get("subject_account") or ev.details.get("subject_user") or "?"
         alerts.append(DetectionAlert(
             id="a"+gen_id("pa"), rule_id="PERS-003", rule_name="创建新用户账户",
             description=ev.message, level=ThreatLevel.HIGH, category="持久化",
             mitre_attack="T1136", mitre_phase="持久化", affected_events=[ev.id],
-            evidence=[ev.message, f"时间: {ev.timestamp}"],
+            evidence=[
+                ev.message,
+                f"目标账户: {target}",
+                f"操作者: {operator}",
+                f"证据强度: {ev.details.get('evidence_strength') or 'high'}",
+                f"时间: {ev.timestamp}",
+            ],
             recommendation="验证新账户合法性，检查创建者身份",
             timestamp=ev.timestamp, confidence="high",
         ))
@@ -308,16 +331,20 @@ def detect_lateral_movement(events: List[LogEvent]) -> List[DetectionAlert]:
                 recommendation="检查 RDP 连接源 IP 和目标主机，确认是否为授权的远程管理",
                 timestamp=max(e.timestamp for e in rdp), confidence="medium",
             ))
-    explicit = [e for e in events if "explicit-creds" in e.tags]
+    explicit = [
+        e for e in events
+        if "explicit-creds" in e.tags
+        and e.details.get("credential_use_scope") != "local-system"
+    ]
     if len(explicit) >= 3:
         targets = sorted(set(e.details.get("TargetServerName","") for e in explicit if e.details.get("TargetServerName")))
         alerts.append(DetectionAlert(
-            id="a"+gen_id("ec"), rule_id="LAT-002", rule_name="显式凭据横向移动 (Pass-the-Hash 指示器)",
+            id="a"+gen_id("ec"), rule_id="LAT-002", rule_name="显式凭据远程使用异常",
             description=f"检测到 {len(explicit)} 次显式凭据使用，目标: {', '.join(targets[:3])}",
             level=ThreatLevel.HIGH, category="横向移动",
             mitre_attack="T1550.002", mitre_phase="横向移动",
             affected_events=[e.id for e in explicit], evidence=[e.message for e in explicit[:3]],
-            recommendation="检查凭据使用模式，确认是否存在 Pass-the-Hash，审查网络访问日志",
+            recommendation="检查凭据使用模式、源 IP 和目标主机；仅凭 4648 不能直接定性 Pass-the-Hash，需要结合网络/RDP/SMB/EDR 证据。",
             timestamp=max(e.timestamp for e in explicit), confidence="medium",
         ))
     return alerts
