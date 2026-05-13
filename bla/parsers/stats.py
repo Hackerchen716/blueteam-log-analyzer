@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import List, Dict, Any
 from ..models import LogEvent, ParseStats
+from ..utils.helpers import is_placeholder_source
 
 
 def compute_stats(events: List[LogEvent]) -> ParseStats:
@@ -33,7 +34,16 @@ def compute_stats(events: List[LogEvent]) -> ParseStats:
                        "injection","command-injection","lolbin","malware-indicator"):
                 stats.attack_types[tag] = stats.attack_types.get(tag, 0) + 1
 
-    stats.top_ips   = [{"ip": ip, "count": c} for ip, c in ip_counter.most_common(10)]
+    stats.top_ips = [
+        {"ip": ip, "count": c}
+        for ip, c in ip_counter.most_common(10)
+        if not is_placeholder_source(ip)
+    ]
+    stats.top_local_ips = [
+        {"ip": ip, "count": c}
+        for ip, c in ip_counter.most_common(10)
+        if is_placeholder_source(ip)
+    ]
     stats.top_users = [{"user": u, "count": c} for u, c in user_counter.most_common(10)]
 
     EID_DESC = {
@@ -182,6 +192,7 @@ def _compute_windows_process_creation_stats(events: List[LogEvent]) -> Dict[str,
     pair_counter: Counter = Counter()
     pair_latest: Dict[str, str] = {}
     pair_paths: Dict[str, str] = {}
+    suspicious = 0
 
     for ev in proc_events:
         parent = (ev.details.get("parent_process") or "").strip()
@@ -196,6 +207,8 @@ def _compute_windows_process_creation_stats(events: List[LogEvent]) -> Dict[str,
             cur = pair_latest.get(key, "")
             if not cur or ev.timestamp > cur:
                 pair_latest[key] = ev.timestamp
+        if any(tag in ev.tags for tag in ("malware-indicator", "lolbin", "lsass-dump")):
+            suspicious += 1
 
     items = []
     for key, count in pair_counter.most_common(10):
@@ -210,5 +223,6 @@ def _compute_windows_process_creation_stats(events: List[LogEvent]) -> Dict[str,
     return {
         "total": len(proc_events),
         "unique_pairs": len(pair_counter),
+        "suspicious_count": suspicious,
         "top": items,
     }

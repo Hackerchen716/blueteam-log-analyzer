@@ -53,6 +53,7 @@ def generate_json_report(
                 "time_start": r.stats.time_start,
                 "time_end":   r.stats.time_end,
                 "top_ips":    r.stats.top_ips[:5],
+                "top_local_ips": r.stats.top_local_ips[:5],
                 "top_users":  r.stats.top_users[:5],
                 "categories": r.stats.categories,
                 "attack_types": r.stats.attack_types,

@@ -10,7 +10,7 @@ from ..__version__ import __version__
 from ..models import (
     ParseResult, AnalysisSummary, DetectionAlert, ThreatLevel, LogEvent
 )
-from ..utils.helpers import safe_stream
+from ..utils.helpers import format_timestamp_local, is_placeholder_source, safe_stream
 
 # ANSI 颜色
 RESET  = "\033[0m"
@@ -59,9 +59,17 @@ def _section(title: str, color: str = "") -> str:
 
 
 def _fmt_top(items: list, key: str, limit: int = 3) -> str:
-    if not items:
+    filtered = [
+        item for item in items
+        if not (key.endswith("ip") and is_placeholder_source(item.get(key, "")))
+    ]
+    if not filtered:
         return "-"
-    return ", ".join(f"{item.get(key, '?')}({item.get('count', 0)})" for item in items[:limit])
+    return ", ".join(f"{item.get(key, '?')}({item.get('count', 0)})" for item in filtered[:limit])
+
+
+def _fmt_time(ts: str) -> str:
+    return format_timestamp_local(ts)
 
 
 def _truncate_text(text: str, max_len: int) -> str:
@@ -141,10 +149,13 @@ def print_terminal_report(
                   f"{RED}严重:{r.stats.critical}{RESET}  {ORANGE}高:{r.stats.high}{RESET}  "
                   f"{YELLOW}中:{r.stats.medium}{RESET}\n")
         if r.stats.time_start:
-            out.write(f"    时间范围: {DIM}{r.stats.time_start}  ~  {r.stats.time_end}{RESET}\n")
+            out.write(f"    时间范围: {DIM}{_fmt_time(r.stats.time_start)}  ~  {_fmt_time(r.stats.time_end)}{RESET}\n")
         if r.stats.top_ips:
             top_ip = r.stats.top_ips[0]
             out.write(f"    Top IP:   {WHITE}{top_ip['ip']}{RESET} ({top_ip['count']} 次)\n")
+        elif r.stats.top_local_ips:
+            top_local = r.stats.top_local_ips[0]
+            out.write(f"    Top IP:   {DIM}暂无有效远程源（本机/空来源 {top_local['ip']} {top_local['count']} 次）{RESET}\n")
         out.write("\n")
 
     has_windows_logon = any(r.stats.windows_logon_stats for r in parse_results)
@@ -202,7 +213,7 @@ def print_terminal_report(
                     parent_path = item.get("parent_process") or ""
                     child_name = item.get("child_process") or ""
                     count = item.get("count", 0)
-                    ts = item.get("time") or "-"
+                    ts = _fmt_time(item.get("time") or "") or "-"
                     path = item.get("path") or "-"
                     parent_name = _basename(parent_path) or "(unknown)"
                     parent_col = _truncate_text(parent_name, 18)
@@ -210,6 +221,8 @@ def print_terminal_report(
                     ts_col = _truncate_text(ts, 20)
                     path_col = _truncate_text(path, 24)
                     out.write(f"      {idx:>2}. {parent_col:<18} {child_col:<16} {count:>4} {ts_col:<20} {path_col}\n")
+                if pstats.get("suspicious_count", 0) == 0:
+                    out.write(f"      {DIM}研判: 进程创建已采集，但未发现明显恶意进程命令行。{RESET}\n")
                 out.write("\n")
 
             out.write("\n")
@@ -243,6 +256,10 @@ def print_terminal_report(
                 out.write(f"       {GRAY}关键证据:{RESET}\n")
                 for item in incident.evidence[:4]:
                     out.write(f"         • {item}\n")
+            if incident.timeline:
+                out.write(f"       {GRAY}攻击路径还原:{RESET}\n")
+                for step, item in enumerate(incident.timeline[:15], 1):
+                    out.write(f"         {step}. {_fmt_time(item.timestamp)}  {item.message}\n")
             if incident.next_logs:
                 out.write(f"       {CYAN}建议补采: {', '.join(incident.next_logs[:5])}{RESET}\n")
             if incident.recommended_actions:
@@ -263,7 +280,7 @@ def print_terminal_report(
             out.write(f"\n  {BOLD}[{i:02d}] {badge} {color}{alert.rule_name}{RESET}\n")
             out.write(f"       {alert.description}\n")
             out.write(f"       {DIM}MITRE: {alert.mitre_attack}  |  阶段: {alert.mitre_phase}  |  "
-                      f"置信度: {alert.confidence}  |  时间: {alert.timestamp}{RESET}\n")
+                      f"置信度: {alert.confidence}  |  时间: {_fmt_time(alert.timestamp)}{RESET}\n")
             out.write(f"       {GRAY}证据:{RESET}\n")
             evidence_items = alert.evidence if full_evidence else alert.evidence[:3]
             for ev in evidence_items:
@@ -305,7 +322,7 @@ def print_terminal_report(
             badge = _level_badge(entry.level)
             mitre = f" {DIM}[{entry.mitre_attack}]{RESET}" if entry.mitre_attack else ""
             message = _evidence_text(entry.message, full_evidence, 180)
-            out.write(f"  {DIM}{entry.timestamp}{RESET}  {badge}  {color}{message}{RESET}{mitre}\n")
+            out.write(f"  {DIM}{_fmt_time(entry.timestamp)}{RESET}  {badge}  {color}{message}{RESET}{mitre}\n")
 
     # ── 应急处置建议 ──────────────────────────────────────
     out.write(_section("💡 应急处置建议"))
@@ -314,16 +331,28 @@ def print_terminal_report(
 
     # ── Top IP ────────────────────────────────────────────
     all_ips: dict = {}
+    local_ips: dict = {}
     for r in parse_results:
         for ip_info in r.stats.top_ips:
             ip = ip_info["ip"]
             all_ips[ip] = all_ips.get(ip, 0) + ip_info["count"]
-    if all_ips:
+        for ip_info in r.stats.top_local_ips:
+            ip = ip_info["ip"]
+            local_ips[ip] = local_ips.get(ip, 0) + ip_info["count"]
+    if all_ips or local_ips:
         out.write(_section("🌐 Top 攻击源 IP"))
-        sorted_ips = sorted(all_ips.items(), key=lambda x: x[1], reverse=True)[:10]
-        for ip, count in sorted_ips:
-            bar = "█" * min(count // 5, 30)
-            out.write(f"  {WHITE}{ip:<20}{RESET}  {RED}{bar}{RESET} {count}\n")
+        if all_ips:
+            out.write(f"  {BOLD}有效远程源 IP:{RESET}\n")
+            sorted_ips = sorted(all_ips.items(), key=lambda x: x[1], reverse=True)[:10]
+            for ip, count in sorted_ips:
+                bar = "█" * min(count // 5, 30)
+                out.write(f"  {WHITE}{ip:<20}{RESET}  {RED}{bar}{RESET} {count}\n")
+        else:
+            out.write(f"  {DIM}有效远程源 IP: 暂无{RESET}\n")
+        if local_ips:
+            out.write(f"  {DIM}本机/空来源:{RESET}\n")
+            for ip, count in sorted(local_ips.items(), key=lambda x: x[1], reverse=True)[:5]:
+                out.write(f"  {DIM}{ip:<20} {count}{RESET}\n")
 
     # ── 详细事件（verbose 模式）──────────────────────────
     if verbose:

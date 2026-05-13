@@ -6,7 +6,6 @@ BLA 保持零依赖：如果环境里安装了 PyYAML，就用 ``yaml.safe_load`
 """
 from __future__ import annotations
 
-import ast
 import os
 import re
 from dataclasses import dataclass
@@ -295,9 +294,7 @@ def _parse_scalar(value: str) -> Any:
         if not inner:
             return []
         return [_parse_scalar(part.strip()) for part in inner.split(",")]
-    if value[0] in ("'", '"'):
-        try:
-            return ast.literal_eval(value)
-        except Exception:
-            return value.strip("'\"")
+    if len(value) >= 2 and value[0] in ("'", '"') and value[-1] == value[0]:
+        inner = value[1:-1]
+        return inner.replace("\\" + value[0], value[0])
     return value

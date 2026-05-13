@@ -62,6 +62,43 @@ def normalize_timestamp(ts: str, syslog_year: Optional[int] = None) -> str:
         return f"{m2.group(3)}-{mon}-{m2.group(1)}T{m2.group(4)}"
     return ts
 
+_PLACEHOLDER_SOURCE_VALUES = {
+    "",
+    "-",
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "::ffff:127.0.0.1",
+    "0.0.0.0",
+}
+
+
+def is_placeholder_source(value: str) -> bool:
+    """Return True for empty, loopback, or system-local source markers."""
+    return str(value or "").strip().lower() in _PLACEHOLDER_SOURCE_VALUES
+
+
+def format_timestamp_local(ts: str, offset_hours: int = 8) -> str:
+    """Format ISO timestamps as UTC+8 for operator-facing reports.
+
+    The raw UTC value is preserved in the display when the input timestamp is
+    timezone-aware, so responders can reconcile local time with original logs.
+    """
+    if not ts:
+        return ""
+    raw = ts.strip()
+    try:
+        parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return raw
+    if parsed.tzinfo is None:
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    local_tz = datetime.timezone(datetime.timedelta(hours=offset_hours))
+    local = parsed.astimezone(local_tz).strftime("%Y-%m-%d %H:%M:%S")
+    utc = parsed.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f"{local} UTC+{offset_hours} (UTC: {utc})"
+
+
 def truncate(s: str, n: int = 120) -> str:
     return s if len(s) <= n else s[:n] + "…"
 

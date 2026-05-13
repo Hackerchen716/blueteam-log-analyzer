@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -37,6 +38,7 @@ from bla.parsers.p0_security import parse_p0_security_json, parse_p0_security_li
 from bla.parsers.web_access import parse_web_access
 from bla.parsers.windows_evtx import _parse_xml_event, parse_windows_xml
 from bla.rules import reset_rule_cache, set_rule_dirs, validate_web_attack_rules
+from bla.rules.loader import _parse_simple_yaml
 from bla.utils.helpers import gen_id, is_private_ip, normalize_timestamp, reset_counter, set_syslog_year
 
 
@@ -431,6 +433,120 @@ class RegressionTests(unittest.TestCase):
         self.assertTrue(any("Administrator" in item for item in alert.evidence))
         self.assertTrue(any("目标组: Builtin\\Administrators" in item for item in alert.evidence))
 
+    def test_windows_new_admin_account_remote_logon_chain_becomes_incident(self):
+        xml = (
+            "<Event><System><EventID>4720</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:01:13.000Z\"/>"
+            "<Computer>WIN-N8G63QC50SQ</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">hack168$</Data>"
+            "<Data Name=\"TargetDomainName\">WIN-N8G63QC50SQ</Data>"
+            "<Data Name=\"TargetSid\">S-1-5-21-1-2-3-1002</Data>"
+            "<Data Name=\"SubjectUserName\">Administrator</Data>"
+            "<Data Name=\"SubjectDomainName\">WIN-N8G63QC50SQ</Data></EventData></Event>"
+            "<Event><System><EventID>4722</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:01:13.000Z\"/>"
+            "<Computer>WIN-N8G63QC50SQ</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">hack168$</Data>"
+            "<Data Name=\"TargetDomainName\">WIN-N8G63QC50SQ</Data>"
+            "<Data Name=\"SubjectUserName\">Administrator</Data>"
+            "<Data Name=\"SubjectDomainName\">WIN-N8G63QC50SQ</Data></EventData></Event>"
+            "<Event><System><EventID>4724</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:01:14.000Z\"/>"
+            "<Computer>WIN-N8G63QC50SQ</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">hack168$</Data>"
+            "<Data Name=\"TargetDomainName\">WIN-N8G63QC50SQ</Data>"
+            "<Data Name=\"SubjectUserName\">Administrator</Data>"
+            "<Data Name=\"SubjectDomainName\">WIN-N8G63QC50SQ</Data></EventData></Event>"
+            "<Event><System><EventID>4732</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:01:37.000Z\"/>"
+            "<Computer>WIN-N8G63QC50SQ</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">Administrators</Data>"
+            "<Data Name=\"TargetDomainName\">Builtin</Data>"
+            "<Data Name=\"MemberSid\">S-1-5-21-1-2-3-1002</Data>"
+            "<Data Name=\"SubjectUserName\">Administrator</Data>"
+            "<Data Name=\"SubjectDomainName\">WIN-N8G63QC50SQ</Data></EventData></Event>"
+            "<Event><System><EventID>4776</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:22.000Z\"/>"
+            "<Computer>WIN-N8G63QC50SQ</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">hack168$</Data>"
+            "<Data Name=\"Workstation\">CHINARAN404</Data>"
+            "<Data Name=\"Status\">0x0</Data></EventData></Event>"
+            "<Event><System><EventID>4624</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN-N8G63QC50SQ</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">hack168$</Data>"
+            "<Data Name=\"TargetDomainName\">WIN-N8G63QC50SQ</Data>"
+            "<Data Name=\"IpAddress\">192.168.126.1</Data>"
+            "<Data Name=\"WorkstationName\">CHINARAN404</Data>"
+            "<Data Name=\"LogonType\">10</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Security.xml")
+        summary = run_detection(result.events)
+
+        chain = next(alert for alert in summary.alerts if alert.rule_id == "WIN-CHAIN-001")
+        self.assertEqual(chain.level, ThreatLevel.CRITICAL)
+        self.assertTrue(any("来源IP: 192.168.126.1" in item for item in chain.evidence))
+        self.assertTrue(any("来源工作站: CHINARAN404" in item for item in chain.evidence))
+        top = summary.incidents[0]
+        self.assertIn("可疑本地管理员账号与远程登录", top.title)
+        self.assertEqual(top.confidence, "high")
+        self.assertIn("192.168.126.1", top.source_ips)
+        self.assertIn("WIN-N8G63QC50SQ\\hack168$", top.accounts)
+        self.assertIn("持久化", top.attack_phases)
+        self.assertIn("权限提升", top.attack_phases)
+        self.assertIn("远程访问", top.attack_phases)
+
+    def test_windows_4688_process_creation_is_not_generic_t1059(self):
+        xml = (
+            "<Event><System><EventID>4688</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"NewProcessName\">C:\\Windows\\System32\\smss.exe</Data>"
+            "<Data Name=\"ParentProcessName\">System</Data>"
+            "<Data Name=\"CommandLine\">smss.exe</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Security.xml")
+        event = result.events[0]
+        self.assertIsNone(event.mitre_attack)
+        self.assertIn("process-creation", event.tags)
+
+        summary = run_detection(result.events)
+        self.assertFalse(any(item.phase == "执行" for item in summary.attack_chain))
+
+    def test_windows_ntlm_success_zero_status_is_not_bruteforce(self):
+        xml = (
+            "<Event><System><EventID>4776</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:22.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">alice</Data>"
+            "<Data Name=\"Workstation\">WS01</Data>"
+            "<Data Name=\"Status\">0x00000000</Data></EventData></Event>"
+        )
+        event = _parse_xml_event(xml, "Security.xml")
+        self.assertIsNotNone(event)
+        self.assertEqual(event.level, ThreatLevel.INFO)
+        self.assertIn("auth-success", event.tags)
+        self.assertIsNone(event.mitre_attack)
+
+    def test_simple_yaml_regex_quotes_do_not_emit_escape_warnings(self):
+        text = """
+web_attacks:
+  - id: WEB-WARN
+    name: warning fixture
+    level: high
+    mitre: T1190
+    tags: [web-attack]
+    patterns:
+      - '\\$\\{jndi:'
+      - 'openapi\\.json'
+"""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            data = _parse_simple_yaml(text)
+
+        self.assertEqual(data["web_attacks"][0]["patterns"][0], "\\$\\{jndi:")
+        self.assertFalse(any(item.category is SyntaxWarning for item in caught))
+
     def test_local_machine_explicit_creds_do_not_become_pass_the_hash(self):
         xml = "".join(
             "<Event><System><EventID>4648</EventID>"
@@ -544,6 +660,44 @@ class RegressionTests(unittest.TestCase):
             sys.stdout = old_stdout
 
         self.assertIn("终端仅展示前 1 个告警", buf.getvalue())
+
+    def test_terminal_report_filters_placeholder_top_ip_and_shows_utc8(self):
+        result = ParseResult(
+            "security.xml",
+            "Fixture",
+            [],
+            ParseStats(
+                total=2,
+                top_ips=[{"ip": "192.168.126.1", "count": 6}],
+                top_local_ips=[{"ip": "-", "count": 233}],
+                time_start="2024-02-26T15:01:13+00:00",
+                time_end="2024-02-26T15:02:24+00:00",
+            ),
+        )
+        summary = AnalysisSummary(
+            risk_score=0,
+            risk_level=ThreatLevel.INFO,
+            alerts=[],
+            timeline=[],
+            attack_chain=[],
+            recommendations=[],
+            total_events=0,
+            files_analyzed=1,
+        )
+
+        buf = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = buf
+            print_terminal_report([result], summary, no_color=True)
+        finally:
+            sys.stdout = old_stdout
+        text = buf.getvalue()
+        self.assertIn("2024-02-26 23:01:13 UTC+8", text)
+        self.assertIn("UTC: 2024-02-26T15:01:13Z", text)
+        self.assertIn("有效远程源 IP", text)
+        self.assertIn("192.168.126.1", text)
+        self.assertIn("本机/空来源", text)
 
     # ---- 新增：本轮重构覆盖的回归点 -----------------------------------
 

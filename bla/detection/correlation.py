@@ -20,7 +20,10 @@ _FAMILY_PHASE = {
     "initial-access": "初始访问",
     "identity": "身份突破",
     "execution": "执行",
+    "persistence": "持久化",
+    "privilege-escalation": "权限提升",
     "compromise": "主机失陷",
+    "remote-access": "远程访问",
     "lateral-movement": "横向移动",
     "command-control": "命令控制",
     "exfiltration": "数据外传",
@@ -36,7 +39,10 @@ KILL_CHAIN_ORDER = (
     "初始访问",
     "身份突破",
     "执行",
+    "持久化",
+    "权限提升",
     "主机失陷",
+    "远程访问",
     "横向移动",
     "命令控制",
     "数据外传",
@@ -96,6 +102,7 @@ def correlate_incidents(events: Sequence[LogEvent], alerts: Sequence[DetectionAl
 
     incidents.sort(key=lambda item: (_LEVEL_ORDER[item.level], len(item.source_types), len(item.affected_events)), reverse=True)
     incidents = _drop_subset_incidents(incidents)
+    incidents = [incident for incident in incidents if not _is_low_value_windows_standalone_incident(incident)]
     for idx, incident in enumerate(incidents, 1):
         incident.id = f"inc-{idx:03d}"
     return incidents[:50]
@@ -109,8 +116,13 @@ def _correlation_keys(events: Iterable[LogEvent]) -> List[Tuple[str, str]]:
         candidates = [
             ("session", event.details.get("session_id", "")),
             ("trace", event.details.get("trace_id", "")),
-            ("ip", event.details.get("src_ip", "") or event.ip or ""),
-            ("account", event.details.get("account", "") or event.user or ""),
+            ("ip", event.details.get("src_ip", "") or event.details.get("source_ip", "") or event.ip or ""),
+            ("workstation", event.details.get("workstation", "")),
+            ("account", event.details.get("account", "") or event.details.get("target_account", "") or event.user or ""),
+            ("account", event.details.get("account_name", "")),
+            ("account", event.details.get("member_account", "")),
+            ("sid", event.details.get("target_sid", "")),
+            ("sid", event.details.get("member_sid", "")),
             ("asset", event.details.get("asset", "") or event.host or ""),
         ]
         for kind, value in candidates:
@@ -173,14 +185,26 @@ def _is_duplicate_incident(candidate: Incident, existing: Incident) -> bool:
     )
 
 
+def _is_low_value_windows_standalone_incident(incident: Incident) -> bool:
+    return (
+        incident.source_types == ["windows-event"]
+        and incident.confidence == "low"
+        and len(incident.affected_events) <= 1
+        and not incident.source_ips
+    )
+
+
 def _build_incident(index: int, events: Sequence[LogEvent], alerts: Sequence[DetectionAlert]) -> Incident:
+    events, alerts = _focus_windows_chain_scope(events, alerts)
     max_level = _max_level(
         [event.level for event in events] + [alert.level for alert in alerts],
         default=ThreatLevel.INFO,
     )
-    source_ips = _sorted_values(event.details.get("src_ip") or event.ip for event in events)
+    source_ips = _sorted_values(event.details.get("src_ip") or event.details.get("source_ip") or event.ip for event in events)
     accounts = _sorted_values(event.details.get("account") or event.user for event in events)
     assets = _sorted_values(event.details.get("asset") or event.host for event in events)
+    operators = _sorted_values(event.details.get("operator_account") or event.details.get("subject_account") for event in events)
+    workstations = _sorted_values(event.details.get("source_workstation") or event.details.get("workstation") for event in events)
     source_types = _sorted_values(event.details.get("source_type") for event in events)
     families = _sorted_values(event.details.get("event_family") for event in events)
     raw_phases = [_FAMILY_PHASE.get(family, family) for family in families]
@@ -190,10 +214,10 @@ def _build_incident(index: int, events: Sequence[LogEvent], alerts: Sequence[Det
         key=lambda phase: (_PHASE_INDEX.get(phase, len(_PHASE_INDEX)), phase),
     )
     confidence = _confidence(events, alerts, source_types, families)
-    title = _title(source_ips, assets, source_types, phases, max_level)
-    description = _description(source_ips, accounts, assets, source_types, phases, alerts, events)
+    title = _title(source_ips, accounts, assets, source_types, phases, max_level, alerts)
+    description = _description(source_ips, accounts, assets, operators, workstations, source_types, phases, alerts, events)
     timeline = _timeline(events)
-    evidence = _evidence(events, alerts, source_types, phases)
+    evidence = _evidence(events, alerts, source_ips, accounts, assets, operators, workstations, source_types, phases)
 
     return Incident(
         id=f"inc-{index:03d}",
@@ -223,12 +247,112 @@ def _sorted_values(values: Iterable[object]) -> List[str]:
     return sorted({str(value) for value in values if value not in (None, "", "-", "null", "None")})
 
 
+def _focus_windows_chain_scope(
+    events: Sequence[LogEvent],
+    alerts: Sequence[DetectionAlert],
+) -> Tuple[List[LogEvent], List[DetectionAlert]]:
+    chain_alerts = [alert for alert in alerts if alert.rule_id == "WIN-CHAIN-001"]
+    if not chain_alerts:
+        return list(events), list(alerts)
+
+    chain_event_ids = {event_id for alert in chain_alerts for event_id in alert.affected_events}
+    chain_events = [event for event in events if event.id in chain_event_ids]
+    if not chain_events:
+        return list(events), list(alerts)
+
+    account_keys = {
+        _account_key(value)
+        for event in chain_events
+        for value in (
+            event.details.get("account"),
+            event.details.get("target_account"),
+            event.details.get("account_name"),
+        )
+        if _account_key(value)
+    }
+    sids = {
+        str(value).strip().lower()
+        for event in chain_events
+        for value in (event.details.get("target_sid"), event.details.get("member_sid"))
+        if value not in (None, "", "-")
+    }
+    focused = [
+        event for event in events
+        if event.id in chain_event_ids
+        or _event_matches_account(event, account_keys, sids)
+    ]
+    focused_ids = {event.id for event in focused}
+    focused_alerts = [
+        alert for alert in alerts
+        if alert.rule_id == "WIN-CHAIN-001" or set(alert.affected_events) & focused_ids
+    ]
+    return focused, focused_alerts
+
+
+def _event_matches_account(event: LogEvent, account_keys: Set[str], sids: Set[str]) -> bool:
+    if not account_keys and not sids:
+        return False
+    event_keys = {
+        _account_key(value)
+        for value in (
+            event.details.get("account"),
+            event.details.get("target_account"),
+            event.details.get("target_user"),
+            event.details.get("member_account"),
+            event.details.get("member_name"),
+            event.details.get("account_name"),
+        )
+        if _account_key(value)
+    }
+    if event_keys & account_keys:
+        return True
+    event_sids = {
+        str(value).strip().lower()
+        for value in (event.details.get("target_sid"), event.details.get("member_sid"))
+        if value not in (None, "", "-")
+    }
+    return bool(event_sids & sids)
+
+
+def _account_key(value: object) -> str:
+    text = str(value or "").strip().strip("\\/")
+    if "\\" in text:
+        text = text.rsplit("\\", 1)[-1]
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    return text.lower()
+
+
+def _first_human(values: Sequence[str]) -> str:
+    for value in values:
+        if not value.startswith("S-1-"):
+            return value
+    return values[0] if values else ""
+
+
+def _human_accounts(values: Sequence[str]) -> List[str]:
+    human = [value for value in values if not value.startswith("S-1-")]
+    return human or list(values)
+
+
+def _chain_account(alerts: Sequence[DetectionAlert]) -> str:
+    for alert in alerts:
+        if alert.rule_id != "WIN-CHAIN-001":
+            continue
+        for item in alert.evidence:
+            if item.startswith("目标账户:"):
+                return item.split(":", 1)[1].strip()
+    return ""
+
+
 def _confidence(
     events: Sequence[LogEvent],
     alerts: Sequence[DetectionAlert],
     source_types: Sequence[str],
     families: Sequence[str],
 ) -> str:
+    if any(alert.rule_id == "WIN-CHAIN-001" for alert in alerts):
+        return "high"
     if len(source_types) >= 3 or (len(source_types) >= 2 and len(families) >= 3):
         return "high"
     if len(source_types) >= 2 or len(alerts) >= 2 or len(events) >= 5:
@@ -238,11 +362,16 @@ def _confidence(
 
 def _title(
     source_ips: Sequence[str],
+    accounts: Sequence[str],
     assets: Sequence[str],
     source_types: Sequence[str],
     phases: Sequence[str],
     level: ThreatLevel,
+    alerts: Sequence[DetectionAlert],
 ) -> str:
+    if any(alert.rule_id == "WIN-CHAIN-001" for alert in alerts):
+        account = _chain_account(alerts) or _first_human(accounts)
+        return f"可疑本地管理员账号与远程登录: {account}" if account else "可疑本地管理员账号与远程登录"
     subject = source_ips[0] if source_ips else (assets[0] if assets else "未知实体")
     if len(source_types) >= 2:
         return f"P0 多源关联案件: {subject}"
@@ -255,12 +384,23 @@ def _description(
     source_ips: Sequence[str],
     accounts: Sequence[str],
     assets: Sequence[str],
+    operators: Sequence[str],
+    workstations: Sequence[str],
     source_types: Sequence[str],
     phases: Sequence[str],
     alerts: Sequence[DetectionAlert],
     events: Sequence[LogEvent],
 ) -> str:
-    subject = source_ips[0] if source_ips else "未知来源"
+    subject = source_ips[0] if source_ips else (workstations[0] if workstations else "未知来源")
+    if any(alert.rule_id == "WIN-CHAIN-001" for alert in alerts):
+        return (
+            f"{subject} 关联到 Windows 账号创建、特权组加入和远程登录链路；"
+            f"核心账号: {_chain_account(alerts) or _first_human(accounts) or '?'}；"
+            f"操作者: {', '.join(operators[:3]) or '?'}；"
+            f"来源工作站: {', '.join(workstations[:3]) or '?'}；"
+            f"资产: {', '.join(assets[:5]) or '?'}；"
+            f"阶段: {', '.join(phases[:6]) or '未分类'}。"
+        )
     return (
         f"{subject} 在 {len(source_types) or 1} 类日志源中关联到 "
         f"{len(alerts)} 个告警、{len(events)} 条关键事件；"
@@ -289,15 +429,31 @@ def _timeline(events: Sequence[LogEvent]) -> List[TimelineEntry]:
 def _evidence(
     events: Sequence[LogEvent],
     alerts: Sequence[DetectionAlert],
+    source_ips: Sequence[str],
+    accounts: Sequence[str],
+    assets: Sequence[str],
+    operators: Sequence[str],
+    workstations: Sequence[str],
     source_types: Sequence[str],
     phases: Sequence[str],
 ) -> List[str]:
-    evidence = [
+    evidence = []
+    if accounts:
+        evidence.append(f"核心账号: {', '.join(_human_accounts(accounts)[:5])}")
+    if operators:
+        evidence.append(f"操作者: {', '.join(operators[:5])}")
+    if source_ips:
+        evidence.append(f"来源IP: {', '.join(source_ips[:5])}")
+    if workstations:
+        evidence.append(f"来源工作站: {', '.join(workstations[:5])}")
+    if assets:
+        evidence.append(f"资产: {', '.join(assets[:5])}")
+    evidence.extend([
         f"日志源: {', '.join(source_types) or '?'}",
         f"攻击阶段: {', '.join(phases) or '?'}",
         f"关联告警: {len(alerts)} 个",
         f"关键事件: {len(events)} 条",
-    ]
+    ])
     for alert in alerts[:3]:
         evidence.append(f"{alert.rule_id}: {alert.rule_name} ({alert.level.label})")
     for event in sorted(events, key=lambda item: item.timestamp or "")[:3]:
@@ -314,6 +470,8 @@ def _recommended_actions(source_types: Sequence[str], families: Sequence[str], l
         actions.append("核查入口 URL、漏洞命中规则和应用同时间窗口异常，确认是否利用成功。")
     if "identity" in families or "vpn" in source_types:
         actions.append("核查账号登录源、MFA 状态和登录后操作，必要时冻结账号并重置凭据。")
+    if "persistence" in families or "privilege-escalation" in families or "remote-access" in families:
+        actions.append("禁用可疑新建账号，移出特权组，核查 RDP/NTLM 来源工作站和同时间窗口管理员操作。")
     if "command-control" in families or "proxy" in source_types or "dns" in source_types:
         actions.append("封禁恶意域名/IP，回溯 DNS、代理和防火墙外联链路。")
     if "exfiltration" in families:
@@ -329,6 +487,8 @@ def _next_logs(source_types: Sequence[str], families: Sequence[str]) -> List[str
         wanted.extend(["Web access/error 日志", "业务应用日志", "WAF 原始命中详情"])
     if "identity" in families:
         wanted.extend(["VPN/SSO/MFA 审计", "AD/域控 Security 日志", "堡垒机会话审计"])
+    if "persistence" in families or "privilege-escalation" in families or "remote-access" in families:
+        wanted.extend(["Windows Security 4720/4722/4724/4732/4624/4776", "TerminalServices RDP 会话日志", "EDR/XDR 进程树", "防火墙/NAT 会话日志"])
     if "compromise" in families or "execution" in families:
         wanted.extend(["EDR/XDR 进程树", "Windows Sysmon", "Linux auditd/auth.log"])
     if "command-control" in families or "network" in families:

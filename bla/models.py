@@ -101,6 +101,7 @@ class ParseStats:
     info: int = 0
     categories: Dict[str, int] = field(default_factory=dict)
     top_ips: List[Dict[str, Any]] = field(default_factory=list)
+    top_local_ips: List[Dict[str, Any]] = field(default_factory=list)
     top_users: List[Dict[str, Any]] = field(default_factory=list)
     top_event_ids: List[Dict[str, Any]] = field(default_factory=list)
     attack_types: Dict[str, int] = field(default_factory=dict)

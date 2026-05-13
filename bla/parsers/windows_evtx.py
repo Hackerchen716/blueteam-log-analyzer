@@ -9,6 +9,7 @@ Windows 事件日志解析器
 """
 
 from __future__ import annotations
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -190,6 +191,18 @@ def _augment_auth_details(eid: int, details: Dict[str, str]) -> None:
     details["subject_domain"] = _pick_first(details, "SubjectDomainName")
 
 
+def _augment_ntlm_details(eid: int, details: Dict[str, str]) -> None:
+    if eid != 4776:
+        return
+
+    details["account_name"] = _pick_first(details, "TargetUserName")
+    details["account_domain"] = _pick_first(details, "TargetDomainName")
+    details["workstation"] = _pick_first(details, "Workstation", "WorkstationName")
+    details["status_code"] = _pick_first(details, "Status")
+    details["auth_package"] = _pick_first(details, "PackageName", "AuthenticationPackageName")
+    details["credential_validation_result"] = "success" if _is_success_status(details.get("status_code", "")) else "failed"
+
+
 def _augment_account_management_details(eid: int, details: Dict[str, str]) -> None:
     if eid not in (4720, 4722, 4723, 4724, 4725, 4726, 4728, 4729, 4732, 4738, 4756):
         return
@@ -197,6 +210,7 @@ def _augment_account_management_details(eid: int, details: Dict[str, str]) -> No
     details["subject_user"] = _pick_first(details, "SubjectUserName")
     details["subject_domain"] = _pick_first(details, "SubjectDomainName")
     details["subject_account"] = _subject_account_label(details)
+    details["operator_account"] = details["subject_account"]
     details["target_user"] = _pick_first(details, "TargetUserName")
     details["target_domain"] = _pick_first(details, "TargetDomainName")
     details["target_account"] = _target_account_label(details)
@@ -207,6 +221,7 @@ def _augment_account_management_details(eid: int, details: Dict[str, str]) -> No
         details["group_account"] = _group_label(details)
         details["member_name"] = _member_label(details)
         details["member_sid"] = _pick_first(details, "MemberSid")
+        details["member_account"] = _pick_first(details, "MemberName")
         _classify_group_change_details(details)
     elif eid == 4720:
         _classify_account_creation_details(details)
@@ -284,7 +299,7 @@ def _is_local_explicit_credential_use(details: Dict[str, str]) -> bool:
 _WIN_RULES: Dict[int, dict] = {
     # ── 认证 ──────────────────────────────────────────────
     4624: dict(level=ThreatLevel.INFO,     cat="认证",    tags=["logon", "successful-login", "authentication"],
-               mitre="T1078",      rule="登录成功",
+               mitre=None,         rule="登录成功",
                msg=_build_4624_message),
     4625: dict(level=ThreatLevel.MEDIUM,   cat="认证",    tags=["failed-logon", "failed-login", "brute-force", "authentication"],
                mitre="T1110.001",  rule="登录失败",
@@ -293,7 +308,7 @@ _WIN_RULES: Dict[int, dict] = {
                mitre="T1550",      rule="显式凭据登录",
                msg=lambda d: f"显式凭据登录: {_subject_account_label(d)} -> {d.get('TargetServerName','?')}"),
     4672: dict(level=ThreatLevel.INFO,     cat="权限",    tags=["privilege","admin"],
-               mitre="T1078.002",  rule="特权账户登录",
+               mitre=None,         rule="特权账户登录",
                msg=lambda d: f"特权登录: {d.get('SubjectUserName','?')} 获得特殊权限"),
     4768: dict(level=ThreatLevel.INFO,     cat="Kerberos",tags=["kerberos","tgt"],
                mitre="T1558",      rule="Kerberos TGT 请求",
@@ -304,8 +319,8 @@ _WIN_RULES: Dict[int, dict] = {
     4771: dict(level=ThreatLevel.MEDIUM,   cat="Kerberos",tags=["kerberos","failed","brute-force"],
                mitre="T1110",      rule="Kerberos 预认证失败",
                msg=lambda d: f"Kerberos 预认证失败: {d.get('TargetUserName','?')} 来自 {d.get('IpAddress','?')}"),
-    4776: dict(level=ThreatLevel.MEDIUM,   cat="认证",    tags=["ntlm","authentication"],
-               mitre="T1110.001",  rule="NTLM 凭据校验",
+    4776: dict(level=ThreatLevel.INFO,     cat="认证",    tags=["ntlm","authentication","credential-validation"],
+               mitre=None,         rule="NTLM 凭据校验",
                msg=lambda d: f"NTLM 校验: {d.get('TargetUserName','?')} 来自 {d.get('Workstation','?')} 状态={d.get('Status','0x0')}"),
     4634: dict(level=ThreatLevel.INFO,     cat="认证",    tags=["logoff"],
                mitre=None,         rule="账户注销",
@@ -328,20 +343,20 @@ _WIN_RULES: Dict[int, dict] = {
                mitre="T1136",      rule="创建用户账户",
                msg=lambda d: f"创建新账户: {_target_account_label(d)} 由 {_subject_account_label(d)}"),
     4722: dict(level=ThreatLevel.MEDIUM,   cat="账户管理",tags=["account-enabled"],
-               mitre="T1078",      rule="账户已启用",
-               msg=lambda d: f"账户启用: {d.get('TargetUserName','?')}"),
+               mitre=None,         rule="账户已启用",
+               msg=lambda d: f"账户启用: {_target_account_label(d)}"),
     4723: dict(level=ThreatLevel.MEDIUM,   cat="账户管理",tags=["password-change"],
                mitre="T1098",      rule="密码修改",
-               msg=lambda d: f"密码修改: {d.get('TargetUserName','?')}"),
+               msg=lambda d: f"密码修改: {_target_account_label(d)}"),
     4724: dict(level=ThreatLevel.HIGH,     cat="账户管理",tags=["password-reset","privilege-escalation"],
                mitre="T1098",      rule="密码重置",
                msg=lambda d: f"密码重置: {_target_account_label(d)} 由 {_subject_account_label(d)}"),
     4725: dict(level=ThreatLevel.MEDIUM,   cat="账户管理",tags=["account-disabled"],
                mitre="T1531",      rule="账户已禁用",
-               msg=lambda d: f"账户禁用: {d.get('TargetUserName','?')}"),
+               msg=lambda d: f"账户禁用: {_target_account_label(d)}"),
     4726: dict(level=ThreatLevel.HIGH,     cat="账户管理",tags=["account-deletion"],
                mitre="T1531",      rule="删除用户账户",
-               msg=lambda d: f"删除账户: {d.get('TargetUserName','?')}"),
+               msg=lambda d: f"删除账户: {_target_account_label(d)}"),
     4728: dict(level=ThreatLevel.HIGH,     cat="账户管理",tags=["group-add","privilege-escalation"],
                mitre="T1098.001",  rule="添加到全局组",
                msg=lambda d: f"添加到全局组: {_member_label(d)} -> {_group_label(d)}"),
@@ -354,7 +369,7 @@ _WIN_RULES: Dict[int, dict] = {
 
     # ── 进程 ──────────────────────────────────────────────
     4688: dict(level=ThreatLevel.INFO,     cat="进程",    tags=["process-creation"],
-               mitre="T1059",      rule="进程创建",
+               mitre=None,         rule="进程创建",
                msg=lambda d: f"进程创建: {d.get('NewProcessName','?')} 参数: {truncate(d.get('CommandLine',''),80)}"),
     4689: dict(level=ThreatLevel.INFO,     cat="进程",    tags=["process-exit"],
                mitre=None,         rule="进程退出",
@@ -424,7 +439,7 @@ _WIN_RULES: Dict[int, dict] = {
 
     # ── Sysmon ────────────────────────────────────────────
     1:    dict(level=ThreatLevel.INFO,     cat="Sysmon",  tags=["sysmon","process-creation"],
-               mitre="T1059",      rule="Sysmon 进程创建",
+               mitre=None,         rule="Sysmon 进程创建",
                msg=lambda d: f"[Sysmon] 进程: {d.get('Image','?')} 参数: {truncate(d.get('CommandLine',''),80)}"),
     3:    dict(level=ThreatLevel.INFO,     cat="Sysmon",  tags=["sysmon","network"],
                mitre="T1071",      rule="Sysmon 网络连接",
@@ -517,20 +532,41 @@ def _classify_event(eid: int, details: Dict[str, str], channel: str) -> Tuple[Th
         details["false_positive_hint"] = "Localhost or machine-account explicit credential use; not enough evidence for Pass-the-Hash or lateral movement."
         mitre = None
 
+    if eid == 4624:
+        lt = _safe_int(details.get("LogonType", "0"))
+        if lt == 10:
+            tags.extend(["remote-logon", "remote-access", "rdp"])
+            details["remote_access_type"] = "rdp"
+        elif lt == 3 and details.get("source_ip"):
+            tags.extend(["network-logon", "remote-access"])
+            details["remote_access_type"] = "network"
+
     # 动态级别升级
     if eid == 4625:
         lt = _safe_int(details.get("LogonType", "0"))
         if lt in (3, 10):
             level = ThreatLevel.HIGH  # 网络/RDP 失败登录更危险
 
+    if eid == 4776:
+        if _is_success_status(details.get("status_code", "") or details.get("Status", "")):
+            level = ThreatLevel.INFO
+            tags.append("auth-success")
+            mitre = None
+        else:
+            level = ThreatLevel.MEDIUM
+            tags.append("failed-logon")
+            mitre = "T1110.001"
+
     if eid in (4688, 1):
         cmd = details.get("CommandLine", "") + details.get("NewProcessName", "") + details.get("Image", "")
         if _DANGEROUS_CMDS.search(cmd):
             level = ThreatLevel.CRITICAL
             tags.append("malware-indicator")
+            mitre = "T1059"
         elif _LOLBINS.search(cmd):
             level = ThreatLevel.HIGH
             tags.append("lolbin")
+            mitre = "T1218"
 
     if eid == 4104:
         script = details.get("ScriptBlockText", "")
@@ -554,6 +590,10 @@ def _safe_int(value: str, default: int = 0) -> int:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def _is_success_status(value: str) -> bool:
+    return str(value or "").strip().lower() in {"0", "0x0", "0x00000000", "success"}
 
 
 def _parse_xml_event_with_error(xml_text: str, source_file: str) -> Tuple[Optional[LogEvent], Optional[Exception]]:
@@ -602,12 +642,15 @@ def _parse_xml_event(xml_text: str, source_file: str) -> Optional[LogEvent]:
                 details[name] = val.strip()
 
     _augment_auth_details(eid, details)
+    _augment_ntlm_details(eid, details)
     _augment_account_management_details(eid, details)
     _augment_explicit_credential_details(eid, details)
     _augment_4688_details(eid, details)
 
     if eid in (4720, 4722, 4723, 4724, 4725, 4726, 4728, 4729, 4732, 4738, 4756):
         user = details.get("subject_user") or details.get("target_user") or ""
+    elif eid == 4776:
+        user = details.get("account_name") or details.get("TargetUserName") or ""
     else:
         user = details.get("account_name") or details.get("TargetUserName") or details.get("SubjectUserName") or ""
     ip      = details.get("source_ip") or details.get("IpAddress") or details.get("SourceAddress") or ""
@@ -695,6 +738,7 @@ def parse_windows_evtx(path: str) -> ParseResult:
             events        = events,
             stats         = stats,
             parse_time_ms = (time.time() - t0) * 1000,
+            file_size_bytes=os.path.getsize(path) if os.path.exists(path) else 0,
         )
     except ImportError as exc:
         raise MissingOptionalDependency(

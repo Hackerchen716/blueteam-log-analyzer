@@ -22,6 +22,11 @@ P0_NORMALIZED_FIELDS = (
     "trace_id",
 )
 
+_WINDOWS_ACCOUNT_EVENTS = {
+    "4720", "4722", "4723", "4724", "4725", "4726", "4738",
+}
+_WINDOWS_GROUP_EVENTS = {"4728", "4729", "4732", "4756"}
+
 
 def enrich_events(events: Iterable[LogEvent]) -> List[LogEvent]:
     """Add stable normalized/enriched fields to each event in-place."""
@@ -70,10 +75,10 @@ def enrich_events(events: Iterable[LogEvent]) -> List[LogEvent]:
 def _normalize_event(event: LogEvent) -> Dict[str, str]:
     details = event.details
     source_type = _source_type(event)
-    src_ip = event.ip or _first(details, "src_ip", "srcip", "sourceip", "clientip", "remoteaddr", "xff")
+    src_ip = event.ip or _first(details, "src_ip", "srcip", "sourceip", "clientip", "remoteaddr", "xff", "source_ip")
     dst_ip = _first(details, "dst_ip", "dstip", "destip", "destinationip", "serverip", "targetip")
     asset = event.host or dst_ip or _first(details, "asset", "target", "targethost", "host", "hostname", "server", "endpoint")
-    account = event.user or _first(details, "account", "user", "username", "operator", "actor", "principal")
+    account = _normalized_account(event, details, source_type)
     action = _first(details, "action", "result", "status", "outcome", "policyaction")
     status = _first(details, "status", "statuscode", "responsecode", "result", "outcome")
     url = _first(details, "url", "uri", "path", "decoded_path", "request", "fullurl")
@@ -97,6 +102,19 @@ def _normalize_event(event: LogEvent) -> Dict[str, str]:
         "session_id": session_id,
         "trace_id": trace_id,
     }
+
+
+def _normalized_account(event: LogEvent, details: Dict[str, object], source_type: str) -> str:
+    if source_type == "windows-event":
+        if event.event_id in _WINDOWS_ACCOUNT_EVENTS:
+            return _first(details, "target_account", "target_user") or event.user or ""
+        if event.event_id in _WINDOWS_GROUP_EVENTS:
+            return _first(details, "member_account", "member_name", "member_sid", "target_sid") or event.user or ""
+        if event.event_id in {"4624", "4625", "4776"}:
+            account = _first(details, "account_name", "TargetUserName", "SubjectUserName")
+            domain = _first(details, "account_domain", "TargetDomainName", "SubjectDomainName")
+            return f"{domain}\\{account}" if domain and account else account
+    return event.user or _first(details, "account", "user", "username", "operator", "actor", "principal")
 
 
 def _source_type(event: LogEvent) -> str:
@@ -177,7 +195,7 @@ def _domain_type(value: str) -> str:
 def _auth_result(event: LogEvent) -> str:
     if any(tag in event.tags for tag in ("failed-login", "failed-logon", "pam-failure")):
         return "failed"
-    if "successful-login" in event.tags or "logon" in event.tags:
+    if "successful-login" in event.tags or "auth-success" in event.tags or "logon" in event.tags:
         return "success"
     return "unknown"
 
@@ -194,6 +212,12 @@ def _event_family(event: LogEvent, normalized: Dict[str, str]) -> str:
         return "exfiltration"
     if tags & {"bastion-command", "lolbin", "sudo-shell", "sudo-command"}:
         return "execution"
+    if tags & {"account-creation", "account-enabled", "account-deletion", "account-disabled", "service-install", "scheduled-task", "persistence"}:
+        return "persistence"
+    if tags & {"group-add", "password-reset", "account-modified", "privilege-escalation", "sensitive-call"}:
+        return "privilege-escalation"
+    if tags & {"remote-access", "remote-logon"} or ("credential-validation" in tags and "auth-success" in tags):
+        return "remote-access"
     if tags & {"lateral-movement", "explicit-creds", "rdp", "smb", "exposed-service"}:
         return "lateral-movement"
     if tags & {"failed-login", "failed-logon", "successful-login", "authentication"}:

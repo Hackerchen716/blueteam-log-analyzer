@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import re
 from collections import defaultdict
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Tuple
 
 from .. import config
 from ..models import (
@@ -19,6 +19,7 @@ from .registry import DetectorRegistry, DetectorSpec, normalize_profiles
 
 
 _CONFIDENCE_DOWNGRADE = {"high": "medium", "medium": "low", "low": "low"}
+_WINDOWS_ACCOUNT_CHAIN_WINDOW_SECONDS = 10 * 60
 
 
 def _adjust_for_private_ip(ip: str, confidence: str, evidence: List[str]) -> str:
@@ -136,6 +137,135 @@ def detect_password_spray(events: List[LogEvent]) -> List[DetectionAlert]:
             recommendation="密码喷洒绕过锁定策略，检查所有目标账户是否有成功登录，实施异常登录检测",
             timestamp=max(e.timestamp for e in evts), confidence=confidence,
         ))
+    return alerts
+
+
+def detect_windows_account_remote_access_chain(events: List[LogEvent]) -> List[DetectionAlert]:
+    """Detect newly created Windows accounts that quickly become remote admin access."""
+    alerts: List[DetectionAlert] = []
+    created = [
+        event for event in events
+        if event.event_id == "4720"
+        and "account-creation" in event.tags
+        and event.details.get("account_sensitivity") != "system-initialization"
+    ]
+    privileged_groups = [
+        event for event in events
+        if event.event_id in ("4728", "4732", "4756")
+        and "group-add" in event.tags
+        and event.details.get("group_sensitivity") == "privileged"
+    ]
+    remote_logons = [
+        event for event in events
+        if event.event_id == "4624"
+        and "successful-login" in event.tags
+        and str(event.details.get("LogonType", "")).strip() in {"3", "10"}
+    ]
+    ntlm_success = [
+        event for event in events
+        if event.event_id == "4776"
+        and (event.details.get("credential_validation_result") == "success" or event.details.get("auth_result") == "success")
+    ]
+    account_changes = [
+        event for event in events
+        if event.event_id in ("4722", "4724", "4738")
+    ]
+
+    seen: Set[Tuple[str, str, str]] = set()
+    for create_event in created:
+        create_ts = _event_datetime(create_event)
+        if create_ts is None:
+            continue
+        target_account = _target_account(create_event)
+        target_user = create_event.details.get("target_user") or target_account
+        target_sid = create_event.details.get("target_sid", "")
+        account_key = _account_key(target_account or target_user)
+        if not account_key and not target_sid:
+            continue
+
+        matching_groups = [
+            event for event in privileged_groups
+            if _matches_windows_account(event, account_key, target_sid)
+            and _seconds_between(create_event, event) is not None
+            and 0 <= _seconds_between(create_event, event) <= _WINDOWS_ACCOUNT_CHAIN_WINDOW_SECONDS
+        ]
+        for group_event in matching_groups:
+            matching_logons = [
+                event for event in remote_logons
+                if _matches_windows_account(event, account_key, target_sid)
+                and _seconds_between(group_event, event) is not None
+                and 0 <= _seconds_between(group_event, event) <= _WINDOWS_ACCOUNT_CHAIN_WINDOW_SECONDS
+            ]
+            if not matching_logons:
+                continue
+            matching_logons.sort(key=lambda item: (str(item.details.get("LogonType")) != "10", item.timestamp or ""))
+            logon_event = matching_logons[0]
+            chain_key = (create_event.id, group_event.id, logon_event.id)
+            if chain_key in seen:
+                continue
+            seen.add(chain_key)
+
+            end_event = logon_event
+            related = _account_events_before(events, create_event, account_key, target_sid, window_seconds=15 * 60)
+            related.append(create_event)
+            related.extend(_account_events_between(account_changes, create_event, end_event, account_key, target_sid))
+            related.append(group_event)
+            related.extend(_account_events_between(ntlm_success, create_event, end_event, account_key, target_sid))
+            related.append(logon_event)
+            related = _dedup_events_by_id(sorted(related, key=lambda item: item.timestamp or ""))
+
+            operator = create_event.details.get("subject_account") or create_event.details.get("operator_account") or create_event.user or "?"
+            group = group_event.details.get("group_account") or group_event.details.get("group_name") or "?"
+            source_ip = logon_event.details.get("source_ip") or logon_event.ip or "?"
+            workstation = _best_remote_workstation(related, logon_event.host) or logon_event.details.get("workstation") or "?"
+            logon_type = logon_event.details.get("LogonType") or "?"
+            logon_label = logon_event.details.get("logon_type_label") or "未知"
+            window_seconds = _seconds_between(create_event, logon_event)
+
+            display_account = target_account or target_user or "?"
+            for event in related:
+                event.details["account"] = display_account
+                event.details.setdefault("target_account", display_account)
+                if target_sid:
+                    event.details.setdefault("target_sid", target_sid)
+                if operator != "?":
+                    event.details.setdefault("operator_account", operator)
+                if workstation != "?":
+                    event.details.setdefault("source_workstation", workstation)
+                if event is group_event:
+                    event.details["member_account"] = display_account
+
+            evidence = [
+                f"目标账户: {display_account}",
+                f"操作者: {operator}",
+                f"目标组: {group}",
+                f"来源IP: {source_ip}",
+                f"来源工作站: {workstation}",
+                f"登录类型: {logon_type}({logon_label})",
+                f"时间窗口: {int(window_seconds or 0)} 秒",
+                "链路: 账户创建 -> 账号启用/密码变更 -> 特权组加入 -> NTLM/远程登录",
+            ]
+            alerts.append(DetectionAlert(
+                id="a"+gen_id("wc"),
+                rule_id="WIN-CHAIN-001",
+                rule_name="新建账户加入管理员组后发生远程登录",
+                description=(
+                    f"Windows 账号 {display_account} 被 {operator} 创建并加入 {group}，"
+                    f"随后从 {source_ip if source_ip != '?' else workstation} 发生远程登录"
+                ),
+                level=ThreatLevel.CRITICAL,
+                category="Windows 账号接管",
+                mitre_attack="T1021.001",
+                mitre_phase="横向移动",
+                affected_events=[event.id for event in related],
+                evidence=evidence,
+                recommendation=(
+                    f"立即核查并禁用/隔离账号 {display_account}，移出特权组 {group}，"
+                    f"回溯来源 {source_ip}/{workstation} 的 RDP、NTLM、EDR 和防火墙日志。"
+                ),
+                timestamp=logon_event.timestamp,
+                confidence="high" if source_ip != "?" or workstation != "?" else "medium",
+            ))
     return alerts
 
 
@@ -594,6 +724,119 @@ def _append_p0_alert(
     ))
 
 
+def _target_account(event: LogEvent) -> str:
+    return event.details.get("target_account") or event.details.get("target_user") or event.details.get("account") or event.user or ""
+
+
+def _account_key(value: str) -> str:
+    value = str(value or "").strip().strip("\\/")
+    if "\\" in value:
+        value = value.rsplit("\\", 1)[-1]
+    if "/" in value:
+        value = value.rsplit("/", 1)[-1]
+    return value.lower()
+
+
+def _matches_windows_account(event: LogEvent, account_key: str, sid: str) -> bool:
+    if sid:
+        for key in ("member_sid", "target_sid", "TargetSid", "MemberSid"):
+            if str(event.details.get(key) or "").strip().lower() == sid.lower():
+                return True
+    candidates = [
+        event.details.get("account"),
+        event.details.get("account_name"),
+        event.details.get("target_account"),
+        event.details.get("target_user"),
+        event.details.get("member_account"),
+        event.details.get("member_name"),
+        event.user,
+    ]
+    return bool(account_key and any(_account_key(str(candidate or "")) == account_key for candidate in candidates))
+
+
+def _account_events_between(
+    candidates: List[LogEvent],
+    start: LogEvent,
+    end: LogEvent,
+    account_key: str,
+    sid: str,
+) -> List[LogEvent]:
+    matched = []
+    for event in candidates:
+        after_start = _seconds_between(start, event)
+        before_end = _seconds_between(event, end)
+        if after_start is None or before_end is None:
+            continue
+        if 0 <= after_start and 0 <= before_end and _matches_windows_account(event, account_key, sid):
+            matched.append(event)
+    return matched
+
+
+def _account_events_before(
+    candidates: List[LogEvent],
+    anchor: LogEvent,
+    account_key: str,
+    sid: str,
+    window_seconds: int,
+) -> List[LogEvent]:
+    matched = []
+    for event in candidates:
+        if event.id == anchor.id or event.event_id not in ("4720", "4726"):
+            continue
+        delta = _seconds_between(event, anchor)
+        if delta is None:
+            continue
+        if 0 <= delta <= window_seconds and _matches_windows_account(event, account_key, sid):
+            matched.append(event)
+    return matched
+
+
+def _dedup_events_by_id(events: List[LogEvent]) -> List[LogEvent]:
+    seen: Set[str] = set()
+    result = []
+    for event in events:
+        if event.id in seen:
+            continue
+        seen.add(event.id)
+        result.append(event)
+    return result
+
+
+def _best_remote_workstation(events: List[LogEvent], local_host: Optional[str]) -> str:
+    local = _account_key(local_host or "")
+    candidates = []
+    for event in events:
+        workstation = event.details.get("source_workstation") or event.details.get("workstation") or event.details.get("Workstation")
+        value = str(workstation or "").strip()
+        if not value or value in {"-", "localhost"}:
+            continue
+        if local and _account_key(value) == local:
+            continue
+        candidates.append(value)
+    return sorted(set(candidates))[0] if candidates else ""
+
+
+def _seconds_between(first: LogEvent, second: LogEvent) -> Optional[float]:
+    left = _event_datetime(first)
+    right = _event_datetime(second)
+    if left is None or right is None:
+        return None
+    return (right - left).total_seconds()
+
+
+def _event_datetime(event: LogEvent) -> Optional[datetime.datetime]:
+    value = event.timestamp
+    if not value:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
 def _dedup_alerts(alerts: List[DetectionAlert]) -> List[DetectionAlert]:
     """以 (rule_id, 影响事件集合) 为去重 key。
 
@@ -691,6 +934,8 @@ def _gen_recommendations(alerts: List[DetectionAlert]) -> List[str]:
         add("【紧急】假设所有凭据已泄露，强制重置所有账户密码，启用 Windows Credential Guard")
     if any(a.rule_id.startswith("PRIV") for a in alerts):
         add("【高危】审查特权账户使用，实施最小权限原则，检查所有新增的管理员账户")
+    if any(a.rule_id == "WIN-CHAIN-001" for a in alerts):
+        add("【严重】禁用可疑新建账号，移出管理员组，回溯来源 IP/工作站的 RDP、NTLM、EDR 与防火墙日志")
     if any(a.rule_id.startswith("PERS") for a in alerts):
         add("【高危】检查并删除所有可疑的服务、计划任务和用户账户")
     if any(a.rule_id.startswith("LAT") for a in alerts):
@@ -738,6 +983,7 @@ def _ensure_default_detectors() -> None:
     for spec in (
         DetectorSpec("brute-force", detect_brute_force),
         DetectorSpec("password-spray", detect_password_spray),
+        DetectorSpec("windows-account-remote-access-chain", detect_windows_account_remote_access_chain),
         DetectorSpec("privilege-escalation", detect_privilege_escalation),
         DetectorSpec("persistence", detect_persistence),
         DetectorSpec("defense-evasion", detect_defense_evasion),

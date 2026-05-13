@@ -10,7 +10,7 @@ from typing import List
 
 from ..ioc import extract_iocs
 from ..models import AnalysisSummary, ParseResult, ThreatLevel
-from ..utils.helpers import safe_print
+from ..utils.helpers import format_timestamp_local, safe_print
 
 
 def _level_color_hex(level: ThreatLevel) -> str:
@@ -154,7 +154,7 @@ def generate_html_report(
           <p class="alert-desc">{_h(alert.description)}</p>
           <div class="alert-meta">
             <span>置信度: {_h(alert.confidence)}</span>
-            <span>时间: {_h(alert.timestamp)}</span>
+            <span>时间: {_h(format_timestamp_local(alert.timestamp))}</span>
             <span>影响事件: {len(alert.affected_events)}</span>
           </div>
           <details>
@@ -175,7 +175,7 @@ def generate_html_report(
         <div class="tl-entry">
           <div class="tl-dot" style="background:{color};"></div>
           <div class="tl-content">
-            <span class="tl-time">{_h(entry.timestamp)}</span>
+            <span class="tl-time">{_h(format_timestamp_local(entry.timestamp))}</span>
             <span class="badge" style="background:{color}; font-size:10px;">{_h(entry.level.label)}</span>
             {mitre}
             <span class="tl-cat">[{_h(entry.category)}]</span>
@@ -218,7 +218,7 @@ def generate_html_report(
         action_items = "".join(f"<li>{_h(item)}</li>" for item in incident.recommended_actions)
         next_logs = "".join(f"<code>{_h(item)}</code>" for item in incident.next_logs)
         mini_timeline = "".join(
-            f"<li><span>{_h(item.timestamp)}</span>{_h(item.message)}</li>"
+            f"<li><span>{_h(format_timestamp_local(item.timestamp))}</span>{_h(item.message)}</li>"
             for item in incident.timeline[:6]
         )
         # incident 级 mini kill chain：每个阶段一格，命中亮色，未命中灰色
@@ -270,7 +270,7 @@ def generate_html_report(
           <td style="color:#eab308;">{r.stats.medium}</td>
           <td>{r.file_size_bytes//1024} KB</td>
           <td>{r.parse_time_ms:.0f}ms</td>
-          <td>{_h(r.stats.time_start[:10] if r.stats.time_start else '-')}</td>
+          <td>{_h(format_timestamp_local(r.stats.time_start) if r.stats.time_start else '-')}</td>
         </tr>"""
 
     # Windows 登录摘要 HTML
