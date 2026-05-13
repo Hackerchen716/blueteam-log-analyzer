@@ -45,6 +45,7 @@ class AnalysisOutputs:
 class AnalysisOptions:
     paths: List[str]
     profile: str = "default"
+    parser_name: Optional[str] = None
     jobs: int = 0
     config_path: Optional[str] = None
     rule_dirs: Optional[List[str]] = None
@@ -79,6 +80,7 @@ def collect_files(paths: Iterable[str]) -> List[str]:
 def parse_files(
     files: List[str],
     jobs: int = 0,
+    parser_name: Optional[str] = None,
     quiet: bool = False,
     print_fn: Optional[PrintFn] = None,
 ) -> List[ParseResult]:
@@ -91,7 +93,7 @@ def parse_files(
             if not quiet:
                 emit(f"  [{i}/{len(files)}] 解析: {fname} ...", end=" ", flush=True)
             try:
-                result = auto_parse(fpath)
+                result = auto_parse(fpath, parser_name=parser_name)
                 parse_results.append(result)
                 if not quiet:
                     emit(f"✓ ({result.stats.total} 事件)")
@@ -103,7 +105,7 @@ def parse_files(
         if not quiet:
             emit(f"  并行解析（{workers} 个线程）...")
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            future_to_path = {pool.submit(auto_parse, fpath): fpath for fpath in files}
+            future_to_path = {pool.submit(auto_parse, fpath, parser_name): fpath for fpath in files}
             for done, future in enumerate(as_completed(future_to_path), 1):
                 fpath = future_to_path[future]
                 fname = os.path.basename(fpath)
@@ -130,7 +132,13 @@ def run_analysis(
         raise AnalysisError("未找到任何日志文件")
 
     reset_counter()
-    parse_results = parse_files(files, options.jobs, quiet=quiet, print_fn=print_fn)
+    parse_results = parse_files(
+        files,
+        options.jobs,
+        parser_name=options.parser_name,
+        quiet=quiet,
+        print_fn=print_fn,
+    )
     if not parse_results:
         raise AnalysisError("所有文件解析失败")
 
@@ -143,7 +151,7 @@ def run_analysis(
         parse_results, suppressed = apply_allowlist(parse_results, allowlist)
 
     all_events = [event for result in parse_results for event in result.events]
-    summary = run_detection(all_events, profile=options.profile)
+    summary = run_detection(all_events, profile=options.profile, pre_enriched=True)
     if options.outputs:
         write_reports(parse_results, summary, options.outputs)
 

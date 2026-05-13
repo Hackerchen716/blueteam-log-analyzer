@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import re
 from collections import defaultdict
-from typing import List, Dict, Set
+from typing import List, Dict, Optional, Set
 
 from .. import config
 from ..models import (
@@ -15,6 +15,7 @@ from ..models import (
 from ..utils.helpers import gen_id, is_private_ip
 from .correlation import correlate_incidents
 from .enrichment import enrich_events
+from .registry import DetectorRegistry, DetectorSpec, normalize_profiles
 
 
 _CONFIDENCE_DOWNGRADE = {"high": "medium", "medium": "low", "low": "low"}
@@ -34,22 +35,18 @@ def _adjust_for_private_ip(ip: str, confidence: str, evidence: List[str]) -> str
     return _CONFIDENCE_DOWNGRADE.get(confidence, confidence)
 
 
-def run_detection(events: List[LogEvent], profile: str = "default") -> AnalysisSummary:
-    events = enrich_events(events)
+def run_detection(
+    events: List[LogEvent],
+    profile: str = "default",
+    pre_enriched: bool = False,
+    detector_registry: Optional[DetectorRegistry] = None,
+) -> AnalysisSummary:
+    if not pre_enriched:
+        events = enrich_events(events)
     alerts: List[DetectionAlert] = []
-    alerts += detect_brute_force(events)
-    alerts += detect_password_spray(events)
-    alerts += detect_privilege_escalation(events)
-    alerts += detect_persistence(events)
-    alerts += detect_defense_evasion(events)
-    alerts += detect_credential_access(events)
-    alerts += detect_suspicious_execution(events)
-    alerts += detect_lateral_movement(events)
-    alerts += detect_web_attacks(events)
-    alerts += detect_reconnaissance(events)
-    alerts += detect_p0_security_events(events)
-    if profile == "cn-hvv":
-        alerts += detect_cn_hvv(events)
+    registry = detector_registry or get_default_detector_registry()
+    for detector in registry.list(profile):
+        alerts += detector.run(events)
     alerts = _dedup_alerts(alerts)
 
     lvl_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -688,3 +685,42 @@ def _gen_recommendations(alerts: List[DetectionAlert]) -> List[str]:
     if not recs:
         add("持续监控系统日志，保持安全补丁更新，定期进行安全审计")
     return recs
+
+
+_DEFAULT_DETECTOR_REGISTRY = DetectorRegistry()
+_DEFAULT_DETECTORS_REGISTERED = False
+
+
+def get_default_detector_registry() -> DetectorRegistry:
+    _ensure_default_detectors()
+    return _DEFAULT_DETECTOR_REGISTRY
+
+
+def register_detector(spec: DetectorSpec) -> None:
+    get_default_detector_registry().register(spec)
+
+
+def list_detector_names(profile: Optional[str] = None) -> List[str]:
+    return get_default_detector_registry().names(profile)
+
+
+def _ensure_default_detectors() -> None:
+    global _DEFAULT_DETECTORS_REGISTERED
+    if _DEFAULT_DETECTORS_REGISTERED:
+        return
+    for spec in (
+        DetectorSpec("brute-force", detect_brute_force),
+        DetectorSpec("password-spray", detect_password_spray),
+        DetectorSpec("privilege-escalation", detect_privilege_escalation),
+        DetectorSpec("persistence", detect_persistence),
+        DetectorSpec("defense-evasion", detect_defense_evasion),
+        DetectorSpec("credential-access", detect_credential_access),
+        DetectorSpec("suspicious-execution", detect_suspicious_execution),
+        DetectorSpec("lateral-movement", detect_lateral_movement),
+        DetectorSpec("web-attacks", detect_web_attacks),
+        DetectorSpec("reconnaissance", detect_reconnaissance),
+        DetectorSpec("p0-security", detect_p0_security_events),
+        DetectorSpec("cn-hvv", detect_cn_hvv, profiles=normalize_profiles(("cn-hvv",))),
+    ):
+        _DEFAULT_DETECTOR_REGISTRY.register(spec)
+    _DEFAULT_DETECTORS_REGISTERED = True

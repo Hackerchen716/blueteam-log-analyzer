@@ -22,7 +22,7 @@ import tempfile
 import time
 import tracemalloc
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 # Windows 10+ 启用 ANSI 颜色支持
 if sys.platform == "win32":
@@ -49,6 +49,7 @@ from bla.rules import validate_web_attack_rules
 from bla.output import (
     print_terminal_report,
 )
+from bla.parsers import list_parser_names
 from bla.utils.helpers import reset_counter, safe_print as print
 from bla.models import ParseResult, ThreatLevel
 
@@ -298,8 +299,13 @@ def _collect_files(paths: List[str]) -> List[str]:
     return collect_files(paths)
 
 
-def _parse_files(files: List[str], jobs: int = 0, quiet: bool = False) -> List[ParseResult]:
-    return parse_files(files, jobs=jobs, quiet=quiet, print_fn=print)
+def _parse_files(
+    files: List[str],
+    jobs: int = 0,
+    quiet: bool = False,
+    parser_name: Optional[str] = None,
+) -> List[ParseResult]:
+    return parse_files(files, jobs=jobs, parser_name=parser_name, quiet=quiet, print_fn=print)
 
 
 def _make_synthetic_p0_log(size_mb: int) -> Path:
@@ -408,6 +414,12 @@ def main():
         help="检测画像：default 通用模式，cn-hvv 国内护网/重保增强模式",
     )
     parser.add_argument(
+        "--type",
+        choices=["auto"] + list_parser_names(),
+        default="auto",
+        help="强制指定日志类型；默认 auto 自动识别",
+    )
+    parser.add_argument(
         "--allowlist",
         metavar="FILE",
         help="加载 JSON 白名单，过滤可信 IP/账户/路径/进程/UA 等误报",
@@ -479,6 +491,7 @@ def main():
             AnalysisOptions(
                 paths=files,
                 profile=args.profile,
+                parser_name=None if args.type == "auto" else args.type,
                 jobs=args.jobs,
                 config_path=args.config,
                 rule_dirs=args.rules or [],

@@ -12,7 +12,7 @@ from bla.__version__ import __version__
 from bla.allowlist import apply_allowlist
 from bla.config import THRESHOLDS, Thresholds, load_thresholds, set_thresholds
 from bla.core import AnalysisOptions, run_analysis
-from bla.detection import run_detection
+from bla.detection import DetectorRegistry, DetectorSpec, list_detector_names, run_detection
 from bla.detection.engine import _dedup_alerts
 from bla.ioc import extract_iocs, format_ioc_report
 from bla.log_sources import LOG_SOURCE_PRIORITIES, format_log_source_priorities
@@ -30,7 +30,7 @@ from bla.output.html_report import generate_html_report
 from bla.output.json_report import generate_json_report
 from bla.output.sarif_report import generate_sarif_report
 from bla.output.terminal import print_terminal_report
-from bla.parsers import _parse_generic, auto_parse
+from bla.parsers import _parse_generic, auto_parse, list_parser_names, parse_content
 from bla.parsers.linux_auth import parse_linux_auth
 from bla.parsers.p0_security import parse_p0_security_json, parse_p0_security_lines
 from bla.parsers.web_access import parse_web_access
@@ -847,6 +847,61 @@ web_attacks:
         self.assertEqual(result.log_type, "Web Access Log (Apache/Nginx)")
         self.assertGreater(result.file_size_bytes, 0)
         self.assertEqual(result.events[0].rule_name, "路径遍历")
+
+    def test_parser_registry_supports_explicit_type_and_content_input(self):
+        """解析层应支持强制类型和内存内容，方便 Remote Collector 复用。"""
+        content = (
+            "9.9.9.9 - - [15/Mar/2024:10:01:00 +0800] "
+            "\"GET /download.php?file=../../etc/passwd HTTP/1.1\" 200 10 \"-\" \"curl/8\"\n"
+        )
+        self.assertIn("web-access", list_parser_names())
+
+        parsed = parse_content(content, "remote-host:/var/log/nginx/access.log")
+        self.assertEqual(parsed.log_type, "Web Access Log (Apache/Nginx)")
+        self.assertEqual(parsed.events[0].source_file, "remote-host:/var/log/nginx/access.log")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "access.log"
+            path.write_text(content, encoding="utf-8")
+            forced = auto_parse(str(path), parser_name="generic")
+        self.assertEqual(forced.log_type, "通用日志")
+
+    def test_detector_registry_can_run_custom_detector_set(self):
+        """检测层应允许替换/扩展 detector 列表，而不是只能改 engine.py。"""
+        event = LogEvent(
+            id="e-reg",
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.HIGH,
+            category="测试",
+            source="fixture",
+            source_file="events.log",
+            message="danger",
+            raw_line="danger",
+        )
+
+        def _fixture_detector(events):
+            return [DetectionAlert(
+                id="a-reg",
+                rule_id="REG-001",
+                rule_name="Registry detector",
+                description=f"custom detector saw {len(events)} event(s)",
+                level=ThreatLevel.HIGH,
+                category="测试",
+                mitre_attack="T1190",
+                mitre_phase="初始访问",
+                affected_events=[events[0].id],
+                evidence=["custom evidence"],
+                recommendation="custom recommendation",
+                timestamp=events[0].timestamp,
+                confidence="high",
+            )]
+
+        registry = DetectorRegistry()
+        registry.register(DetectorSpec("fixture", _fixture_detector))
+
+        self.assertIn("web-attacks", list_detector_names())
+        summary = run_detection([event], pre_enriched=True, detector_registry=registry)
+        self.assertEqual([alert.rule_id for alert in summary.alerts], ["REG-001"])
 
     # ---- 实战检测工具化：P0 归一化 / enrich / correlation / golden ----
 

@@ -1,42 +1,75 @@
-# BlueTeam Log Analyzer (BLA)
+# BlueTeam Log Analyzer
 
 <p align="center">
-  <img src="docs/assets/bla-banner.png" alt="BlueTeam Log Analyzer Banner" width="760">
+  <img src="docs/assets/bla-banner.png" alt="BlueTeam Log Analyzer Banner" width="900">
+</p>
+<p align="center">
+  <strong>把混杂日志，一键变成告警、案件、IOC 和 SARIF</strong><br>
+  离线优先的蓝队日志分析器，面向应急响应、HVV/重保和值守复盘
 </p>
 
-> 蓝队应急响应日志分析工具 | Blue Team Incident Response Log Analyzer
 
-[![Python](https://img.shields.io/badge/Python-3.9%2B-blue)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](https://github.com/Hackerchen716/blueteam-log-analyzer)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Offline](https://img.shields.io/badge/Mode-100%25%20Offline-orange)](https://github.com/Hackerchen716/blueteam-log-analyzer)
+<p align="center">
+  <a href="https://pypi.org/project/blueteam-log-analyzer/"><img alt="PyPI" src="https://img.shields.io/pypi/v/blueteam-log-analyzer?label=PyPI"></a>
+  <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-blue"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-green"></a>
+  <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey">
+  <img alt="Offline" src="https://img.shields.io/badge/Mode-100%25%20Offline-orange">
+</p>
 
-[![PyPI](https://img.shields.io/pypi/v/blueteam-log-analyzer?label=PyPI)](https://pypi.org/project/blueteam-log-analyzer/)
+BLA 不是云端黑箱，也不是把规则堆在一个脚本里的 demo。它把 Windows、Linux、Web、P0 结构化安全日志统一解析成事件，做富化、检测、关联和证据输出，最终生成可以交给值守、复盘、工单和流水线使用的报告包。
 
-**BLA** 是一款面向蓝队应急响应场景的日志分析工具，支持 Windows 事件日志、Linux 认证日志、Web 访问日志等多种格式，内置 70+ 条威胁检测规则，完全离线运行，无需任何第三方服务。
+## 快速开始
 
----
+两条命令生成一份离线报告包。`logs/` 可以是单个日志文件、目录或通配符；自动识别不准时再加 `--type` 指定解析器。
 
-## 功能特性
+```bash
+pip install -U blueteam-log-analyzer
+bla logs/ --profile cn-hvv --out report/ --exit-on none
+```
 
-- **多格式解析**：Windows XML/EVTX、Linux auth.log/secure、Apache/Nginx 访问日志、HVV/重保 P0 结构化日志、通用文本日志（自动识别类型）
-- **70+ 检测规则**：覆盖 MITRE ATT&CK 9 个阶段，包括暴力破解、密码喷洒、横向移动、权限提升、持久化、防御规避、凭据访问、Web 攻击等
-- **护网/重保画像**：`--profile cn-hvv` 增强 Shiro、Fastjson、Struts2、ThinkPHP、WebLogic、Spring、Webshell 等国内常见痕迹检测
-- **攻击链还原**：自动关联多文件事件，还原 ATT&CK 攻击链
-- **P0 多源关联案件**：对 WAF、VPN、堡垒机、DNS、代理、防火墙、EDR、应用日志做归一化、富化和跨源关联，输出 incident 级案件视图
-- **IOC 提取**：一键导出 IP、域名、URL、文件路径、Hash、账户、进程和可疑命令
-- **白名单/基线压制**：支持 JSON allowlist 过滤可信 IP、账户、路径、进程、UA，并支持可信扫描器、维护窗口、规则级 suppress，降低真实环境误报
-- **风险评分**：0-100 综合评分，4 级威胁分级（严重/高危/中危/低危）
-- **HVV/重保采集矩阵**：内置边界、身份、终端、流量、应用、数据库、云原生、协同办公等日志源优先级，可用 `--list-log-sources` 快速查看
-- **多格式输出**：终端彩色报告、独立 HTML 报告（含离线图表）、JSON、CSV、IOC 文本、**SARIF 2.1.0**（GitHub Code Scanning 兼容）
-- **一键报告目录**：`--out report/` 自动生成 HTML、JSON、CSV、IOC、SARIF 五类标准产物
-- **可配置阈值**：暴力破解 / DDoS / 密码喷洒等阈值集中管理，支持 `--config thresholds.json` 与 `BLA_THRESHOLD_*` 环境变量覆盖，适配不同业务环境
-- **YAML 规则扩展**：支持 `--rules` 加载自定义 Web 检测规则目录，保持零依赖同时方便二次开发
-- **规则质量工具**：`bla validate-rules` 校验规则元数据与正则可编译性，`bla benchmark` 评估解析/检测吞吐，`bla explain` 从 JSON 报告解释告警或案件证据
-- **CI 友好**：`--exit-on {none,critical,high,medium}` 让流水线按需要的告警级别决定门禁
-- **大文件友好**：Linux auth.log、Web access.log 与 P0 JSONL/key=value/CSV 日志使用逐行解析路径，多个文件可用 `-j N` 并行处理
-- **完全离线**：无网络请求，无 AI 调用，所有规则内置，适合隔离网络环境
-- **零依赖**：Python 3.9+ 标准库即可运行
+分析完成后直接打开 `report/index.html` 查看报告；需要解释某个案件或告警时，再使用：
+
+```bash
+bla explain inc-001 --report report/report.json
+```
+
+## 核心输出
+
+BLA 的结果分成两类：给人看的应急判断，和给系统继续处理的结构化产物。
+
+- **先看风险**：风险评分、告警等级、受影响资产、Top 攻击源和事件时间范围。
+- **再看案件**：把同一 IP、账号、主机、URL、session 或 trace 相关的事件聚合成 Incident。
+- **还原过程**：按时间线和 ATT&CK 阶段串起入口、执行、提权、持久化、横向移动、外联等行为。
+- **提取证据**：输出 IP、域名、URL、Hash、账户、进程、命令和可疑路径，方便封禁、狩猎和工单流转。
+- **交给系统**：同时生成 JSON、CSV 和 SARIF，便于二次分析、Excel 排查、CI 门禁和 Code Scanning。
+
+默认 `--out report/` 会落地 `index.html`、`report.json`、`events.csv`、`iocs.txt` 和 `report.sarif`，人能看，脚本也能继续处理。
+
+## v1.2.0 可扩展内核
+
+这一版是“博物馆地基版”：展厅可以慢慢摆满，但主楼、通道、库房和展厅编号要先定好。BLA v1.2.0 把后续持续扩建需要的核心插槽先立起来：
+
+| 能力 | 说明 |
+| --- | --- |
+| Parser Registry | 新日志源通过注册接入，不再继续扩大中心路由 |
+| Detector Registry | 新检测器通过注册组合，不再把所有规则塞进一个引擎文件 |
+| `parse_content()` | 给 Remote Collector、内存日志输入和未来 UI/服务层预留统一入口 |
+| `--type` | 自动识别不准时可强制指定 `web-access`、`linux-auth`、`p0-security` 等解析器 |
+| 单次 enrichment | 解析、富化、检测、关联的职责边界更清楚，便于维护和性能基准 |
+
+更多设计边界见 [架构说明](docs/architecture.md)，v1.2.0 变更见 [发布说明](docs/releases/v1.2.0.md)。
+
+## 核心能力
+
+| 类别 | 能力 |
+| --- | --- |
+| 多源解析 | Windows XML/EVTX、Linux auth.log/secure、Apache/Nginx 访问日志、HVV/重保 P0 结构化日志、通用文本日志 |
+| 威胁检测 | 70+ 内置规则，覆盖暴力破解、密码喷洒、横向移动、权限提升、持久化、防御规避、凭据访问、Web 攻击等场景 |
+| 国内画像 | `--profile cn-hvv` 增强 Shiro、Fastjson、Struts2、ThinkPHP、WebLogic、Spring、Webshell 等常见痕迹检测 |
+| 误报压制 | JSON allowlist、可信扫描器、维护窗口、规则级 suppress，降低真实环境噪音 |
+| 规则扩展 | `--rules` 加载 YAML Web 检测规则，`validate-rules` 校验规则元数据和正则 |
+| 性能与交付 | 逐行解析、`-j N` 并行、`benchmark` 基准、`--exit-on` CI 门禁、完全离线运行 |
 
 ---
 
@@ -118,7 +151,7 @@ bla --list-log-sources
 ### PyPI 安装（推荐）
 
 ```bash
-pip install blueteam-log-analyzer
+pip install -U blueteam-log-analyzer
 ```
 
 安装完成后可直接使用 `bla` 命令：
@@ -155,6 +188,10 @@ pip install python-evtx
 ```bash
 # 分析单个文件（自动识别类型）
 bla /var/log/auth.log
+
+# 自动识别不准时，强制指定解析器
+bla access.log --type web-access
+bla hvv_chain.jsonl --type p0-security --profile cn-hvv
 
 # 分析多个文件
 bla /var/log/auth.log /var/log/nginx/access.log
@@ -331,7 +368,7 @@ fi
 ```
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║         BlueTeam Log Analyzer (BLA)  -  Blue Team Incident Response          ║
-║                    Version 1.1.0  |  100% Offline  |  No AI                  ║
+║                    Version 1.2.0  |  100% Offline  |  No AI                  ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 📊 分析总览
@@ -433,21 +470,29 @@ bla access.log --rules ./rules --out report/
 blueteam-log-analyzer/
 ├── bla_cli.py              # CLI 主入口
 ├── bla/
+│   ├── __version__.py      # 单一包版本源
 │   ├── models.py           # 数据模型（LogEvent, DetectionAlert, AnalysisSummary 等）
 │   ├── config.py           # 阈值配置中心（支持环境变量 / JSON 覆盖）
 │   ├── allowlist.py        # 白名单过滤
 │   ├── ioc.py              # IOC 提取（支持基于告警的高置信度模式）
+│   ├── core/
+│   │   └── pipeline.py     # parse -> enrich -> allowlist -> detect -> correlate -> report 编排
 │   ├── rules/
 │   │   ├── loader.py       # YAML 规则加载器（PyYAML 可选，内置轻量解析器）
 │   │   └── web_attacks.yaml# 内置 Web 扩展规则
 │   ├── parsers/
-│   │   ├── __init__.py     # 自动类型识别路由
+│   │   ├── __init__.py     # 默认解析器注册与自动识别入口
+│   │   ├── registry.py     # ParserRegistry / ParserSpec / parse_content
 │   │   ├── windows_evtx.py # Windows 事件日志解析（XML/EVTX）
 │   │   ├── linux_auth.py   # Linux 认证日志解析（带跨年处理）
 │   │   ├── web_access.py   # Web 访问日志解析（基于分钟桶的 DDoS 检测）
+│   │   ├── p0_security.py  # HVV/重保 P0 结构化安全日志解析
 │   │   └── stats.py        # 统计计算（Top IP、Top User、时间范围等）
 │   ├── detection/
-│   │   └── engine.py       # 威胁检测引擎（统一规则源；私网 IP 自动降级）
+│   │   ├── engine.py       # 威胁检测编排与内置检测器
+│   │   ├── registry.py     # DetectorRegistry / DetectorSpec
+│   │   ├── enrichment.py   # 统一字段富化
+│   │   └── correlation.py  # Incident 级跨源关联
 │   ├── output/
 │   │   ├── terminal.py     # 终端彩色输出（ANSI，支持 Windows 10+）
 │   │   ├── html_report.py  # HTML 报告生成（独立单文件）
@@ -459,6 +504,9 @@ blueteam-log-analyzer/
 │   └── utils/
 │       └── helpers.py      # 工具函数
 ├── docs/
+│   ├── assets/             # README 与发布素材
+│   ├── architecture.md     # 可扩展内核设计说明
+│   ├── releases/           # 版本发布说明
 │   ├── screenshots/        # 界面截图
 │   ├── allowlist-example.json # 白名单示例
 │   ├── secrepo-demo.md     # SecRepo 真实样本实测记录
