@@ -492,6 +492,11 @@ def main():
         help="指定 Linux syslog/auth.log 这类无年份时间戳使用的年份",
     )
     parser.add_argument(
+        "--rdp",
+        action="store_true",
+        help="RDP/登录专项模式：仅分析 Windows 安全日志中的 4624/4625 事件",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"BLA {__version__}",
@@ -535,6 +540,7 @@ def main():
                 rule_dirs=args.rules or [],
                 allowlist_path=args.allowlist,
                 syslog_year=args.syslog_year,
+                rdp_only=args.rdp,
             ),
             quiet=False,
             print_fn=print,

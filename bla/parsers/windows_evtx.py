@@ -647,6 +647,10 @@ def _parse_xml_event(xml_text: str, source_file: str) -> Optional[LogEvent]:
     _augment_explicit_credential_details(eid, details)
     _augment_4688_details(eid, details)
 
+    # 4624 若没有可用网络源地址，则默认跳过，不纳入专项统计与输出。
+    if eid == 4624 and not details.get("source_ip"):
+        return None
+
     if eid in (4720, 4722, 4723, 4724, 4725, 4726, 4728, 4729, 4732, 4738, 4756):
         user = details.get("subject_user") or details.get("target_user") or ""
     elif eid == 4776:

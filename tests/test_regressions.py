@@ -325,6 +325,18 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(event.event_id, "4625")
         self.assertEqual(event.user, "bob")
 
+    def test_windows_4624_without_source_ip_is_skipped(self):
+        xml = (
+            "<Event><System><EventID>4624</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:03:00.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">alice</Data>"
+            "<Data Name=\"LogonType\">10</Data></EventData></Event>"
+        )
+
+        event = _parse_xml_event(xml, "Security.xml")
+        self.assertIsNone(event)
+
     def test_windows_successful_logon_feeds_cn_hvv_success_after_bruteforce(self):
         xml = "".join(
             "<Event><System><EventID>4625</EventID>"
@@ -349,6 +361,39 @@ class RegressionTests(unittest.TestCase):
 
         self.assertTrue(any("successful-login" in event.tags for event in result.events if event.event_id == "4624"))
         self.assertTrue(any(alert.rule_id == "CN-HVV-002" for alert in summary.alerts))
+
+    def test_run_analysis_rdp_only_keeps_only_4624_4625(self):
+        xml = (
+            "<Events>"
+            "<Event><System><EventID>4625</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:02:01.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">alice</Data>"
+            "<Data Name=\"IpAddress\">8.8.8.8</Data>"
+            "<Data Name=\"LogonType\">3</Data></EventData></Event>"
+            "<Event><System><EventID>4624</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:03:00.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">alice</Data>"
+            "<Data Name=\"IpAddress\">8.8.8.8</Data>"
+            "<Data Name=\"LogonType\">10</Data></EventData></Event>"
+            "<Event><System><EventID>4688</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:04:00.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"NewProcessName\">C:\\Windows\\System32\\cmd.exe</Data></EventData></Event>"
+            "</Events>"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Security.xml"
+            path.write_text(xml, encoding="utf-8")
+            run_result = run_analysis(AnalysisOptions(paths=[str(path)], rdp_only=True), quiet=True)
+
+        self.assertEqual(len(run_result.parse_results), 1)
+        result = run_result.parse_results[0]
+        self.assertEqual([event.event_id for event in result.events], ["4625", "4624"])
+        self.assertEqual(result.stats.total, 2)
+        self.assertEqual(run_result.summary.total_events, 2)
 
     def test_evtx_missing_python_evtx_blocks_empty_report(self):
         with tempfile.TemporaryDirectory() as tmp:
