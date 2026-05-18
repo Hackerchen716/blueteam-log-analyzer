@@ -91,6 +91,70 @@ def _basename(path: str) -> str:
     return s
 
 
+def _event_sort_key(event: LogEvent) -> tuple:
+    return (
+        event.level.score,
+        event.timestamp or "",
+        event.id,
+    )
+
+
+def _render_logon_event_detail(event: LogEvent, full_evidence: bool) -> List[str]:
+    details = event.details
+    account = details.get("account_name") or event.user or "?"
+    domain = details.get("account_domain") or ""
+    principal = f"{domain}\\{account}" if domain else account
+    source_ip = details.get("source_ip") or event.ip or "-"
+    workstation = details.get("workstation") or "-"
+    logon_type = details.get("LogonType") or "?"
+    logon_label = details.get("logon_type_label") or "未知"
+    process = details.get("logon_process") or details.get("process_name") or "-"
+    auth_package = details.get("auth_package") or "-"
+
+    lines = [
+        (
+            f"        {_level_badge(event.level)} {_fmt_time(event.timestamp)}  "
+            f"账户={principal}  来源IP={source_ip}  登录类型={logon_type}({logon_label})"
+        ),
+        (
+            f"          工作站={workstation}  进程={_truncate_text(process, 28)}  "
+            f"认证={_truncate_text(auth_package, 18)}"
+        ),
+    ]
+
+    if event.event_id == "4625":
+        reason = details.get("failure_reason") or "-"
+        status = details.get("status_code") or "-"
+        sub_status = details.get("sub_status_code") or "-"
+        lines.append(
+            f"          失败原因={_truncate_text(reason, 42)}  Status={status}  SubStatus={sub_status}"
+        )
+    return lines
+
+
+def _render_process_creation_event_detail(event: LogEvent, full_evidence: bool) -> List[str]:
+    details = event.details
+    parent_path = details.get("parent_process") or ""
+    parent = _basename(parent_path) or "(unknown)"
+    child = details.get("child_process") or _basename(details.get("child_path") or event.process or "") or "(unknown)"
+    path = details.get("child_path") or event.process or "-"
+    cmd = details.get("command_line") or details.get("CommandLine") or "-"
+    tags = []
+    for tag in ("malware-indicator", "lolbin", "lsass-dump"):
+        if tag in event.tags:
+            tags.append(tag)
+    tag_text = f"  标记={','.join(tags)}" if tags else ""
+
+    return [
+        (
+            f"        {_level_badge(event.level)} {_fmt_time(event.timestamp)}  "
+            f"父进程={_truncate_text(parent, 20)}  子进程={_truncate_text(child, 20)}{tag_text}"
+        ),
+        f"          路径={_truncate_text(path, 96 if full_evidence else 52)}",
+        f"          命令行={_evidence_text(cmd, full_evidence, 96)}",
+    ]
+
+
 def print_terminal_report(
     parse_results: List[ParseResult],
     summary: AnalysisSummary,
@@ -198,6 +262,18 @@ def print_terminal_report(
                             out.write(f"        SubStatus:   {_fmt_top(event_stats.get('sub_status_codes', []), 'sub_status_code', 5)}\n")
                     out.write("\n")
 
+                logon_recent = sorted(
+                    [event for event in r.events if event.event_id in {"4624", "4625"}],
+                    key=_event_sort_key,
+                    reverse=True,
+                )[:8]
+                if logon_recent:
+                    out.write(f"      {BOLD}具体事件{RESET}  {DIM}(按级别、时间排序，最近 8 条){RESET}\n")
+                    for event in logon_recent:
+                        for line in _render_logon_event_detail(event, full_evidence):
+                            out.write(f"{line}\n")
+                    out.write("\n")
+
             if r.stats.windows_process_creation_stats:
                 pstats = r.stats.windows_process_creation_stats
                 out.write(
@@ -223,6 +299,21 @@ def print_terminal_report(
                     out.write(f"      {idx:>2}. {parent_col:<18} {child_col:<16} {count:>4} {ts_col:<20} {path_col}\n")
                 if pstats.get("suspicious_count", 0) == 0:
                     out.write(f"      {DIM}研判: 进程创建已采集，但未发现明显恶意进程命令行。{RESET}\n")
+                proc_recent = sorted(
+                    [event for event in r.events if event.event_id == "4688"],
+                    key=lambda event: (
+                        1 if any(tag in event.tags for tag in ("malware-indicator", "lolbin", "lsass-dump")) else 0,
+                        event.level.score,
+                        event.timestamp or "",
+                        event.id,
+                    ),
+                    reverse=True,
+                )[:6]
+                if proc_recent:
+                    out.write(f"      {BOLD}具体事件{RESET}  {DIM}(可疑优先，最近 6 条){RESET}\n")
+                    for event in proc_recent:
+                        for line in _render_process_creation_event_detail(event, full_evidence):
+                            out.write(f"{line}\n")
                 out.write("\n")
 
             out.write("\n")
