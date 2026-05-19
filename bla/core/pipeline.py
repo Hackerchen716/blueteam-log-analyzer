@@ -11,7 +11,7 @@ from ..allowlist import apply_allowlist, load_allowlist
 from ..config import load_thresholds, load_thresholds_from_env, set_thresholds
 from ..detection import run_detection
 from ..detection.enrichment import enrich_events
-from ..models import AnalysisSummary, ParseResult
+from ..models import AnalysisSummary, LogEvent, ParseResult
 from ..output import (
     generate_csv_report,
     generate_html_report,
@@ -21,6 +21,7 @@ from ..output import (
     generate_sarif_report,
 )
 from ..parsers import auto_parse
+from ..parsers.stats import compute_stats
 from ..rules import set_rule_dirs
 from ..utils.helpers import reset_counter, set_syslog_year
 
@@ -51,6 +52,7 @@ class AnalysisOptions:
     rule_dirs: Optional[List[str]] = None
     allowlist_path: Optional[str] = None
     syslog_year: Optional[int] = None
+    rdp_only: bool = False
     outputs: Optional[AnalysisOutputs] = None
 
 
@@ -83,6 +85,7 @@ def parse_files(
     parser_name: Optional[str] = None,
     quiet: bool = False,
     print_fn: Optional[PrintFn] = None,
+    rdp_only: bool = False,
 ) -> List[ParseResult]:
     parse_results: List[ParseResult] = []
     errors: List[str] = []
@@ -95,6 +98,8 @@ def parse_files(
                 emit(f"  [{i}/{len(files)}] 解析: {fname} ...", end=" ", flush=True)
             try:
                 result = auto_parse(fpath, parser_name=parser_name)
+                if rdp_only:
+                    result = _filter_rdp_only_result(result)
                 parse_results.append(result)
                 if not quiet:
                     emit(f"✓ ({result.stats.total} 事件)")
@@ -113,6 +118,8 @@ def parse_files(
                 fname = os.path.basename(fpath)
                 try:
                     result = future.result()
+                    if rdp_only:
+                        result = _filter_rdp_only_result(result)
                     parse_results.append(result)
                     if not quiet:
                         emit(f"  [{done}/{len(files)}] ✓ {fname} ({result.stats.total} 事件)")
@@ -146,6 +153,7 @@ def run_analysis(
         parser_name=options.parser_name,
         quiet=quiet,
         print_fn=print_fn,
+        rdp_only=options.rdp_only,
     )
     if not parse_results:
         raise AnalysisError("所有文件解析失败")
@@ -204,3 +212,24 @@ def _configure_runtime(options: AnalysisOptions) -> None:
     if options.rule_dirs:
         rule_dirs.extend(options.rule_dirs)
     set_rule_dirs(rule_dirs)
+
+
+def _filter_rdp_only_result(result: ParseResult) -> ParseResult:
+    filtered_events = [
+        event for event in result.events
+        if event.event_id in {"4624", "4625"} and _has_remote_logon_source(event)
+    ]
+    stats = compute_stats(filtered_events)
+    stats.parse_errors = result.stats.parse_errors
+    return ParseResult(
+        file_name=result.file_name,
+        log_type=result.log_type,
+        events=filtered_events,
+        stats=stats,
+        parse_time_ms=result.parse_time_ms,
+        file_size_bytes=result.file_size_bytes,
+    )
+
+
+def _has_remote_logon_source(event: LogEvent) -> bool:
+    return bool(event.details.get("source_ip") or event.ip)

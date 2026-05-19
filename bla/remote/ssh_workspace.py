@@ -254,6 +254,7 @@ class RemoteWorkspace:
         parser.add_argument("--full", "--no-truncate", "--evidence", dest="full_evidence", action="store_true")
         parser.add_argument("--no-color", action="store_true")
         parser.add_argument("--syslog-year", type=int)
+        parser.add_argument("--rdp", action="store_true", help="仅保留带远程来源 IP 的 Windows 4624/4625 登录事件")
         try:
             parsed = parser.parse_args(list(args))
         except SystemExit as e:
@@ -282,6 +283,7 @@ class RemoteWorkspace:
                         rule_dirs=parsed.rules or [],
                         allowlist_path=parsed.allowlist,
                         syslog_year=parsed.syslog_year,
+                        rdp_only=parsed.rdp,
                     ),
                     quiet=False,
                     print_fn=self.print,
@@ -374,6 +376,7 @@ class RemoteWorkspace:
                 "  find [PATH] [PATTERN]     查找远程日志文件，默认当前目录、最多 3 层",
                 "  tail FILE [N]             查看远程文件最后 N 行，默认 80",
                 "  bla FILE [--out DIR]      拉回远程文件并在本机分析",
+                "  bla FILE --rdp            拉回远程 Windows 日志并做 RDP/登录专项分析",
                 "  bla journalctl:ssh        拉回远程 journalctl 输出并在本机分析",
                 "  exit                      退出",
             ])

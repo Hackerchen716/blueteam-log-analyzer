@@ -325,6 +325,21 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(event.event_id, "4625")
         self.assertEqual(event.user, "bob")
 
+    def test_windows_4624_without_source_ip_stays_in_general_parser(self):
+        xml = (
+            "<Event><System><EventID>4624</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:03:00.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">alice</Data>"
+            "<Data Name=\"LogonType\">10</Data></EventData></Event>"
+        )
+
+        event = _parse_xml_event(xml, "Security.xml")
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.event_id, "4624")
+        self.assertEqual(event.user, "alice")
+
     def test_windows_successful_logon_feeds_cn_hvv_success_after_bruteforce(self):
         xml = "".join(
             "<Event><System><EventID>4625</EventID>"
@@ -349,6 +364,46 @@ class RegressionTests(unittest.TestCase):
 
         self.assertTrue(any("successful-login" in event.tags for event in result.events if event.event_id == "4624"))
         self.assertTrue(any(alert.rule_id == "CN-HVV-002" for alert in summary.alerts))
+
+    def test_run_analysis_rdp_only_keeps_remote_4624_4625_only(self):
+        xml = (
+            "<Events>"
+            "<Event><System><EventID>4625</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:02:01.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">alice</Data>"
+            "<Data Name=\"IpAddress\">8.8.8.8</Data>"
+            "<Data Name=\"LogonType\">3</Data></EventData></Event>"
+            "<Event><System><EventID>4624</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:03:00.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">alice</Data>"
+            "<Data Name=\"LogonType\">10</Data></EventData></Event>"
+            "<Event><System><EventID>4624</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:03:10.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">alice</Data>"
+            "<Data Name=\"IpAddress\">8.8.4.4</Data>"
+            "<Data Name=\"LogonType\">10</Data></EventData></Event>"
+            "<Event><System><EventID>4688</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:04:00.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"NewProcessName\">C:\\Windows\\System32\\cmd.exe</Data></EventData></Event>"
+            "</Events>"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Security.xml"
+            path.write_text(xml, encoding="utf-8")
+            general = run_analysis(AnalysisOptions(paths=[str(path)]), quiet=True)
+            rdp = run_analysis(AnalysisOptions(paths=[str(path)], rdp_only=True), quiet=True)
+
+        self.assertEqual([event.event_id for event in general.parse_results[0].events], ["4625", "4624", "4624", "4688"])
+        result = rdp.parse_results[0]
+        self.assertEqual([event.event_id for event in result.events], ["4625", "4624"])
+        self.assertEqual([event.details.get("source_ip") for event in result.events], ["8.8.8.8", "8.8.4.4"])
+        self.assertEqual(result.stats.total, 2)
+        self.assertEqual(rdp.summary.total_events, 2)
 
     def test_evtx_missing_python_evtx_blocks_empty_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1428,6 +1483,39 @@ web_attacks:
         self.assertEqual(data["events"][0]["source_file"], "web01:/var/log/nginx/access.log")
         self.assertNotIn("python", " ".join(fake.commands).lower())
         self.assertIn("开始本地分析", output.getvalue())
+
+    def test_remote_workspace_bla_accepts_rdp_filter(self):
+        class FakeSSH:
+            target = "win01"
+
+            def fetch_file(self, remote_path, local_path, cwd):
+                Path(local_path).write_text(
+                    "<Events>"
+                    "<Event><System><EventID>4624</EventID>"
+                    "<TimeCreated SystemTime=\"2024-03-15T01:01:00.000Z\"/>"
+                    "<Computer>win01</Computer><Channel>Security</Channel></System>"
+                    "<EventData><Data Name=\"TargetUserName\">local</Data>"
+                    "<Data Name=\"LogonType\">10</Data></EventData></Event>"
+                    "<Event><System><EventID>4624</EventID>"
+                    "<TimeCreated SystemTime=\"2024-03-15T01:02:00.000Z\"/>"
+                    "<Computer>win01</Computer><Channel>Security</Channel></System>"
+                    "<EventData><Data Name=\"TargetUserName\">rdpuser</Data>"
+                    "<Data Name=\"IpAddress\">203.0.113.5</Data>"
+                    "<Data Name=\"LogonType\">10</Data></EventData></Event>"
+                    "</Events>",
+                    encoding="utf-8",
+                )
+
+        fake = FakeSSH()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout", io.StringIO()):
+            workspace = RemoteWorkspace(fake, initial_cwd="/var/log", print_fn=lambda *a, **k: print(*a, **k))
+            code = workspace.execute_line(f"bla Security.xml --rdp --json {tmp}/report.json --exit-on none --no-color")
+            data = _json.loads((Path(tmp) / "report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(data["events"]), 1)
+        self.assertEqual(data["events"][0]["details"]["source_ip"], "203.0.113.5")
+        self.assertEqual(data["events"][0]["source_file"], "win01:/var/log/Security.xml")
 
     def test_remote_workspace_cd_and_ls_use_whitelisted_remote_commands(self):
         class FakeSSH:
