@@ -14,11 +14,12 @@ import json
 import os
 import re
 import time
+from functools import lru_cache
 from itertools import chain, islice
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from ..models import LogEvent, ParseResult, ThreatLevel
+from ..models import LogEvent, ParseResult, ParseStats, ThreatLevel
 from ..rules import get_web_attack_rules
 from ..utils.helpers import (
     file_size, gen_id, iter_file_lines, normalize_timestamp, read_file,
@@ -94,9 +95,17 @@ def parse_p0_security_file(path: str, source_file: Optional[str] = None) -> Pars
             file_size_bytes=file_size(path),
             parser_hint="csv",
         )
-    if sample.lstrip().startswith("["):
+    stripped = sample.lstrip()
+    if stripped.startswith("["):
         content = read_file(path)
         return parse_p0_security_json(content, source_name, file_size(path))
+    if stripped.startswith("{"):
+        content = read_file(path)
+        parsed = parse_p0_security_json(content, source_name, file_size(path))
+        if parsed.stats.parse_errors == 0:
+            return parsed
+        fallback = parse_p0_security_lines(content.splitlines(), source_name, file_size_bytes=file_size(path))
+        return fallback if fallback.events else parsed
     return parse_p0_security_lines(
         iter_file_lines(path),
         source_name,
@@ -110,7 +119,9 @@ def parse_p0_security_json(content: str, source_file: str, file_size_bytes: int 
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
-        data = []
+        return _result(source_file, events, t0, file_size_bytes, parse_errors=1)
+    if not isinstance(data, (list, dict)):
+        return _result(source_file, events, t0, file_size_bytes, parse_errors=1)
     rows = data if isinstance(data, list) else [data]
     for row in rows:
         if not isinstance(row, dict):
@@ -161,8 +172,15 @@ def parse_p0_security_lines(
     return _result(source_file, events, t0, file_size_bytes)
 
 
-def _result(source_file: str, events: List[LogEvent], t0: float, file_size_bytes: int) -> ParseResult:
-    stats = compute_stats(events)
+def _result(
+    source_file: str,
+    events: List[LogEvent],
+    t0: float,
+    file_size_bytes: int,
+    parse_errors: int = 0,
+) -> ParseResult:
+    stats = compute_stats(events) if events else ParseStats(total=0)
+    stats.parse_errors += parse_errors
     return ParseResult(
         file_name=source_file,
         log_type="P0 Security Log (HVV/重保)",
@@ -272,12 +290,29 @@ def _build_vpn_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
     success = _is_success(result + " " + message_text)
     if not failed and not success and not re.search(r'login|auth|mfa|认证|登录', message_text, re.I):
         return None
+    auth_observed = not failed and not success
     level = ThreatLevel.MEDIUM if failed else ThreatLevel.INFO
-    tags = ["failed-login", "authentication", "vpn"] if failed else ["successful-login", "authentication", "vpn"]
+    if failed:
+        tags = ["failed-login", "authentication", "vpn"]
+        status_label = "登录失败"
+        mitre = "T1110.001"
+        rule_name = "VPN 登录失败"
+    elif success:
+        tags = ["successful-login", "authentication", "vpn"]
+        status_label = "登录成功"
+        mitre = "T1078"
+        rule_name = "VPN 登录成功"
+    else:
+        tags = ["authentication", "vpn", "auth-observed"]
+        status_label = "认证事件"
+        mitre = None
+        rule_name = "VPN 认证事件"
     user = _user(fields)
     ip = _src_ip(fields)
     reason = _field(fields, "reason", "message", "error")
-    msg = f"VPN {'登录失败' if failed else '登录成功'}: 用户={user or '?'} 来源={ip or '?'}"
+    msg = f"VPN {status_label}: 用户={user or '?'} 来源={ip or '?'}"
+    if auth_observed and result:
+        msg += f" 状态={truncate(result, 40)}"
     if reason:
         msg += f" 原因={truncate(reason, 80)}"
     return _make_event(
@@ -294,8 +329,8 @@ def _build_vpn_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
         host=_field(fields, "device", "gateway", "host", "hostname"),
         details=_details(fields, kind="vpn"),
         tags=tags,
-        mitre_attack="T1110.001" if failed else "T1078",
-        rule_name="VPN 登录失败" if failed else "VPN 登录成功",
+        mitre_attack=mitre,
+        rule_name=rule_name,
     )
 
 
@@ -439,10 +474,15 @@ def _build_firewall_event(fields: Dict[str, str], raw_line: str, source_file: st
         rule_name = "防火墙阻断敏感端口访问"
         tags = ["scanning", "firewall", "blocked"]
         mitre = "T1595"
-    elif not _is_block_action(action) and dst_port in _SENSITIVE_PORTS:
+    elif _is_allow_action(action) and dst_port in _SENSITIVE_PORTS:
         level = ThreatLevel.HIGH
         rule_name = "防火墙放行敏感端口访问"
         tags = ["exposed-service", "firewall"]
+        mitre = "T1021" if dst_port in {22, 3389, 445} else "T1190"
+    elif dst_port in _SENSITIVE_PORTS:
+        level = ThreatLevel.MEDIUM
+        rule_name = "防火墙敏感端口访问（动作未知）"
+        tags = ["scanning", "firewall", "unknown-action"]
         mitre = "T1021" if dst_port in {22, 3389, 445} else "T1190"
     elif bytes_out >= 100 * 1024 * 1024:
         level = ThreatLevel.HIGH
@@ -617,10 +657,10 @@ def _infer_kind(fields: Dict[str, str], source_file: str) -> str:
         ("waf", r'\bwaf\b|web.?security|modsecurity|web.?firewall|attacktype|ruleid|rulename'),
         ("vpn", r'\bvpn\b|sslvpn|openvpn|forticlient|zero.?trust|ztna|mfa'),
         ("edr", r'\bedr\b|\bxdr\b|hids|antivirus|endpoint|threatname|alertname|processname'),
-        ("bastion", r'bastion|jumpserver|jump.?host|堡垒|command|cmd|targethost|sessionid'),
         ("dns", r'\bdns\b|queryname|qname|fqdn|rcode'),
-        ("proxy", r'\bproxy\b|swg|上网行为|url|fullurl|web.?gateway'),
+        ("proxy", r'\bproxy\b|swg|上网行为|\burl\b|fullurl|web.?gateway'),
         ("firewall", r'firewall|\bfw\b|\bnat\b|session|srcport|dstport|dport|destinationport'),
+        ("bastion", r'bastion|jumpserver|jump.?host|堡垒|command.?audit|session.?audit'),
         ("app", r'application|spring|tomcat|appname|exception|stacktrace|traceid'),
     ]
     for kind, pattern in checks:
@@ -645,6 +685,7 @@ def _normalize_record(record: Dict[str, Any]) -> Dict[str, str]:
     return fields
 
 
+@lru_cache(maxsize=4096)
 def _norm_key(key: str) -> str:
     return re.sub(r'[^a-z0-9]', '', key.lower())
 
@@ -793,6 +834,10 @@ def _is_success(text: str) -> bool:
 
 def _is_block_action(text: str) -> bool:
     return bool(re.search(r'block|deny|drop|reject|reset|拦截|阻断|拒绝|丢弃', text or "", re.I))
+
+
+def _is_allow_action(text: str) -> bool:
+    return bool(re.search(r'allow|accept|permit|pass|forward|success|允许|放行|通过', text or "", re.I))
 
 
 def _int_field(fields: Dict[str, str], *names: str) -> int:

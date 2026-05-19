@@ -4,11 +4,11 @@ from __future__ import annotations
 import glob
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Iterable, List, Optional
 
 from ..allowlist import apply_allowlist, load_allowlist
-from ..config import load_thresholds, load_thresholds_from_env, set_thresholds
+from ..config import DEFAULT_THRESHOLDS, load_thresholds, load_thresholds_from_env, set_thresholds
 from ..detection import run_detection
 from ..detection.enrichment import enrich_events
 from ..models import AnalysisSummary, LogEvent, ParseResult
@@ -62,6 +62,7 @@ class AnalysisRunResult:
     parse_results: List[ParseResult]
     summary: AnalysisSummary
     suppressed_events: int = 0
+    parse_errors: List[str] = field(default_factory=list)
 
 
 def collect_files(paths: Iterable[str]) -> List[str]:
@@ -86,6 +87,7 @@ def parse_files(
     quiet: bool = False,
     print_fn: Optional[PrintFn] = None,
     rdp_only: bool = False,
+    errors_out: Optional[List[str]] = None,
 ) -> List[ParseResult]:
     parse_results: List[ParseResult] = []
     errors: List[str] = []
@@ -132,6 +134,8 @@ def parse_files(
         if quiet:
             raise AnalysisError(f"所有文件解析失败；请先处理解析错误：\n- {joined}")
         raise AnalysisError("所有文件解析失败；请先处理上方解析错误。")
+    if errors_out is not None:
+        errors_out.extend(errors)
     return parse_results
 
 
@@ -147,6 +151,7 @@ def run_analysis(
         raise AnalysisError("未找到任何日志文件")
 
     reset_counter()
+    parse_errors: List[str] = []
     parse_results = parse_files(
         files,
         options.jobs,
@@ -154,6 +159,7 @@ def run_analysis(
         quiet=quiet,
         print_fn=print_fn,
         rdp_only=options.rdp_only,
+        errors_out=parse_errors,
     )
     if not parse_results:
         raise AnalysisError("所有文件解析失败")
@@ -176,6 +182,7 @@ def run_analysis(
         parse_results=parse_results,
         summary=summary,
         suppressed_events=suppressed,
+        parse_errors=parse_errors,
     )
 
 
@@ -202,9 +209,10 @@ def _configure_runtime(options: AnalysisOptions) -> None:
     if options.syslog_year is not None:
         set_syslog_year(options.syslog_year)
 
-    set_thresholds(load_thresholds_from_env())
+    thresholds = load_thresholds_from_env(DEFAULT_THRESHOLDS)
     if options.config_path:
-        set_thresholds(load_thresholds(options.config_path))
+        thresholds = load_thresholds(options.config_path, base=thresholds)
+    set_thresholds(thresholds)
 
     rule_dirs: List[str] = []
     if os.environ.get("BLA_RULES_DIR"):
@@ -232,4 +240,5 @@ def _filter_rdp_only_result(result: ParseResult) -> ParseResult:
 
 
 def _has_remote_logon_source(event: LogEvent) -> bool:
-    return bool(event.details.get("source_ip") or event.ip)
+    logon_type = str(event.details.get("LogonType") or event.details.get("logon_type") or "").strip()
+    return logon_type == "10" and bool(event.details.get("source_ip") or event.ip)

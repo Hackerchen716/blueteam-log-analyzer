@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from functools import lru_cache
 from typing import Dict, Iterable, List
 from urllib.parse import urlparse
 
@@ -31,12 +32,13 @@ _WINDOWS_GROUP_EVENTS = {"4728", "4729", "4732", "4756"}
 def enrich_events(events: Iterable[LogEvent]) -> List[LogEvent]:
     """Add stable normalized/enriched fields to each event in-place."""
     enriched = list(events)
-    ip_counts = Counter(e.ip for e in enriched if e.ip)
-    account_counts = Counter(e.user for e in enriched if e.user)
-    asset_counts = Counter(e.host for e in enriched if e.host)
+    normalized_by_id = {event.id: _normalize_event(event) for event in enriched}
+    ip_counts = Counter(item.get("src_ip") for item in normalized_by_id.values() if item.get("src_ip"))
+    account_counts = Counter(item.get("account") for item in normalized_by_id.values() if item.get("account"))
+    asset_counts = Counter(item.get("asset") for item in normalized_by_id.values() if item.get("asset"))
 
     for event in enriched:
-        normalized = _normalize_event(event)
+        normalized = normalized_by_id[event.id]
         user_agent = str(event.details.get("user_agent") or "")
         scanner_tool = detect_scanner_tool(user_agent)
         event.details.update(normalized)
@@ -74,19 +76,29 @@ def enrich_events(events: Iterable[LogEvent]) -> List[LogEvent]:
 
 def _normalize_event(event: LogEvent) -> Dict[str, str]:
     details = event.details
+    normalized_details = _normalized_details(details)
     source_type = _source_type(event)
-    src_ip = event.ip or _first(details, "src_ip", "srcip", "sourceip", "clientip", "remoteaddr", "xff", "source_ip")
-    dst_ip = _first(details, "dst_ip", "dstip", "destip", "destinationip", "serverip", "targetip")
-    asset = event.host or dst_ip or _first(details, "asset", "target", "targethost", "host", "hostname", "server", "endpoint")
-    account = _normalized_account(event, details, source_type)
-    action = _first(details, "action", "result", "status", "outcome", "policyaction")
-    status = _first(details, "status", "statuscode", "responsecode", "result", "outcome")
-    url = _first(details, "url", "uri", "path", "decoded_path", "request", "fullurl")
-    command = _first(details, "command", "cmd", "commandline", "COMMAND", "ScriptBlockText", "Payload")
-    process = event.process or _first(details, "process", "processname", "image", "filename", "NewProcessName")
-    bytes_out = _first(details, "bytes_out", "bytesout", "sentbytes", "uploadbytes", "outbytes", "bytes")
-    session_id = _first(details, "session_id", "sessionid", "sid", "session")
-    trace_id = _first(details, "trace_id", "traceid", "requestid", "request_id")
+    src_ip = event.ip or _first_normalized(
+        normalized_details,
+        "src_ip", "srcip", "sourceip", "clientip", "remoteaddr", "xff", "source_ip",
+    )
+    dst_ip = _first_normalized(
+        normalized_details,
+        "dst_ip", "dstip", "destip", "destinationip", "serverip", "targetip",
+    )
+    asset = event.host or dst_ip or _first_normalized(
+        normalized_details,
+        "asset", "target", "targethost", "host", "hostname", "server", "endpoint",
+    )
+    account = _normalized_account(event, normalized_details, source_type)
+    action = _first_normalized(normalized_details, "action", "result", "status", "outcome", "policyaction")
+    status = _first_normalized(normalized_details, "status", "statuscode", "responsecode", "result", "outcome")
+    url = _first_normalized(normalized_details, "url", "uri", "path", "decoded_path", "request", "fullurl")
+    command = _first_normalized(normalized_details, "command", "cmd", "commandline", "COMMAND", "ScriptBlockText", "Payload")
+    process = event.process or _first_normalized(normalized_details, "process", "processname", "image", "filename", "NewProcessName")
+    bytes_out = _first_normalized(normalized_details, "bytes_out", "bytesout", "sentbytes", "uploadbytes", "outbytes", "bytes")
+    session_id = _first_normalized(normalized_details, "session_id", "sessionid", "sid", "session")
+    trace_id = _first_normalized(normalized_details, "trace_id", "traceid", "requestid", "request_id")
     return {
         "source_type": source_type,
         "src_ip": src_ip,
@@ -104,17 +116,17 @@ def _normalize_event(event: LogEvent) -> Dict[str, str]:
     }
 
 
-def _normalized_account(event: LogEvent, details: Dict[str, object], source_type: str) -> str:
+def _normalized_account(event: LogEvent, normalized_details: Dict[str, object], source_type: str) -> str:
     if source_type == "windows-event":
         if event.event_id in _WINDOWS_ACCOUNT_EVENTS:
-            return _first(details, "target_account", "target_user") or event.user or ""
+            return _first_normalized(normalized_details, "target_account", "target_user") or event.user or ""
         if event.event_id in _WINDOWS_GROUP_EVENTS:
-            return _first(details, "member_account", "member_name", "member_sid", "target_sid") or event.user or ""
+            return _first_normalized(normalized_details, "member_account", "member_name", "member_sid", "target_sid") or event.user or ""
         if event.event_id in {"4624", "4625", "4776"}:
-            account = _first(details, "account_name", "TargetUserName", "SubjectUserName")
-            domain = _first(details, "account_domain", "TargetDomainName", "SubjectDomainName")
+            account = _first_normalized(normalized_details, "account_name", "TargetUserName", "SubjectUserName")
+            domain = _first_normalized(normalized_details, "account_domain", "TargetDomainName", "SubjectDomainName")
             return f"{domain}\\{account}" if domain and account else account
-    return event.user or _first(details, "account", "user", "username", "operator", "actor", "principal")
+    return event.user or _first_normalized(normalized_details, "account", "user", "username", "operator", "actor", "principal")
 
 
 def _source_type(event: LogEvent) -> str:
@@ -142,7 +154,14 @@ def _source_type(event: LogEvent) -> str:
 
 
 def _first(details: Dict[str, object], *names: str) -> str:
-    normalized = {_norm_key(key): value for key, value in details.items()}
+    return _first_normalized(_normalized_details(details), *names)
+
+
+def _normalized_details(details: Dict[str, object]) -> Dict[str, object]:
+    return {_norm_key(str(key)): value for key, value in details.items()}
+
+
+def _first_normalized(normalized: Dict[str, object], *names: str) -> str:
     for name in names:
         value = normalized.get(_norm_key(name))
         if value not in (None, "", "-", "null", "None"):
@@ -150,6 +169,7 @@ def _first(details: Dict[str, object], *names: str) -> str:
     return ""
 
 
+@lru_cache(maxsize=4096)
 def _norm_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]", "", key.lower())
 

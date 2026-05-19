@@ -30,6 +30,12 @@ jobs:
       - name: Validate bundled rules
         run: python bla_cli.py validate-rules --strict-metadata
 
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pytest
+
+      - name: Run pytest regressions
+        run: python -m pytest -q
+
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
 
@@ -37,17 +43,12 @@ jobs:
         run: python bla_cli.py ssh --help
 
       - name: Smoke test on sample logs
-        # 样本日志包含故意构造的暴力破解 / Web 攻击，bla 命中严重告警时退出码为 1，
-        # 这是期望行为而不是 CI 失败。允许 0 或 1，其它退出码才视为故障。
         shell: bash
         run: |
-          set +e
-          python bla_cli.py sample_logs/auth.log --no-color --max-alerts 5
-          rc=$?; [ $rc -eq 0 ] || [ $rc -eq 1 ] || exit $rc
-          python bla_cli.py sample_logs/access.log --no-color --max-alerts 5
-          rc=$?; [ $rc -eq 0 ] || [ $rc -eq 1 ] || exit $rc
-          python bla_cli.py sample_logs/remote_ssh_auth.log --no-color --max-alerts 5
-          rc=$?; [ $rc -eq 0 ] || [ $rc -eq 1 ] || exit $rc
+          python bla_cli.py sample_logs/auth.log --no-color --max-alerts 5 --exit-on none
+          python bla_cli.py sample_logs/access.log --no-color --max-alerts 5 --exit-on none
+          python bla_cli.py sample_logs/remote_ssh_auth.log --no-color --max-alerts 5 --exit-on none
+          python bla_cli.py sample_logs/windows_rdp_sample.xml --rdp --no-color --max-alerts 5 --exit-on none
 
       - name: Build package
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'

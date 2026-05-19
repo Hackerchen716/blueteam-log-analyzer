@@ -8,11 +8,11 @@
     "P0-EXFIL-001",
     "WEB-LOG4SHELL-001"
   ],
-  "incident_count": 2,
+  "incident_count": 1,
   "top_incident": {
     "level": "critical",
     "confidence": "high",
-    "source_types": ["application", "dns", "edr", "proxy", "waf"],
-    "attack_phases": ["初始访问", "主机失陷", "命令控制"]
+    "source_types": ["application", "dns", "edr", "firewall", "proxy", "waf"],
+    "attack_phases": ["初始访问", "主机失陷", "命令控制", "数据外传"]
   }
 }

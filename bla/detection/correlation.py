@@ -1,8 +1,9 @@
 """Cross-source incident correlation for P0/HVV investigations."""
 from __future__ import annotations
 
+import datetime
 from collections import defaultdict
-from typing import Dict, Iterable, List, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from ..models import DetectionAlert, Incident, LogEvent, ThreatLevel, TimelineEntry
 
@@ -89,7 +90,7 @@ def correlate_incidents(events: Sequence[LogEvent], alerts: Sequence[DetectionAl
     incidents: List[Incident] = []
     used_event_sets: Set[Tuple[str, ...]] = set()
     alert_by_id = {alert.id: alert for alert in alerts}
-    for (_kind, _value), members in groups.items():
+    for members in _merged_group_members(groups.values()):
         group_events = [event_by_id[eid] for eid in sorted(members["events"]) if eid in event_by_id]
         group_alerts = [alert_by_id[aid] for aid in sorted(members["alerts"]) if aid in alert_by_id]
         if not _is_incident_candidate(group_events, group_alerts):
@@ -106,6 +107,27 @@ def correlate_incidents(events: Sequence[LogEvent], alerts: Sequence[DetectionAl
     for idx, incident in enumerate(incidents, 1):
         incident.id = f"inc-{idx:03d}"
     return incidents[:50]
+
+
+def _merged_group_members(groups: Iterable[Dict[str, Set[str]]]) -> List[Dict[str, Set[str]]]:
+    merged: List[Dict[str, Set[str]]] = []
+    for members in groups:
+        current = {
+            "alerts": set(members["alerts"]),
+            "events": set(members["events"]),
+        }
+        idx = 0
+        while idx < len(merged):
+            existing = merged[idx]
+            if current["alerts"] & existing["alerts"] or current["events"] & existing["events"]:
+                current["alerts"].update(existing["alerts"])
+                current["events"].update(existing["events"])
+                merged.pop(idx)
+                idx = 0
+                continue
+            idx += 1
+        merged.append(current)
+    return merged
 
 
 def _correlation_keys(events: Iterable[LogEvent]) -> List[Tuple[str, str]]:
@@ -279,7 +301,10 @@ def _focus_windows_chain_scope(
     focused = [
         event for event in events
         if event.id in chain_event_ids
-        or _event_matches_account(event, account_keys, sids)
+        or (
+            _event_matches_account(event, account_keys, sids)
+            and _event_within_chain_window(event, chain_events, window_seconds=15 * 60)
+        )
     ]
     focused_ids = {event.id for event in focused}
     focused_alerts = [
@@ -312,6 +337,27 @@ def _event_matches_account(event: LogEvent, account_keys: Set[str], sids: Set[st
         if value not in (None, "", "-")
     }
     return bool(event_sids & sids)
+
+
+def _event_within_chain_window(event: LogEvent, chain_events: Sequence[LogEvent], window_seconds: int) -> bool:
+    current = _event_datetime(event)
+    chain_times = [_event_datetime(item) for item in chain_events]
+    chain_times = [item for item in chain_times if item is not None]
+    if current is None or not chain_times:
+        return True
+    return min(chain_times) - datetime.timedelta(seconds=window_seconds) <= current <= max(chain_times) + datetime.timedelta(seconds=window_seconds)
+
+
+def _event_datetime(event: LogEvent) -> Optional[datetime.datetime]:
+    if not event.timestamp:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(event.timestamp.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
 
 
 def _account_key(value: object) -> str:

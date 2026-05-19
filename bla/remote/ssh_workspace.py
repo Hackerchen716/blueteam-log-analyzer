@@ -16,10 +16,17 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, List, Optional, Sequence
 
 from ..core import AnalysisError, AnalysisOptions, AnalysisOutputs, run_analysis, write_reports
+from ..models import ThreatLevel
 from ..output import print_terminal_report
 from ..parsers import list_parser_names
 
 PrintFn = Callable[..., None]
+
+_EXIT_THRESHOLDS = {
+    "critical": ThreatLevel.CRITICAL.score,
+    "high": ThreatLevel.HIGH.score,
+    "medium": ThreatLevel.MEDIUM.score,
+}
 
 
 @dataclass
@@ -173,7 +180,7 @@ class RemoteWorkspace:
         if command == "bla":
             return self._cmd_bla(args)
         if command == "collect":
-            self.print("collect linux/windows 会在后续 collector 里接上；当前原型先支持 bla 远程文件本地分析。")
+            self.print("collect 暂未开放；请使用 bla FILE 或 bla journalctl:UNIT 拉回远程日志并在本机分析。")
             return 0
 
         self.print(f"不支持远程任意命令: {command}。可用命令: help, ls, cd, pwd, find, tail, bla, exit")
@@ -246,7 +253,7 @@ class RemoteWorkspace:
         parser.add_argument("--sarif", metavar="FILE", help="本地 SARIF 报告")
         parser.add_argument("--profile", choices=("default", "cn-hvv"), default="default")
         parser.add_argument("--type", choices=["auto"] + list_parser_names(), default="auto")
-        parser.add_argument("--exit-on", choices=("none", "critical", "high", "medium"), default="none")
+        parser.add_argument("--exit-on", choices=("none", "critical", "high", "medium"), default="critical")
         parser.add_argument("--rules", action="append", metavar="DIR")
         parser.add_argument("--allowlist", metavar="FILE")
         parser.add_argument("--config", metavar="FILE")
@@ -259,6 +266,12 @@ class RemoteWorkspace:
             parsed = parser.parse_args(list(args))
         except SystemExit as e:
             return int(e.code or 0)
+        if parsed.max_alerts < 0:
+            self.print("--max-alerts 必须大于等于 0", file=sys.stderr)
+            return 2
+        if parsed.syslog_year is not None and not (1970 <= parsed.syslog_year <= 2100):
+            self.print("--syslog-year 必须在 1970 到 2100 之间", file=sys.stderr)
+            return 2
 
         with tempfile.TemporaryDirectory(prefix="bla-remote-") as tmp:
             local_paths = []
@@ -296,6 +309,12 @@ class RemoteWorkspace:
                 return 1
 
             self._annotate_remote_sources(run_result.parse_results, labels)
+            if run_result.parse_errors:
+                self.print(f"有 {len(run_result.parse_errors)} 个输入解析失败，已从本次分析结果中排除:", file=sys.stderr)
+                for item in run_result.parse_errors[:10]:
+                    self.print(f"  - {item}", file=sys.stderr)
+                if len(run_result.parse_errors) > 10:
+                    self.print(f"  ... 还有 {len(run_result.parse_errors) - 10} 个失败输入未展示", file=sys.stderr)
             self.print(f"\n解析完成，共 {run_result.summary.total_events} 条事件")
             self.print(f"检测完成，发现 {len(run_result.summary.alerts)} 个告警\n")
             print_terminal_report(
@@ -306,19 +325,23 @@ class RemoteWorkspace:
                 max_alerts=parsed.max_alerts,
                 full_evidence=parsed.full_evidence,
             )
-            write_reports(
-                run_result.parse_results,
-                run_result.summary,
-                AnalysisOutputs(
-                    html=parsed.html,
-                    json=parsed.json,
-                    csv=parsed.csv,
-                    ioc=parsed.ioc,
-                    sarif=parsed.sarif,
-                    bundle_dir=parsed.out,
-                ),
-            )
-        return 0
+            try:
+                write_reports(
+                    run_result.parse_results,
+                    run_result.summary,
+                    AnalysisOutputs(
+                        html=parsed.html,
+                        json=parsed.json,
+                        csv=parsed.csv,
+                        ioc=parsed.ioc,
+                        sarif=parsed.sarif,
+                        bundle_dir=parsed.out,
+                    ),
+                )
+            except OSError as e:
+                self.print(f"报告写入失败: {e}", file=sys.stderr)
+                return 1
+            return _exit_code_for_alerts(run_result.summary.alerts, parsed.exit_on)
 
     def _materialize_remote_source(self, remote_item: str, tmp: str) -> tuple[str, str]:
         if remote_item.startswith("journalctl:"):
@@ -376,7 +399,7 @@ class RemoteWorkspace:
                 "  find [PATH] [PATTERN]     查找远程日志文件，默认当前目录、最多 3 层",
                 "  tail FILE [N]             查看远程文件最后 N 行，默认 80",
                 "  bla FILE [--out DIR]      拉回远程文件并在本机分析",
-                "  bla FILE --rdp            拉回远程 Windows 日志并做 RDP/登录专项分析",
+                "  bla FILE --rdp            仅保留 LogonType=10 且带远程来源 IP 的 Windows 登录事件",
                 "  bla journalctl:ssh        拉回远程 journalctl 输出并在本机分析",
                 "  exit                      退出",
             ])
@@ -418,6 +441,13 @@ def _qp(value: str) -> str:
 
 def _remote_cd_command(cwd: str, command: str) -> str:
     return f"cd {_qp(cwd)} && {command}"
+
+
+def _exit_code_for_alerts(alerts, exit_on: str) -> int:
+    threshold = _EXIT_THRESHOLDS.get(exit_on)
+    if threshold is None:
+        return 0
+    return 1 if any(alert.level.score >= threshold for alert in alerts) else 0
 
 
 def _unique_path(directory: str, basename: str) -> str:

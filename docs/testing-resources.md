@@ -12,7 +12,7 @@
 - BLA 用法：
 
 ```bash
-pip install python-evtx
+pip install -U "blueteam-log-analyzer[evtx]"
 bla /path/to/EVTX-ATTACK-SAMPLES --html evtx_report.html --json evtx_report.json
 ```
 

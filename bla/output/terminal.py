@@ -3,6 +3,7 @@
 支持 macOS / Linux / Windows 10+ 终端 ANSI 颜色
 """
 from __future__ import annotations
+import re
 import sys
 from typing import List
 
@@ -30,6 +31,11 @@ BG_ORANGE = "\033[48;5;208m"
 BG_YELLOW = "\033[43m"
 BG_GREEN  = "\033[42m"
 BG_BLUE   = "\033[44m"
+
+_OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)", re.S)
+_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ESC_RE = re.compile(r"\x1b[ -/]*[@-~]")
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def _level_color(level: ThreatLevel) -> str:
@@ -65,7 +71,7 @@ def _fmt_top(items: list, key: str, limit: int = 3) -> str:
     ]
     if not filtered:
         return "-"
-    return ", ".join(f"{item.get(key, '?')}({item.get('count', 0)})" for item in filtered[:limit])
+    return ", ".join(f"{_safe_text(item.get(key, '?'))}({item.get('count', 0)})" for item in filtered[:limit])
 
 
 def _fmt_time(ts: str) -> str:
@@ -75,17 +81,26 @@ def _fmt_time(ts: str) -> str:
 def _truncate_text(text: str, max_len: int) -> str:
     if max_len <= 0:
         return ""
-    text = text or ""
+    text = _safe_text(text)
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
 
 
 def _evidence_text(text: str, full: bool, max_len: int = 220) -> str:
     """Terminal keeps summaries compact unless full evidence output is requested."""
+    text = _safe_text(text)
     return text if full else _truncate_text(text, max_len)
 
 
+def _safe_text(value: object) -> str:
+    text = str(value or "")
+    text = _OSC_RE.sub("", text)
+    text = _CSI_RE.sub("", text)
+    text = _ESC_RE.sub("", text)
+    return _CONTROL_RE.sub("", text)
+
+
 def _basename(path: str) -> str:
-    s = (path or "").replace("/", "\\")
+    s = _safe_text(path).replace("/", "\\")
     if "\\" in s:
         return s.rsplit("\\", 1)[-1]
     return s
@@ -101,15 +116,15 @@ def _event_sort_key(event: LogEvent) -> tuple:
 
 def _render_logon_event_detail(event: LogEvent, full_evidence: bool) -> List[str]:
     details = event.details
-    account = details.get("account_name") or event.user or "?"
-    domain = details.get("account_domain") or ""
+    account = _safe_text(details.get("account_name") or event.user or "?")
+    domain = _safe_text(details.get("account_domain") or "")
     principal = f"{domain}\\{account}" if domain else account
-    source_ip = details.get("source_ip") or event.ip or "-"
-    workstation = details.get("workstation") or "-"
-    logon_type = details.get("LogonType") or "?"
-    logon_label = details.get("logon_type_label") or "未知"
-    process = details.get("logon_process") or details.get("process_name") or "-"
-    auth_package = details.get("auth_package") or "-"
+    source_ip = _safe_text(details.get("source_ip") or event.ip or "-")
+    workstation = _safe_text(details.get("workstation") or "-")
+    logon_type = _safe_text(details.get("LogonType") or "?")
+    logon_label = _safe_text(details.get("logon_type_label") or "未知")
+    process = _safe_text(details.get("logon_process") or details.get("process_name") or "-")
+    auth_package = _safe_text(details.get("auth_package") or "-")
 
     lines = [
         (
@@ -123,9 +138,9 @@ def _render_logon_event_detail(event: LogEvent, full_evidence: bool) -> List[str
     ]
 
     if event.event_id == "4625":
-        reason = details.get("failure_reason") or "-"
-        status = details.get("status_code") or "-"
-        sub_status = details.get("sub_status_code") or "-"
+        reason = _safe_text(details.get("failure_reason") or "-")
+        status = _safe_text(details.get("status_code") or "-")
+        sub_status = _safe_text(details.get("sub_status_code") or "-")
         lines.append(
             f"          失败原因={_truncate_text(reason, 42)}  Status={status}  SubStatus={sub_status}"
         )
@@ -138,7 +153,7 @@ def _render_process_creation_event_detail(event: LogEvent, full_evidence: bool) 
     parent = _basename(parent_path) or "(unknown)"
     child = details.get("child_process") or _basename(details.get("child_path") or event.process or "") or "(unknown)"
     path = details.get("child_path") or event.process or "-"
-    cmd = details.get("command_line") or details.get("CommandLine") or "-"
+    cmd = _safe_text(details.get("command_line") or details.get("CommandLine") or "-")
     tags = []
     for tag in ("malware-indicator", "lolbin", "lsass-dump"):
         if tag in event.tags:
@@ -207,19 +222,19 @@ def print_terminal_report(
     out.write(_section("📁 文件解析结果"))
     for r in parse_results:
         size_kb = r.file_size_bytes / 1024
-        out.write(f"  {BOLD}{CYAN}{r.file_name}{RESET}  {DIM}({r.log_type}){RESET}\n")
+        out.write(f"  {BOLD}{CYAN}{_safe_text(r.file_name)}{RESET}  {DIM}({_safe_text(r.log_type)}){RESET}\n")
         out.write(f"    大小: {size_kb:.1f} KB  |  解析耗时: {r.parse_time_ms:.0f}ms  |  "
                   f"总事件: {r.stats.total}  |  "
                   f"{RED}严重:{r.stats.critical}{RESET}  {ORANGE}高:{r.stats.high}{RESET}  "
                   f"{YELLOW}中:{r.stats.medium}{RESET}\n")
         if r.stats.time_start:
-            out.write(f"    时间范围: {DIM}{_fmt_time(r.stats.time_start)}  ~  {_fmt_time(r.stats.time_end)}{RESET}\n")
+            out.write(f"    时间范围: {DIM}{_safe_text(_fmt_time(r.stats.time_start))}  ~  {_safe_text(_fmt_time(r.stats.time_end))}{RESET}\n")
         if r.stats.top_ips:
             top_ip = r.stats.top_ips[0]
-            out.write(f"    Top IP:   {WHITE}{top_ip['ip']}{RESET} ({top_ip['count']} 次)\n")
+            out.write(f"    Top IP:   {WHITE}{_safe_text(top_ip['ip'])}{RESET} ({top_ip['count']} 次)\n")
         elif r.stats.top_local_ips:
             top_local = r.stats.top_local_ips[0]
-            out.write(f"    Top IP:   {DIM}暂无有效远程源（本机/空来源 {top_local['ip']} {top_local['count']} 次）{RESET}\n")
+            out.write(f"    Top IP:   {DIM}暂无有效远程源（本机/空来源 {_safe_text(top_local['ip'])} {top_local['count']} 次）{RESET}\n")
         out.write("\n")
 
     has_windows_logon = any(r.stats.windows_logon_stats for r in parse_results)
@@ -229,7 +244,7 @@ def print_terminal_report(
         for r in parse_results:
             if not r.stats.windows_logon_stats and not r.stats.windows_process_creation_stats:
                 continue
-            out.write(f"  {BOLD}{CYAN}{r.file_name}{RESET}  {DIM}({r.log_type}){RESET}\n")
+            out.write(f"  {BOLD}{CYAN}{_safe_text(r.file_name)}{RESET}  {DIM}({_safe_text(r.log_type)}){RESET}\n")
 
             if r.stats.windows_logon_stats:
                 win_stats = r.stats.windows_logon_stats
@@ -242,12 +257,12 @@ def print_terminal_report(
                     event_stats = win_stats.get("events", {}).get(event_id)
                     if not event_stats:
                         continue
-                    out.write(f"      {DIM}EID {event_id}{RESET}  {BOLD}{event_stats.get('event_name', '')}{RESET}  (总计 {event_stats.get('total', 0)})\n")
+                    out.write(f"      {DIM}EID {event_id}{RESET}  {BOLD}{_safe_text(event_stats.get('event_name', ''))}{RESET}  (总计 {event_stats.get('total', 0)})\n")
                     out.write(f"        Top账户:     {_fmt_top(event_stats.get('principals', []), 'principal', 5)}\n")
                     out.write(f"        Top源IP:     {_fmt_top(event_stats.get('source_ips', []), 'source_ip', 5)}\n")
                     logon_types = event_stats.get("logon_types", [])[:5]
                     logon_type_text = ", ".join(
-                        f"{item.get('logon_type', '?')}:{item.get('label', '未知')}({item.get('count', 0)})"
+                        f"{_safe_text(item.get('logon_type', '?'))}:{_safe_text(item.get('label', '未知'))}({item.get('count', 0)})"
                         for item in logon_types
                     ) if logon_types else "-"
                     out.write(f"        登录类型:    {logon_type_text}\n")
@@ -328,7 +343,7 @@ def print_terminal_report(
             if phase in active_phases:
                 c = active_phases[phase]
                 color = _level_color(c.level)
-                techs = ", ".join(c.techniques[:3])
+                techs = ", ".join(_safe_text(item) for item in c.techniques[:3])
                 out.write(f"  {BOLD}{color}▶ {phase}{RESET}  ({c.event_count} 个事件)  {DIM}{techs}{RESET}\n")
                 if i < len(chain_labels) - 1 and chain_labels[i+1] in active_phases:
                     out.write(f"    {GRAY}│{RESET}\n")
@@ -340,21 +355,22 @@ def print_terminal_report(
         out.write(_section("🧩 应急案件视图"))
         for i, incident in enumerate(summary.incidents[:10], 1):
             color = _level_color(incident.level)
-            out.write(f"\n  {BOLD}[INC-{i:02d}] {_level_badge(incident.level)} {color}{incident.title}{RESET}\n")
-            out.write(f"       {incident.description}\n")
-            out.write(f"       {DIM}置信度: {incident.confidence}  |  日志源: {', '.join(incident.source_types[:6]) or '?'}  |  事件: {len(incident.affected_events)}{RESET}\n")
+            out.write(f"\n  {BOLD}[INC-{i:02d}] {_level_badge(incident.level)} {color}{_safe_text(incident.title)}{RESET}\n")
+            out.write(f"       {_safe_text(incident.description)}\n")
+            source_types = ", ".join(_safe_text(item) for item in incident.source_types[:6]) or "?"
+            out.write(f"       {DIM}置信度: {_safe_text(incident.confidence)}  |  日志源: {source_types}  |  事件: {len(incident.affected_events)}{RESET}\n")
             if incident.evidence:
                 out.write(f"       {GRAY}关键证据:{RESET}\n")
                 for item in incident.evidence[:4]:
-                    out.write(f"         • {item}\n")
+                    out.write(f"         • {_evidence_text(item, full_evidence)}\n")
             if incident.timeline:
                 out.write(f"       {GRAY}攻击路径还原:{RESET}\n")
                 for step, item in enumerate(incident.timeline[:15], 1):
-                    out.write(f"         {step}. {_fmt_time(item.timestamp)}  {item.message}\n")
+                    out.write(f"         {step}. {_safe_text(_fmt_time(item.timestamp))}  {_evidence_text(item.message, full_evidence)}\n")
             if incident.next_logs:
-                out.write(f"       {CYAN}建议补采: {', '.join(incident.next_logs[:5])}{RESET}\n")
+                out.write(f"       {CYAN}建议补采: {', '.join(_safe_text(item) for item in incident.next_logs[:5])}{RESET}\n")
             if incident.recommended_actions:
-                out.write(f"       {YELLOW}处置动作: {incident.recommended_actions[0]}{RESET}\n")
+                out.write(f"       {YELLOW}处置动作: {_safe_text(incident.recommended_actions[0])}{RESET}\n")
             out.write(f"  {_hr('─', 76)}\n")
 
     # ── 告警详情 ──────────────────────────────────────────
@@ -368,10 +384,10 @@ def print_terminal_report(
         for i, alert in enumerate(shown_alerts, 1):
             color = _level_color(alert.level)
             badge = _level_badge(alert.level)
-            out.write(f"\n  {BOLD}[{i:02d}] {badge} {color}{alert.rule_name}{RESET}\n")
-            out.write(f"       {alert.description}\n")
-            out.write(f"       {DIM}MITRE: {alert.mitre_attack}  |  阶段: {alert.mitre_phase}  |  "
-                      f"置信度: {alert.confidence}  |  时间: {_fmt_time(alert.timestamp)}{RESET}\n")
+            out.write(f"\n  {BOLD}[{i:02d}] {badge} {color}{_safe_text(alert.rule_name)}{RESET}\n")
+            out.write(f"       {_safe_text(alert.description)}\n")
+            out.write(f"       {DIM}MITRE: {_safe_text(alert.mitre_attack)}  |  阶段: {_safe_text(alert.mitre_phase)}  |  "
+                      f"置信度: {_safe_text(alert.confidence)}  |  时间: {_safe_text(_fmt_time(alert.timestamp))}{RESET}\n")
             out.write(f"       {GRAY}证据:{RESET}\n")
             evidence_items = alert.evidence if full_evidence else alert.evidence[:3]
             for ev in evidence_items:
@@ -391,34 +407,32 @@ def print_terminal_report(
                     referer = event.details.get("referer", "")
                     scanner_tool = event.details.get("scanner_tool", "")
                     if scanner_tool:
-                        out.write(f"         - 扫描工具: {scanner_tool}\n")
+                        out.write(f"         - 扫描工具: {_safe_text(scanner_tool)}\n")
                     if method or path or status:
-                        out.write(f"         - 请求: {method} {path} -> {status}\n")
+                        out.write(f"         - 请求: {_safe_text(method)} {_evidence_text(path, full_evidence)} -> {_safe_text(status)}\n")
                     if ua:
-                        out.write(f"           User-Agent: {ua}\n")
+                        out.write(f"           User-Agent: {_evidence_text(ua, full_evidence)}\n")
                     if referer:
-                        out.write(f"           Referer: {referer}\n")
+                        out.write(f"           Referer: {_evidence_text(referer, full_evidence)}\n")
                     if event.raw_line:
-                        out.write(f"           原始日志: {event.raw_line}\n")
-            out.write(f"       {YELLOW}建议: {alert.recommendation}{RESET}\n")
+                        out.write(f"           原始日志: {_evidence_text(event.raw_line, full_evidence)}\n")
+            out.write(f"       {YELLOW}建议: {_safe_text(alert.recommendation)}{RESET}\n")
             out.write(f"  {_hr('─', 76)}\n")
 
-    # ── 时间线（按风险/时间排序的 Top 20 事件）─────────────
-    # _build_timeline 已按 (-level.score, -timestamp) 排序，所以取前 20
-    # 实际是"风险最高/最新的 20 条"，标题随排序语义同步。
+    # ── 时间线（按发生时间排序的 Top 20 事件）─────────────
     if summary.timeline:
-        out.write(_section("📅 关键事件时间线 Top 20（按风险/时间）"))
+        out.write(_section("📅 关键事件时间线 Top 20（按时间）"))
         for entry in summary.timeline[:20]:
             color = _level_color(entry.level)
             badge = _level_badge(entry.level)
-            mitre = f" {DIM}[{entry.mitre_attack}]{RESET}" if entry.mitre_attack else ""
+            mitre = f" {DIM}[{_safe_text(entry.mitre_attack)}]{RESET}" if entry.mitre_attack else ""
             message = _evidence_text(entry.message, full_evidence, 180)
-            out.write(f"  {DIM}{_fmt_time(entry.timestamp)}{RESET}  {badge}  {color}{message}{RESET}{mitre}\n")
+            out.write(f"  {DIM}{_safe_text(_fmt_time(entry.timestamp))}{RESET}  {badge}  {color}{message}{RESET}{mitre}\n")
 
     # ── 应急处置建议 ──────────────────────────────────────
     out.write(_section("💡 应急处置建议"))
     for i, rec in enumerate(summary.recommendations, 1):
-        out.write(f"  {BOLD}{i}.{RESET} {rec}\n")
+        out.write(f"  {BOLD}{i}.{RESET} {_safe_text(rec)}\n")
 
     # ── Top IP ────────────────────────────────────────────
     all_ips: dict = {}
@@ -437,13 +451,13 @@ def print_terminal_report(
             sorted_ips = sorted(all_ips.items(), key=lambda x: x[1], reverse=True)[:10]
             for ip, count in sorted_ips:
                 bar = "█" * min(count // 5, 30)
-                out.write(f"  {WHITE}{ip:<20}{RESET}  {RED}{bar}{RESET} {count}\n")
+                out.write(f"  {WHITE}{_safe_text(ip):<20}{RESET}  {RED}{bar}{RESET} {count}\n")
         else:
             out.write(f"  {DIM}有效远程源 IP: 暂无{RESET}\n")
         if local_ips:
             out.write(f"  {DIM}本机/空来源:{RESET}\n")
             for ip, count in sorted(local_ips.items(), key=lambda x: x[1], reverse=True)[:5]:
-                out.write(f"  {DIM}{ip:<20} {count}{RESET}\n")
+                out.write(f"  {DIM}{_safe_text(ip):<20} {count}{RESET}\n")
 
     # ── 详细事件（verbose 模式）──────────────────────────
     if verbose:
@@ -454,11 +468,11 @@ def print_terminal_report(
         all_events.sort(key=lambda e: e.timestamp)
         for ev in all_events[:100]:
             color = _level_color(ev.level)
-            out.write(f"  {DIM}{ev.timestamp}{RESET}  {_level_badge(ev.level)}  "
-                      f"{color}{ev.message}{RESET}\n")
+            out.write(f"  {DIM}{_safe_text(ev.timestamp)}{RESET}  {_level_badge(ev.level)}  "
+                      f"{color}{_safe_text(ev.message)}{RESET}\n")
             if ev.details:
                 for k, v in list(ev.details.items())[:3]:
-                    out.write(f"    {DIM}{k}: {v}{RESET}\n")
+                    out.write(f"    {DIM}{_safe_text(k)}: {_safe_text(v)}{RESET}\n")
 
     out.write(f"\n{BOLD}{BLUE}{'═'*80}{RESET}\n")
     out.write(f"{BOLD}  分析完成。如需详细报告请使用 --html / --json / --csv 参数。{RESET}\n")

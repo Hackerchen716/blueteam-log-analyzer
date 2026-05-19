@@ -9,7 +9,7 @@
     <EventData>
       <Data Name="TargetUserName">administrator</Data>
       <Data Name="TargetDomainName">CORP</Data>
-      <Data Name="IpAddress">8.8.8.8</Data>
+      <Data Name="IpAddress">203.0.113.8</Data>
       <Data Name="WorkstationName">ATTACKER</Data>
       <Data Name="LogonType">3</Data>
       <Data Name="FailureReason">Unknown user name or bad password.</Data>
@@ -41,7 +41,7 @@
     <EventData>
       <Data Name="TargetUserName">administrator</Data>
       <Data Name="TargetDomainName">CORP</Data>
-      <Data Name="IpAddress">8.8.8.8</Data>
+      <Data Name="IpAddress">203.0.113.8</Data>
       <Data Name="WorkstationName">ATTACKER</Data>
       <Data Name="LogonType">10</Data>
       <Data Name="AuthenticationPackageName">NTLM</Data>

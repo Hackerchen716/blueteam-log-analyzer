@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 import datetime
+import hashlib
 import re
 from collections import defaultdict
 from typing import List, Dict, Optional, Set, Tuple
@@ -84,6 +85,7 @@ def detect_brute_force(events: List[LogEvent]) -> List[DetectionAlert]:
         if any(t in ev.tags for t in ("failed-login", "failed-logon")) and ev.ip:
             failed_by_ip[ev.ip].append(ev)
     for ip, evts in failed_by_ip.items():
+        evts = _best_time_window(evts, config.THRESHOLDS.brute_force_window_minutes)
         n = len(evts)
         if n < config.THRESHOLDS.brute_force_min:
             continue
@@ -96,6 +98,7 @@ def detect_brute_force(events: List[LogEvent]) -> List[DetectionAlert]:
         users = sorted(set(e.user for e in evts if e.user))
         ts_sorted = sorted(evts, key=lambda e: e.timestamp)
         evidence = [f"攻击源IP: {ip}", f"失败次数: {n}", f"目标账户数: {len(users)}",
+                    f"统计窗口: {config.THRESHOLDS.brute_force_window_minutes} 分钟内",
                     f"时间: {ts_sorted[0].timestamp} ~ {ts_sorted[-1].timestamp}"]
         confidence = _adjust_for_private_ip(
             ip, "high" if n >= config.THRESHOLDS.brute_force_high else "medium", evidence
@@ -119,6 +122,7 @@ def detect_password_spray(events: List[LogEvent]) -> List[DetectionAlert]:
         if any(t in ev.tags for t in ("failed-login", "failed-logon")) and ev.ip and ev.user:
             failed_by_ip[ev.ip].append(ev)
     for ip, evts in failed_by_ip.items():
+        evts = _best_spray_window(evts, config.THRESHOLDS.spray_window_minutes)
         unique_users = set(e.user for e in evts if e.user)
         if len(unique_users) < config.THRESHOLDS.spray_min_unique_users:
             continue
@@ -126,6 +130,7 @@ def detect_password_spray(events: List[LogEvent]) -> List[DetectionAlert]:
         if avg > config.THRESHOLDS.spray_max_avg_per_user:
             continue
         evidence = [f"攻击源IP: {ip}", f"目标账户数: {len(unique_users)}", f"总尝试: {len(evts)}",
+                    f"统计窗口: {config.THRESHOLDS.spray_window_minutes} 分钟内",
                     f"目标: {', '.join(list(unique_users)[:5])}"]
         confidence = _adjust_for_private_ip(ip, "high", evidence)
         alerts.append(DetectionAlert(
@@ -501,7 +506,7 @@ def detect_web_attacks(events: List[LogEvent]) -> List[DetectionAlert]:
             level = ThreatLevel.HIGH
         ips = sorted(set(e.ip for e in evts if e.ip))
         event_rule_ids = sorted(set(e.rule_id for e in evts if e.rule_id))
-        alert_rule_id = event_rule_ids[0] if len(event_rule_ids) == 1 else f"WEB-{attack_type[:4].upper()}"
+        alert_rule_id = event_rule_ids[0] if len(event_rule_ids) == 1 else _fallback_web_rule_id(attack_type)
         remediation = next((str(e.details.get("rule_remediation")) for e in evts if e.details.get("rule_remediation")), "")
         confidence_hint = next((str(e.details.get("rule_confidence")) for e in evts if e.details.get("rule_confidence")), "")
         fp_hints = next((str(e.details.get("rule_false_positive_hints")) for e in evts if e.details.get("rule_false_positive_hints")), "")
@@ -603,18 +608,24 @@ def detect_cn_hvv(events: List[LogEvent]) -> List[DetectionAlert]:
 
     for ip, successes in success_by_ip.items():
         failures = failed_by_ip.get(ip, [])
-        if len(failures) < 5:
+        failures, matched_successes = _failures_before_success(
+            failures,
+            successes,
+            config.THRESHOLDS.success_after_failure_window_minutes,
+        )
+        if len(failures) < 5 or not matched_successes:
             continue
-        evts = failures + successes
+        evts = failures + matched_successes
         alerts.append(DetectionAlert(
             id="a"+gen_id("hs"), rule_id="CN-HVV-002", rule_name="爆破后成功登录",
-            description=f"来源 {ip} 在 {len(failures)} 次失败登录后出现 {len(successes)} 次成功登录",
+            description=f"来源 {ip} 在 {len(failures)} 次失败登录后出现 {len(matched_successes)} 次成功登录",
             level=ThreatLevel.CRITICAL, category="护网画像",
             mitre_attack="T1078", mitre_phase="初始访问",
             affected_events=[e.id for e in evts],
             evidence=[
                 f"失败次数: {len(failures)}",
-                f"成功账户: {', '.join(sorted(set(e.user for e in successes if e.user))[:5]) or '?'}",
+                f"成功账户: {', '.join(sorted(set(e.user for e in matched_successes if e.user))[:5]) or '?'}",
+                f"成功窗口: 最后一次失败后 {config.THRESHOLDS.success_after_failure_window_minutes} 分钟内",
                 f"时间: {min(e.timestamp for e in evts)} ~ {max(e.timestamp for e in evts)}",
             ],
             recommendation="立即核查成功登录账户、登录源和后续操作，必要时冻结账户并重置凭据",
@@ -696,9 +707,8 @@ def _append_p0_alert(
     evts = [e for e in events if predicate(e)]
     if not evts:
         return
-    max_level = max((e.level for e in evts), key=lambda lvl: lvl.score)
-    if max_level.score < ThreatLevel.HIGH.score:
-        max_level = ThreatLevel.HIGH
+    actual_max_level = max((e.level for e in evts), key=lambda lvl: lvl.score)
+    max_level = actual_max_level if actual_max_level.score >= ThreatLevel.HIGH.score else ThreatLevel.HIGH
     ips = sorted(set(e.ip for e in evts if e.ip))
     hosts = sorted(set(e.host for e in evts if e.host))
     evidence = [
@@ -720,7 +730,7 @@ def _append_p0_alert(
         evidence=evidence,
         recommendation=recommendation,
         timestamp=max(e.timestamp for e in evts),
-        confidence="high" if max_level.score >= ThreatLevel.HIGH.score else "medium",
+        confidence="high" if actual_max_level.score >= ThreatLevel.HIGH.score else "medium",
     ))
 
 
@@ -824,6 +834,75 @@ def _seconds_between(first: LogEvent, second: LogEvent) -> Optional[float]:
     return (right - left).total_seconds()
 
 
+def _best_time_window(events: List[LogEvent], window_minutes: int) -> List[LogEvent]:
+    timed = sorted(
+        ((dt, event) for event in events if (dt := _event_datetime(event)) is not None),
+        key=lambda item: (item[0], item[1].id),
+    )
+    if not timed:
+        return list(events)
+    window_seconds = max(0, window_minutes) * 60
+    best_left = best_right = 0
+    left = 0
+    for right, (right_time, _event) in enumerate(timed):
+        while left <= right and (right_time - timed[left][0]).total_seconds() > window_seconds:
+            left += 1
+        if right - left > best_right - best_left:
+            best_left, best_right = left, right
+    return [event for _dt, event in timed[best_left:best_right + 1]]
+
+
+def _best_spray_window(events: List[LogEvent], window_minutes: int) -> List[LogEvent]:
+    timed = sorted(
+        ((dt, event) for event in events if (dt := _event_datetime(event)) is not None),
+        key=lambda item: (item[0], item[1].id),
+    )
+    if not timed:
+        return list(events)
+    window_seconds = max(0, window_minutes) * 60
+    best_left = best_right = 0
+    best_score = (-1, -1)
+    left = 0
+    for right, (right_time, _event) in enumerate(timed):
+        while left <= right and (right_time - timed[left][0]).total_seconds() > window_seconds:
+            left += 1
+        candidate = [event for _dt, event in timed[left:right + 1]]
+        score = (len({event.user for event in candidate if event.user}), len(candidate))
+        if score > best_score:
+            best_score = score
+            best_left, best_right = left, right
+    return [event for _dt, event in timed[best_left:best_right + 1]]
+
+
+def _failures_before_success(
+    failures: List[LogEvent],
+    successes: List[LogEvent],
+    window_minutes: int,
+) -> Tuple[List[LogEvent], List[LogEvent]]:
+    timed_failures = sorted(
+        ((dt, event) for event in failures if (dt := _event_datetime(event)) is not None),
+        key=lambda item: (item[0], item[1].id),
+    )
+    timed_successes = sorted(
+        ((dt, event) for event in successes if (dt := _event_datetime(event)) is not None),
+        key=lambda item: (item[0], item[1].id),
+    )
+    if not timed_failures or not timed_successes:
+        return [], []
+    window_seconds = max(0, window_minutes) * 60
+    best_failures: List[LogEvent] = []
+    best_success: Optional[LogEvent] = None
+    for success_time, success in timed_successes:
+        window_failures = [
+            event for failure_time, event in timed_failures
+            if 0 <= (success_time - failure_time).total_seconds() <= window_seconds
+        ]
+        if len(window_failures) > len(best_failures):
+            best_failures = window_failures
+            best_success = success
+    return best_failures, [best_success] if best_success is not None else []
+
+
 def _event_datetime(event: LogEvent) -> Optional[datetime.datetime]:
     value = event.timestamp
     if not value:
@@ -858,18 +937,26 @@ def _build_timeline(events: List[LogEvent]) -> List[TimelineEntry]:
     significant = [e for e in events if e.level.score >= ThreatLevel.MEDIUM.score or e.mitre_attack]
     def ts_epoch(ts: str) -> float:
         if not ts:
-            return 0.0
+            return float("inf")
         s = ts.replace("Z", "+00:00")
         try:
             return datetime.datetime.fromisoformat(s).timestamp()
         except Exception:
-            return 0.0
+            return float("inf")
 
-    significant.sort(key=lambda e: (-e.level.score, -ts_epoch(e.timestamp), e.id))
+    significant.sort(key=lambda e: (ts_epoch(e.timestamp), -e.level.score, e.id))
     return [TimelineEntry(timestamp=e.timestamp, level=e.level, category=e.category,
                           message=e.message, event_id=e.id, source_file=e.source_file,
                           mitre_attack=e.mitre_attack)
             for e in significant[:config.THRESHOLDS.timeline_max_items]]
+
+
+def _fallback_web_rule_id(attack_type: str) -> str:
+    slug = re.sub(r"[^A-Z0-9]+", "-", (attack_type or "UNKNOWN").upper()).strip("-")
+    if slug:
+        return f"WEB-{slug[:24]}"
+    digest = hashlib.sha1((attack_type or "unknown").encode("utf-8")).hexdigest()[:8].upper()
+    return f"WEB-{digest}"
 
 
 def _build_attack_chain(events: List[LogEvent], alerts: List[DetectionAlert]) -> List[AttackChainEntry]:

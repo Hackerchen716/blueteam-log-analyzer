@@ -157,8 +157,19 @@ def _can_parse_p0_security(context: ParserContext) -> bool:
 
 def _parse_p0_content(context: ParserContext) -> ParseResult:
     content = context.content or ""
-    if content.lstrip().startswith("["):
+    stripped = content.lstrip()
+    if stripped.startswith("["):
         return parse_p0_security_json(content, context.source_name, context.file_size_bytes)
+    if stripped.startswith("{"):
+        parsed = parse_p0_security_json(content, context.source_name, context.file_size_bytes)
+        if parsed.stats.parse_errors == 0:
+            return parsed
+        fallback = parse_p0_security_lines(
+            content.splitlines(),
+            context.source_name,
+            file_size_bytes=context.file_size_bytes,
+        )
+        return fallback if fallback.events else parsed
     return parse_p0_security_lines(
         content.splitlines(),
         context.source_name,

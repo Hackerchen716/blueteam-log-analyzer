@@ -586,4 +586,4 @@ function filterAlerts() {{
         f.write(html)
 
     safe_print(f"  [✓] HTML 报告已保存: {output_path}")
-    safe_print(f"      用浏览器打开: open {output_path}")
+    safe_print(f"      请用浏览器打开该文件: {output_path}")

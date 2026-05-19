@@ -1,6 +1,7 @@
 """IOC 提取工具"""
 from __future__ import annotations
 
+import ipaddress
 import re
 from typing import Dict, Iterable, List, Optional, Set
 from urllib.parse import urlparse
@@ -22,10 +23,11 @@ _FILE_EXTENSIONS_AS_TLD = {
     "conf", "config", "bak", "zip", "tar", "gz", "xml", "json", "yml", "yaml",
 }
 # 公共路径前缀，单纯访问这些不算"可操作 IOC"，过滤掉避免污染封禁清单
-_BORING_PATH_PREFIXES = (
-    "/", "/index", "/login", "/health", "/healthz", "/ping", "/favicon.ico",
-    "/robots.txt", "/static", "/public", "/assets",
-)
+_BORING_PATH_EXACT = {
+    "/", "/index", "/index.html", "/login", "/health", "/healthz", "/ping",
+    "/favicon.ico", "/robots.txt", "/static", "/public", "/assets",
+}
+_BORING_PATH_PREFIXES = ("/static/", "/public/", "/assets/")
 # 匹配这些前缀的私有 / 系统路径才视为有意义的 IOC
 _INTERESTING_PATH_HINTS = (
     "/etc/", "/var/", "/proc/", "/root/", "/home/", "/tmp/", "/dev/shm",
@@ -55,7 +57,7 @@ def extract_iocs(
     found: Dict[str, Set[str]] = {key: set() for key in IOC_TYPES}
 
     for ev in events:
-        if ev.ip:
+        if ev.ip and _looks_like_ip(ev.ip):
             found["ips"].add(ev.ip)
         if ev.user:
             found["users"].add(ev.user)
@@ -113,7 +115,8 @@ def _extract_from_text(text: str, found: Dict[str, Set[str]]) -> None:
             found["domains"].add(domain.lower().rstrip("."))
 
     for ip in _IP_RE.findall(text):
-        found["ips"].add(ip)
+        if _looks_like_ip(ip):
+            found["ips"].add(ip)
 
     for value in _HASH_RE.findall(text):
         found["hashes"].add(value.lower())
@@ -138,7 +141,9 @@ def _is_interesting_path(path: str) -> bool:
     lower = path.lower()
     if any(hint in lower for hint in _INTERESTING_PATH_HINTS):
         return True
-    if lower in _BORING_PATH_PREFIXES:
+    if lower in _BORING_PATH_EXACT:
+        return False
+    if any(lower.startswith(prefix) for prefix in _BORING_PATH_PREFIXES):
         return False
     return True
 
@@ -154,7 +159,13 @@ def _extract_command(ev: LogEvent) -> str:
 
 
 def _looks_like_ip(value: str) -> bool:
-    return bool(_IP_RE.fullmatch(value))
+    if not _IP_RE.fullmatch(value or ""):
+        return False
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _looks_like_domain(value: str) -> bool:

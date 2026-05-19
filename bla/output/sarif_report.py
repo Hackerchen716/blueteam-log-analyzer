@@ -13,6 +13,7 @@ SARIF "result"，这样用户可以：
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List
 
 from ..__version__ import __version__
@@ -53,6 +54,7 @@ def _build_rule(alert: DetectionAlert) -> Dict[str, Any]:
 
 
 def _build_result(alert: DetectionAlert, source_file: str) -> Dict[str, Any]:
+    uri = _artifact_uri(source_file)
     return {
         "ruleId": alert.rule_id,
         "level": _LEVEL_MAP.get(alert.level, "warning"),
@@ -62,7 +64,7 @@ def _build_result(alert: DetectionAlert, source_file: str) -> Dict[str, Any]:
         "locations": [
             {
                 "physicalLocation": {
-                    "artifactLocation": {"uri": source_file},
+                    "artifactLocation": {"uri": uri},
                 }
             }
         ],
@@ -72,8 +74,21 @@ def _build_result(alert: DetectionAlert, source_file: str) -> Dict[str, Any]:
             "affected_events": alert.affected_events,
             "affected_event_count": len(alert.affected_events),
             "timestamp": alert.timestamp,
+            "original_source_file": source_file,
         },
     }
+
+
+def _artifact_uri(source_file: str) -> str:
+    source = str(source_file or "<merged>")
+    if re.match(r"^[A-Za-z0-9_.-]+:", source) and "://" not in source:
+        host, rest = source.split(":", 1)
+        rest = rest.replace("\\", "/")
+        if rest.startswith("journalctl:"):
+            return f"remote/{host}/journalctl/{rest.split(':', 1)[1]}"
+        if rest.startswith("/"):
+            return f"remote/{host}{rest}"
+    return source.replace("\\", "/")
 
 
 def generate_sarif_report(

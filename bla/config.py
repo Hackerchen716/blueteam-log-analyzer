@@ -26,10 +26,13 @@ class Thresholds:
     brute_force_min: int = 5      # 触发告警的最小失败次数
     brute_force_high: int = 20    # 升级到 HIGH 的失败次数
     brute_force_critical: int = 50  # 升级到 CRITICAL 的失败次数
+    brute_force_window_minutes: int = 15
 
     # ── 密码喷洒 ────────────────────────────────────────────────
     spray_min_unique_users: int = 5
     spray_max_avg_per_user: float = 3.0
+    spray_window_minutes: int = 15
+    success_after_failure_window_minutes: int = 60
 
     # ── Web 流量异常（基于分钟桶）────────────────────────────────
     ddos_peak_per_minute: int = 300   # 单分钟峰值（约 5 req/s）
@@ -53,19 +56,20 @@ class Thresholds:
 
 
 # 单例：默认值。CLI / 测试可通过 ``override`` 临时替换部分字段。
-THRESHOLDS = Thresholds()
+DEFAULT_THRESHOLDS = Thresholds()
+THRESHOLDS = DEFAULT_THRESHOLDS
 
 
-def load_thresholds(path: str) -> Thresholds:
+def load_thresholds(path: str, base: Thresholds = DEFAULT_THRESHOLDS) -> Thresholds:
     """从 JSON 文件加载阈值，未指定的字段保留默认值。"""
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
     if not isinstance(raw, dict):
         raise ValueError("thresholds 文件必须是 JSON 对象")
-    return _merge(THRESHOLDS, raw)
+    return _merge(base, raw)
 
 
-def load_thresholds_from_env() -> Thresholds:
+def load_thresholds_from_env(base: Thresholds = DEFAULT_THRESHOLDS) -> Thresholds:
     """读取 ``BLA_THRESHOLD_*`` 环境变量覆盖默认值。
 
     例：``BLA_THRESHOLD_BRUTE_FORCE_HIGH=10`` 把 brute_force_high 改成 10。
@@ -79,7 +83,7 @@ def load_thresholds_from_env() -> Thresholds:
         attr = key[len(prefix):].lower()
         if attr in field_names:
             overrides[attr] = value
-    return _merge(THRESHOLDS, overrides)
+    return _merge(base, overrides)
 
 
 def _merge(base: Thresholds, overrides: Dict[str, Any]) -> Thresholds:

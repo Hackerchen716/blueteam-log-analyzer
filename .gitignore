@@ -42,8 +42,15 @@ Thumbs.db
 !docs/allowlist-example.json
 !tests/fixtures/**/*.json
 *.csv
+*.sarif
+iocs.txt
+report/
 case-*/
 !sample_logs/
+.coverage
+htmlcov/
+.pytest_cache/
+.ruff_cache/
 
 # Logs
 *.log

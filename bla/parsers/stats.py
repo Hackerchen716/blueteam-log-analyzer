@@ -31,7 +31,11 @@ def compute_stats(events: List[LogEvent]) -> ParseStats:
         for tag in ev.tags:
             if tag in ("sqli","xss","rce","lfi","rfi","brute-force",
                        "path-traversal","webshell","scanning","ddos",
-                       "injection","command-injection","lolbin","malware-indicator"):
+                       "injection","command-injection","lolbin","malware-indicator",
+                       "c2","dns-tunnel","dga","exfiltration","bastion-command",
+                       "edr","lsass-dump","malicious-domain","malicious-url",
+                       "suspicious-download","exposed-service","unknown-action",
+                       "firewall","proxy","vpn","waf","cn-hvv"):
                 stats.attack_types[tag] = stats.attack_types.get(tag, 0) + 1
 
     stats.top_ips = [

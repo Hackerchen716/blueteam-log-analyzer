@@ -316,7 +316,7 @@ _WIN_RULES: Dict[int, dict] = {
     4769: dict(level=ThreatLevel.INFO,     cat="Kerberos",tags=["kerberos","tgs"],
                mitre="T1558",      rule="Kerberos 服务票据",
                msg=lambda d: f"Kerberos TGS: {d.get('TargetUserName','?')} -> {d.get('ServiceName','?')}"),
-    4771: dict(level=ThreatLevel.MEDIUM,   cat="Kerberos",tags=["kerberos","failed","brute-force"],
+    4771: dict(level=ThreatLevel.MEDIUM,   cat="Kerberos",tags=["kerberos","failed","failed-logon","failed-login","brute-force","authentication"],
                mitre="T1110",      rule="Kerberos 预认证失败",
                msg=lambda d: f"Kerberos 预认证失败: {d.get('TargetUserName','?')} 来自 {d.get('IpAddress','?')}"),
     4776: dict(level=ThreatLevel.INFO,     cat="认证",    tags=["ntlm","authentication","credential-validation"],
@@ -743,7 +743,7 @@ def parse_windows_evtx(path: str) -> ParseResult:
     except ImportError as exc:
         raise MissingOptionalDependency(
             "缺少可选依赖 python-evtx，EVTX 二进制日志未被解析。"
-            "请先执行 python3 -m pip install python-evtx 后重新运行；"
+            "请先执行 python3 -m pip install -U \"blueteam-log-analyzer[evtx]\" 后重新运行；"
             "如果目标主机不方便安装 Python，可在 Windows 上用 "
             "wevtutil epl Security out.xml /lf:true 导出 XML 后再分析。"
         ) from exc

@@ -166,10 +166,6 @@ def parse_web_access_lines(
         evts  = data["events"]
         buckets = data["minute_buckets"]
         peak_per_minute = max(buckets.values()) if buckets else 0
-        # 该 IP 已经被识别为 Web 攻击（SQLi/XSS/LFI 等），让攻击告警走专门的
-        # detect_web_attacks 路径，不再叠加 volume 噪音事件。
-        if any("web-attack" in e.tags for e in evts):
-            continue
         if peak_per_minute >= config.THRESHOLDS.ddos_peak_per_minute and count >= config.THRESHOLDS.ddos_min_total:
             events.append(_make_volume_event(
                 ip, data, source_file, ThreatLevel.CRITICAL,

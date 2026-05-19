@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .models import LogEvent, ParseResult
 from .parsers.stats import compute_stats
@@ -113,13 +113,13 @@ def is_allowlisted(event: LogEvent, allowlist: Dict[str, Any]) -> bool:
     return False
 
 
-def _exact(value: Any, allowed: List[str] | None) -> bool:
+def _exact(value: Any, allowed: Optional[List[str]]) -> bool:
     if not value or not allowed:
         return False
     return str(value).lower() in {item.lower() for item in allowed}
 
 
-def _contains(value: str, allowed: List[str] | None) -> bool:
+def _contains(value: str, allowed: Optional[List[str]]) -> bool:
     if not value or not allowed:
         return False
     lower = value.lower()

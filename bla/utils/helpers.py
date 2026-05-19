@@ -7,6 +7,11 @@ import sys
 import threading
 from typing import Iterator, Optional
 
+_RFC1918_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
 _counter = 0
 _counter_lock = threading.Lock()
 _syslog_year_override: Optional[int] = None
@@ -149,11 +154,7 @@ def is_private_ip(ip: str) -> bool:
         ip_obj = ipaddress.ip_address(ip)
     except Exception:
         return False
-    return (
-        ip_obj in ipaddress.ip_network("10.0.0.0/8") or
-        ip_obj in ipaddress.ip_network("172.16.0.0/12") or
-        ip_obj in ipaddress.ip_network("192.168.0.0/16")
-    )
+    return any(ip_obj in network for network in _RFC1918_NETWORKS)
 
 def detect_encoding(raw: bytes) -> str:
     """简单检测文件编码"""

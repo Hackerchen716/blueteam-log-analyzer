@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import resources
-from typing import Any, Dict, Iterable, List, Pattern, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Pattern, Tuple
 
 from ..models import ThreatLevel
 
@@ -26,9 +26,9 @@ class WebAttackRule:
     mitre: str
     tags: List[str]
     confidence: str = "medium"
-    source_types: List[str] = None
-    evidence_fields: List[str] = None
-    false_positive_hints: List[str] = None
+    source_types: Optional[List[str]] = None
+    evidence_fields: Optional[List[str]] = None
+    false_positive_hints: Optional[List[str]] = None
     remediation: str = ""
 
 
@@ -238,7 +238,7 @@ def _parse_simple_yaml(text: str) -> Dict[str, Any]:
     """
     result: Dict[str, Any] = {}
     current_root = ""
-    current_item: Dict[str, Any] | None = None
+    current_item: Optional[Dict[str, Any]] = None
     current_list_key = ""
 
     for raw_line in text.splitlines():

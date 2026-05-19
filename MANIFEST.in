@@ -1,0 +1,5 @@
+include README.md LICENSE pyproject.toml setup.py
+recursive-include bla/rules *.yaml
+recursive-include docs *.md *.png *.json
+recursive-include sample_logs *.log *.xml
+recursive-include tests *.py *.json *.jsonl

@@ -39,14 +39,14 @@ input/source
 
 新增检测能力时，优先新增 detector 并注册到 `DetectorRegistry`。Detector 只接收 `List[LogEvent]`，只返回 `List[DetectionAlert]`，不读取文件、不写报告、不依赖 CLI 参数解析。
 
-## 后续演进
+## 当前状态与后续演进
 
 1. 保持 `bla <path>` 兼容，同时逐步增加更清晰的子命令入口。
-2. Remote Workspace 先提供 `bla ssh` 交互入口，远程只执行白名单只读命令，本地复用 pipeline。
+2. Remote Workspace 已提供 `bla ssh` 交互入口，远程只执行白名单只读命令，本地复用 pipeline；后续继续补 collector 证据包和更多平台入口。
 3. Remote Collector 输出内存日志内容，复用 `parse_content()` 或 pipeline。
 4. Host Triage 独立定义结构化 findings，再与 incident 关联。
 5. P0 厂商日志逐步拆分到 adapter 层，避免单个解析器持续膨胀。
-6. 大文件场景优先补齐 Windows XML、CSV、JSON 数组等流式处理路径。
+6. 大文件场景优先补齐 Windows XML、CSV、JSON object/array 等流式处理路径。
 
 ## Python 适用边界
 
