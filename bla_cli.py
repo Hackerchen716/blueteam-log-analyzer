@@ -69,6 +69,13 @@ _EXIT_THRESHOLDS = {
 }
 
 
+def _exit_code_for_alerts(alerts, exit_on: str) -> int:
+    threshold = _EXIT_THRESHOLDS.get(exit_on)
+    if threshold is None:
+        return 0
+    return 1 if any(a.level.score >= threshold for a in alerts) else 0
+
+
 def _dispatch_subcommand(argv: List[str]) -> bool:
     if len(argv) < 2 or argv[1] not in {"validate-rules", "benchmark", "explain", "ssh"}:
         return False
@@ -153,6 +160,7 @@ def _cmd_benchmark(argv: List[str]) -> None:
     parser.add_argument("--size-mb", type=int, default=10, help="合成日志大小，默认 10MB")
     parser.add_argument("--profile", choices=("default", "cn-hvv"), default="cn-hvv")
     parser.add_argument("-j", "--jobs", type=int, default=0)
+    parser.add_argument("--memory", action="store_true", help="启用 tracemalloc 统计峰值内存；会让耗时基准偏慢")
     args = parser.parse_args(argv)
 
     files = _collect_files(args.paths)
@@ -162,14 +170,21 @@ def _cmd_benchmark(argv: List[str]) -> None:
         files = [str(temp_path)]
 
     reset_counter()
-    tracemalloc.start()
+    if args.memory:
+        tracemalloc.start()
     started = time.perf_counter()
+    parse_started = time.perf_counter()
     parse_results = _parse_files(files, args.jobs, quiet=True)
+    parse_elapsed = time.perf_counter() - parse_started
     all_events = [event for result in parse_results for event in result.events]
+    detect_started = time.perf_counter()
     summary = run_detection(all_events, profile=args.profile)
+    detect_elapsed = time.perf_counter() - detect_started
     elapsed = time.perf_counter() - started
-    current, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    peak = None
+    if args.memory:
+        _current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
 
     total_bytes = sum(result.file_size_bytes for result in parse_results)
     mb = total_bytes / (1024 * 1024) if total_bytes else 0
@@ -181,9 +196,14 @@ def _cmd_benchmark(argv: List[str]) -> None:
     print(f"  alerts:      {len(summary.alerts)}")
     print(f"  incidents:   {len(summary.incidents)}")
     print(f"  elapsed:     {elapsed:.3f}s")
+    print(f"  parse:       {parse_elapsed:.3f}s")
+    print(f"  enrich+detect: {detect_elapsed:.3f}s")
     print(f"  throughput:  {mb / elapsed if elapsed > 0 else 0:.2f} MB/s")
     print(f"  event rate:  {eps:.0f} events/s")
-    print(f"  peak memory: {peak / (1024 * 1024):.2f} MB")
+    if peak is not None:
+        print(f"  peak memory: {peak / (1024 * 1024):.2f} MB")
+    else:
+        print("  peak memory: not measured (use --memory)")
     if temp_path:
         try:
             temp_path.unlink()
@@ -556,6 +576,12 @@ def main():
     summary = run_result.summary
     if run_result.suppressed_events:
         print(f"\n✓ 白名单过滤完成，压制 {run_result.suppressed_events} 条事件")
+    if run_result.parse_errors:
+        print(f"\n⚠️  有 {len(run_result.parse_errors)} 个输入解析失败，已从本次分析结果中排除:", file=sys.stderr)
+        for item in run_result.parse_errors[:10]:
+            print(f"  - {item}", file=sys.stderr)
+        if len(run_result.parse_errors) > 10:
+            print(f"  ... 还有 {len(run_result.parse_errors) - 10} 个失败输入未展示", file=sys.stderr)
 
     print(f"\n✓ 解析完成，共 {summary.total_events} 条事件\n")
 
@@ -571,26 +597,25 @@ def main():
         args.full_evidence,
     )
 
-    write_reports(
-        parse_results,
-        summary,
-        AnalysisOutputs(
-            html=args.html,
-            json=args.json,
-            csv=args.csv,
-            ioc=args.ioc,
-            sarif=args.sarif,
-            bundle_dir=args.out,
-        ),
-    )
+    try:
+        write_reports(
+            parse_results,
+            summary,
+            AnalysisOutputs(
+                html=args.html,
+                json=args.json,
+                csv=args.csv,
+                ioc=args.ioc,
+                sarif=args.sarif,
+                bundle_dir=args.out,
+            ),
+        )
+    except OSError as e:
+        print(f"\n❌ 报告写入失败: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # 退出码：可通过 --exit-on 控制触发等级
-    threshold = _EXIT_THRESHOLDS.get(args.exit_on)
-    if threshold is None:
-        sys.exit(0)
-    if any(a.level.score >= threshold for a in summary.alerts):
-        sys.exit(1)
-    sys.exit(0)
+    sys.exit(_exit_code_for_alerts(summary.alerts, args.exit_on))
 
 
 if __name__ == "__main__":
