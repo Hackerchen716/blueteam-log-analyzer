@@ -21,6 +21,12 @@ from .registry import DetectorRegistry, DetectorSpec, normalize_profiles
 
 _CONFIDENCE_DOWNGRADE = {"high": "medium", "medium": "low", "low": "low"}
 _WINDOWS_ACCOUNT_CHAIN_WINDOW_SECONDS = 10 * 60
+_CREDENTIAL_TOOL_RE = re.compile(r'mimikatz|lsadump|sekurlsa|kerberos::ptt|privilege::debug|credential.?dump', re.I)
+_LSASS_RE = re.compile(r'lsass', re.I)
+_CREDENTIAL_DETAIL_KEYS = (
+    "command", "cmd", "commandline", "process", "processname", "image",
+    "alert", "threat", "message", "rule", "signature", "file", "path",
+)
 
 
 def _adjust_for_private_ip(ip: str, confidence: str, evidence: List[str]) -> str:
@@ -31,7 +37,7 @@ def _adjust_for_private_ip(ip: str, confidence: str, evidence: List[str]) -> str
     """
     if not ip or not is_private_ip(ip):
         if ip:
-            evidence.append(f"来源类型: 公网")
+            evidence.append("来源类型: 公网")
         return confidence
     evidence.append(f"来源类型: 内网/私有 IP（{ip}）")
     return _CONFIDENCE_DOWNGRADE.get(confidence, confidence)
@@ -396,9 +402,7 @@ def detect_defense_evasion(events: List[LogEvent]) -> List[DetectionAlert]:
 
 def detect_credential_access(events: List[LogEvent]) -> List[DetectionAlert]:
     alerts = []
-    mimi = [e for e in events if
-            re.search(r'mimikatz|lsadump|sekurlsa|kerberos::ptt|privilege::debug|credential.?dump',
-                      e.message + e.raw_line + " ".join(str(v) for v in e.details.values()), re.I)]
+    mimi = [e for e in events if _has_credential_dump_indicator(e)]
     if mimi:
         alerts.append(DetectionAlert(
             id="a"+gen_id("ca"), rule_id="CRED-001", rule_name="Mimikatz / 凭据转储工具",
@@ -410,7 +414,7 @@ def detect_credential_access(events: List[LogEvent]) -> List[DetectionAlert]:
             timestamp=max(e.timestamp for e in mimi), confidence="high",
         ))
     lsass = [e for e in events if "lsass-dump" in e.tags or
-             (re.search(r'lsass', e.message + e.raw_line, re.I) and "sysmon" in e.tags)]
+             (_LSASS_RE.search(e.message + e.raw_line) and "sysmon" in e.tags)]
     if lsass:
         alerts.append(DetectionAlert(
             id="a"+gen_id("ls"), rule_id="CRED-002", rule_name="LSASS 进程访问",
@@ -422,6 +426,17 @@ def detect_credential_access(events: List[LogEvent]) -> List[DetectionAlert]:
             timestamp=max(e.timestamp for e in lsass), confidence="high",
         ))
     return alerts
+
+
+def _has_credential_dump_indicator(event: LogEvent) -> bool:
+    if "lsass-dump" in event.tags or "credential-access" in event.tags:
+        return True
+    text = event.message + " " + event.raw_line
+    if _CREDENTIAL_TOOL_RE.search(text):
+        return True
+    details = event.details
+    detail_text = " ".join(str(details.get(key, "")) for key in _CREDENTIAL_DETAIL_KEYS)
+    return bool(detail_text and _CREDENTIAL_TOOL_RE.search(detail_text))
 
 
 def detect_suspicious_execution(events: List[LogEvent]) -> List[DetectionAlert]:

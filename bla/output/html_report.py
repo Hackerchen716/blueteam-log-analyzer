@@ -10,7 +10,10 @@ from typing import List
 
 from ..ioc import extract_iocs
 from ..models import AnalysisSummary, ParseResult, ThreatLevel
-from ..utils.helpers import format_timestamp_local, safe_print
+from ..utils.helpers import format_timestamp_local, safe_print, sanitize_report_text
+
+
+TIMELINE_LIMIT = 100
 
 
 def _level_color_hex(level: ThreatLevel) -> str:
@@ -35,7 +38,7 @@ def _level_bg_hex(level: ThreatLevel) -> str:
 
 def _h(value) -> str:
     """Escape attacker-controlled log content before embedding it in HTML."""
-    return escape("" if value is None else str(value), quote=True)
+    return escape(sanitize_report_text(value), quote=True)
 
 
 def _pct(part: int, total: int) -> float:
@@ -168,7 +171,7 @@ def generate_html_report(
 
     # 时间线 HTML
     timeline_html = ""
-    for entry in summary.timeline[:100]:
+    for entry in summary.timeline[:TIMELINE_LIMIT]:
         color = _level_color_hex(entry.level)
         mitre = f'<span class="mitre-tag">{_h(entry.mitre_attack)}</span>' if entry.mitre_attack else ""
         timeline_html += f"""
@@ -181,6 +184,12 @@ def generate_html_report(
             <span class="tl-cat">[{_h(entry.category)}]</span>
             <span class="tl-msg">{_h(entry.message)}</span>
           </div>
+        </div>"""
+    timeline_total = len(summary.timeline)
+    if timeline_total > TIMELINE_LIMIT:
+        timeline_html += f"""
+        <div class="empty-state">
+          时间线仅展示前 {TIMELINE_LIMIT} 条，共 {timeline_total} 条；完整事件请查看 report.json 或 events.csv。
         </div>"""
     if not timeline_html:
         timeline_html = '<div class="empty-state">暂无关键事件</div>'

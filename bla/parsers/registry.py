@@ -6,7 +6,7 @@ collectors a stable way to parse either files or in-memory log chunks.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple
 
 from ..models import ParseResult
 

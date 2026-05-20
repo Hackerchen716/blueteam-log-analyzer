@@ -27,6 +27,29 @@ _WINDOWS_ACCOUNT_EVENTS = {
     "4720", "4722", "4723", "4724", "4725", "4726", "4738",
 }
 _WINDOWS_GROUP_EVENTS = {"4728", "4729", "4732", "4756"}
+_SOURCE_TYPE_CHECKS = [
+    (label, re.compile(pattern, re.I))
+    for label, pattern in (
+        ("waf", r"\bwaf\b|web security|modsecurity"),
+        ("vpn", r"\bvpn\b|ztna|ssl vpn"),
+        ("bastion", r"bastion|堡垒|jump"),
+        ("dns", r"\bdns\b"),
+        ("proxy", r"proxy|swg|上网行为"),
+        ("firewall", r"firewall|\bfw\b|\bnat\b"),
+        ("edr", r"\bedr\b|\bxdr\b|sysmon|endpoint"),
+        ("application", r"application|应用|tomcat|spring"),
+        ("web", r"\bweb\b|access"),
+        ("linux-auth", r"linux auth|auth\.log|secure|ssh|sudo"),
+        ("windows-event", r"windows|security|event log"),
+    )
+]
+_DOMAIN_CALLBACK_RE = re.compile(r"dnslog|ceye|burpcollaborator|interactsh|jndi|ldap|rmi")
+_DOMAIN_SUSPICIOUS_RE = re.compile(r"c2|beacon|malware|evil|shell")
+_ASSET_ROLE_PATTERNS = (
+    ("domain-controller", re.compile(r"dc|domain.?controller|kerberos|域控")),
+    ("database", re.compile(r"mysql|postgres|oracle|sqlserver|redis|mongo|database|数据库")),
+    ("web-server", re.compile(r"nginx|apache|tomcat|iis|web|http")),
+)
 
 
 def enrich_events(events: Iterable[LogEvent]) -> List[LogEvent]:
@@ -134,21 +157,8 @@ def _source_type(event: LogEvent) -> str:
     if kind:
         return kind
     hay = " ".join([event.source, event.category, event.source_file]).lower()
-    checks = [
-        ("waf", r"\bwaf\b|web security|modsecurity"),
-        ("vpn", r"\bvpn\b|ztna|ssl vpn"),
-        ("bastion", r"bastion|堡垒|jump"),
-        ("dns", r"\bdns\b"),
-        ("proxy", r"proxy|swg|上网行为"),
-        ("firewall", r"firewall|\bfw\b|\bnat\b"),
-        ("edr", r"\bedr\b|\bxdr\b|sysmon|endpoint"),
-        ("application", r"application|应用|tomcat|spring"),
-        ("web", r"\bweb\b|access"),
-        ("linux-auth", r"linux auth|auth\.log|secure|ssh|sudo"),
-        ("windows-event", r"windows|security|event log"),
-    ]
-    for label, pattern in checks:
-        if re.search(pattern, hay, re.I):
+    for label, pattern in _SOURCE_TYPE_CHECKS:
+        if pattern.search(hay):
             return label
     return "generic"
 
@@ -185,12 +195,9 @@ def _asset_role(event: LogEvent, normalized: Dict[str, str]) -> str:
     if source_type in {"waf", "vpn", "bastion", "dns", "proxy", "firewall", "edr"}:
         return source_type
     text = " ".join([event.category, event.source, normalized.get("asset", ""), normalized.get("process", "")]).lower()
-    if re.search(r"dc|domain.?controller|kerberos|域控", text):
-        return "domain-controller"
-    if re.search(r"mysql|postgres|oracle|sqlserver|redis|mongo|database|数据库", text):
-        return "database"
-    if re.search(r"nginx|apache|tomcat|iis|web|http", text):
-        return "web-server"
+    for role, pattern in _ASSET_ROLE_PATTERNS:
+        if pattern.search(text):
+            return role
     if source_type in {"linux-auth", "windows-event"}:
         return "server"
     return "unknown"
@@ -203,11 +210,11 @@ def _domain_type(value: str) -> str:
     host = host.lower().strip(".")
     if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", host):
         return _ip_scope(host)
-    if re.search(r"dnslog|ceye|burpcollaborator|interactsh|jndi|ldap|rmi", host):
+    if _DOMAIN_CALLBACK_RE.search(host):
         return "callback"
     if host.endswith((".local", ".lan", ".internal")):
         return "internal"
-    if re.search(r"c2|beacon|malware|evil|shell", host):
+    if _DOMAIN_SUSPICIOUS_RE.search(host):
         return "suspicious"
     return "external" if "." in host else "unknown"
 

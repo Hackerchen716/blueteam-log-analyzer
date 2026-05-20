@@ -1,14 +1,18 @@
 from pathlib import Path
+import re
 
 from setuptools import find_packages, setup
 
 ROOT = Path(__file__).parent
-version_ns = {}
-exec((ROOT / "bla" / "__version__.py").read_text(encoding="utf-8"), version_ns)
+version_text = (ROOT / "bla" / "__version__.py").read_text(encoding="utf-8")
+version_match = re.search(r'^__version__ = ["\']([^"\']+)["\']', version_text, re.M)
+if not version_match:
+    raise RuntimeError("Unable to read package version from bla/__version__.py")
+VERSION = version_match.group(1)
 
 setup(
     name="blueteam-log-analyzer",
-    version=version_ns["__version__"],
+    version=VERSION,
     description="BlueTeam Log Analyzer - 蓝队应急响应日志分析工具",
     long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",

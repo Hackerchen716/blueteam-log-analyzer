@@ -5,23 +5,26 @@ Use this checklist before publishing a GitHub Release or uploading to PyPI.
 ## Version
 
 - Confirm the release version in `bla/__version__.py`.
-- Confirm `bla --version`, JSON report metadata, SARIF tool metadata, and README examples show the same version.
+- Confirm `bla --version`, JSON report metadata, SARIF tool metadata, manifest metadata, and README examples show the same version.
 - Confirm `pyproject.toml` uses the dynamic version from `bla.__version__.__version__`.
 - Confirm `setup.py` reads the same version source.
 - Confirm the Git tag is exactly `vX.Y.Z` and matches `bla.__version__`.
 
 ## Validation
 
+- Run `python3 scripts/release_check.py` for the local release quality checks.
+- Run `python3 scripts/release_check.py --build` before tagging when build/twine are available locally.
 - Run `python3 -m compileall -q bla bla_cli.py setup.py tests`.
 - Run `python3 -m pytest -q`.
 - Run `python3 -m unittest discover -s tests -v`.
 - Run `python3 bla_cli.py validate-rules --strict-metadata`.
 - Run `python3 bla_cli.py ssh --help`.
 - Run sample smoke tests with `--exit-on none`, including Linux auth, Web access, Remote Workspace sample, Windows RDP sample, and P0 fixture.
+- Confirm `--out` bundles contain `index.html`, `report.json`, `events.csv`, `iocs.txt`, `report.sarif`, and `manifest.json`.
 - Run `python3 bla_cli.py benchmark --size-mb 1` and `python3 bla_cli.py benchmark --size-mb 1 --memory`.
 - Build the package with `python3 -m build`.
 - Run `python3 -m twine check dist/*` when `twine` is available.
-- Inspect the wheel for package code/rules (`bla/rules/web_attacks.yaml`, `bla/remote/ssh_workspace.py`) and the source distribution for release notes, sample logs, and P0 fixtures.
+- Inspect the wheel for package code/rules (`bla/rules/web_attacks.yaml`, `bla/remote/ssh_workspace.py`) and the source distribution for release notes, scripts, sample logs, and P0 fixtures.
 - Install the built wheel in a fresh venv and run `bla --version`, `bla validate-rules --strict-metadata`, and `bla ssh --help`.
 
 ## GitHub Release

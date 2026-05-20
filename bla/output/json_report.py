@@ -2,11 +2,14 @@
 from __future__ import annotations
 import json
 import datetime
-from typing import List
+from typing import Any, List
 from ..__version__ import __version__
 from ..ioc import extract_iocs
 from ..models import ParseResult, AnalysisSummary
-from ..utils.helpers import safe_print
+from ..utils.helpers import safe_print, sanitize_report_text
+
+
+TIMELINE_LIMIT = 200
 
 
 def generate_json_report(
@@ -20,13 +23,42 @@ def generate_json_report(
 
     # 高置信度 IOC：只从触发告警的事件中提取，避免把正常运维流量混进列表
     iocs_high_conf = extract_iocs(all_events, alerts=summary.alerts)
+    level_counts = {
+        "critical": sum(r.stats.critical for r in parse_results),
+        "high": sum(r.stats.high for r in parse_results),
+        "medium": sum(r.stats.medium for r in parse_results),
+        "low": sum(r.stats.low for r in parse_results),
+        "info": sum(r.stats.info for r in parse_results),
+    }
 
+    timeline_total = len(summary.timeline)
+    timeline_returned = min(timeline_total, TIMELINE_LIMIT)
     report = {
         "meta": {
             "tool": "BlueTeam Log Analyzer (BLA)",
             "version": __version__,
             "generated_at": datetime.datetime.now().isoformat(),
             "files_analyzed": summary.files_analyzed,
+        },
+        "summary": {
+            "risk_score": summary.risk_score,
+            "risk_level": summary.risk_level.value,
+            "files_analyzed": summary.files_analyzed,
+            "total_events": summary.total_events,
+            "alert_count": len(summary.alerts),
+            "incident_count": len(summary.incidents),
+            "timeline_count": len(summary.timeline),
+            "timeline_returned": timeline_returned,
+            "recommendation_count": len(summary.recommendations),
+            "by_level": level_counts,
+            "limits": {
+                "timeline": {
+                    "returned": timeline_returned,
+                    "total": timeline_total,
+                    "limit": TIMELINE_LIMIT,
+                    "truncated": timeline_total > TIMELINE_LIMIT,
+                },
+            },
         },
         "risk": {
             "score": summary.risk_score,
@@ -35,13 +67,10 @@ def generate_json_report(
         "statistics": {
             "total_events": summary.total_events,
             "alert_count": len(summary.alerts),
-            "by_level": {
-                "critical": sum(r.stats.critical for r in parse_results),
-                "high":     sum(r.stats.high     for r in parse_results),
-                "medium":   sum(r.stats.medium   for r in parse_results),
-                "low":      sum(r.stats.low      for r in parse_results),
-                "info":     sum(r.stats.info     for r in parse_results),
-            },
+            "incident_count": len(summary.incidents),
+            "timeline_count": len(summary.timeline),
+            "timeline_returned": timeline_returned,
+            "by_level": level_counts,
         },
         "files": [
             {
@@ -83,14 +112,32 @@ def generate_json_report(
                 "source_file": t.source_file,
                 "mitre":       t.mitre_attack,
             }
-            for t in summary.timeline[:200]
+            for t in summary.timeline[:TIMELINE_LIMIT]
         ],
+        "truncation": {
+            "timeline": {
+                "returned": timeline_returned,
+                "total": timeline_total,
+                "limit": TIMELINE_LIMIT,
+                "truncated": timeline_total > TIMELINE_LIMIT,
+            },
+        },
         "iocs": iocs_high_conf,
         "iocs_all_events": extract_iocs(all_events),
         "recommendations": summary.recommendations,
     }
 
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+        json.dump(_sanitize_json_value(report), f, ensure_ascii=False, indent=2)
 
     safe_print(f"  [✓] JSON 报告已保存: {output_path}")
+
+
+def _sanitize_json_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return sanitize_report_text(value)
+    if isinstance(value, list):
+        return [_sanitize_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_json_value(item) for key, item in value.items()}
+    return value

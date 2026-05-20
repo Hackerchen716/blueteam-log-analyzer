@@ -6,6 +6,6 @@ BlueTeam Log Analyzer (BLA)
 平台: macOS / Linux / Windows
 """
 
-from .__version__ import __version__
+from .__version__ import __version__ as __version__
 
 __author__ = "Hackerchen716"

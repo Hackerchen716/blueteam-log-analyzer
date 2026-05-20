@@ -5,13 +5,24 @@ from typing import List, Dict, Any
 from ..models import LogEvent, ParseStats
 from ..utils.helpers import is_placeholder_source
 
+_ATTACK_TYPE_TAGS = {
+    "sqli", "xss", "rce", "lfi", "rfi", "brute-force",
+    "path-traversal", "webshell", "scanning", "ddos",
+    "injection", "command-injection", "lolbin", "malware-indicator",
+    "c2", "dns-tunnel", "dga", "exfiltration", "bastion-command",
+    "edr", "lsass-dump", "malicious-domain", "malicious-url",
+    "suspicious-download", "exposed-service", "unknown-action",
+    "firewall", "proxy", "vpn", "waf", "cn-hvv",
+}
+
 
 def compute_stats(events: List[LogEvent]) -> ParseStats:
     stats = ParseStats(total=len(events))
     ip_counter: Counter = Counter()
     user_counter: Counter = Counter()
     eid_counter: Counter = Counter()
-    timestamps = []
+    time_start = ""
+    time_end = ""
 
     for ev in events:
         lvl = ev.level.value
@@ -26,16 +37,14 @@ def compute_stats(events: List[LogEvent]) -> ParseStats:
         if ev.ip:   ip_counter[ev.ip] += 1
         if ev.user: user_counter[ev.user] += 1
         if ev.event_id: eid_counter[ev.event_id] += 1
-        if ev.timestamp: timestamps.append(ev.timestamp)
+        if ev.timestamp:
+            if not time_start or ev.timestamp < time_start:
+                time_start = ev.timestamp
+            if not time_end or ev.timestamp > time_end:
+                time_end = ev.timestamp
 
         for tag in ev.tags:
-            if tag in ("sqli","xss","rce","lfi","rfi","brute-force",
-                       "path-traversal","webshell","scanning","ddos",
-                       "injection","command-injection","lolbin","malware-indicator",
-                       "c2","dns-tunnel","dga","exfiltration","bastion-command",
-                       "edr","lsass-dump","malicious-domain","malicious-url",
-                       "suspicious-download","exposed-service","unknown-action",
-                       "firewall","proxy","vpn","waf","cn-hvv"):
+            if tag in _ATTACK_TYPE_TAGS:
                 stats.attack_types[tag] = stats.attack_types.get(tag, 0) + 1
 
     stats.top_ips = [
@@ -66,10 +75,8 @@ def compute_stats(events: List[LogEvent]) -> ParseStats:
         for eid, c in eid_counter.most_common(10)
     ]
 
-    if timestamps:
-        ts_sorted = sorted(timestamps)
-        stats.time_start = ts_sorted[0]
-        stats.time_end   = ts_sorted[-1]
+    stats.time_start = time_start
+    stats.time_end = time_end
 
     stats.windows_logon_stats = _compute_windows_logon_stats(events)
     stats.windows_process_creation_stats = _compute_windows_process_creation_stats(events)

@@ -5,7 +5,7 @@ import glob
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ..allowlist import apply_allowlist, load_allowlist
 from ..config import DEFAULT_THRESHOLDS, load_thresholds, load_thresholds_from_env, set_thresholds
@@ -190,6 +190,7 @@ def write_reports(
     parse_results: List[ParseResult],
     summary: AnalysisSummary,
     outputs: AnalysisOutputs,
+    manifest_context: Optional[Dict[str, Any]] = None,
 ) -> None:
     if outputs.html:
         generate_html_report(parse_results, summary, outputs.html)
@@ -202,7 +203,7 @@ def write_reports(
     if outputs.sarif:
         generate_sarif_report(parse_results, summary, outputs.sarif)
     if outputs.bundle_dir:
-        generate_report_bundle(parse_results, summary, outputs.bundle_dir)
+        generate_report_bundle(parse_results, summary, outputs.bundle_dir, manifest_context=manifest_context)
 
 
 def _configure_runtime(options: AnalysisOptions) -> None:

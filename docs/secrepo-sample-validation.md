@@ -1,4 +1,4 @@
-# SecRepo 真实样本实测记录
+# SecRepo 公开样本验证记录
 
 本文档记录 BlueTeam Log Analyzer (BLA) 使用 SecRepo 公开日志样本的实际运行方式和结果摘要，用于验证工具在真实日志上的解析、检测、IOC 提取和报告输出能力。
 

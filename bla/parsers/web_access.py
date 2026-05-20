@@ -20,9 +20,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import unquote_plus
 
 from .. import config
-from ..models import LogEvent, ParseResult, ParseStats, ThreatLevel
+from ..models import LogEvent, ParseResult, ThreatLevel
 from ..rules import get_web_attack_rules
-from ..utils.helpers import file_size, gen_id, iter_file_lines, normalize_timestamp, truncate
+from ..utils.helpers import file_size, gen_id, iter_file_lines, normalize_timestamp
 from .stats import compute_stats
 
 # Combined Log Format
@@ -163,7 +163,6 @@ def parse_web_access_lines(
     # 基于 volume 事件出 RECON-003/004 告警，避免规则在解析层和告警层各算一遍。
     for ip, data in ip_stats.items():
         count = data["count"]
-        evts  = data["events"]
         buckets = data["minute_buckets"]
         peak_per_minute = max(buckets.values()) if buckets else 0
         if peak_per_minute >= config.THRESHOLDS.ddos_peak_per_minute and count >= config.THRESHOLDS.ddos_min_total:

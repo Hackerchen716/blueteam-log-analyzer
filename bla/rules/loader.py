@@ -33,6 +33,10 @@ class WebAttackRule:
 
 
 _RULE_DIRS: Tuple[str, ...] = ()
+_NESTED_QUANTIFIER_RE = re.compile(
+    r"\((?:\?:)?[^)]*(?:\.\*|\.\+|\\[wWsSdD]\+|\[[^\]]+\]\+|[A-Za-z0-9]\+)[^)]*\)[+*{]"
+)
+_REPEATED_DOTSTAR_RE = re.compile(r"\.\*.*\.\*")
 
 
 def set_rule_dirs(paths: Iterable[str]) -> None:
@@ -96,6 +100,8 @@ def validate_web_attack_rules(rule_dirs: Iterable[str] = ()) -> Dict[str, Any]:
         for field in metadata:
             if field not in raw:
                 issues.append({"severity": "warning", "source": source, "rule": rule_name, "message": f"缺少规则元数据: {field}"})
+        for message in _lint_regex_patterns(raw.get("patterns") or []):
+            issues.append({"severity": "warning", "source": source, "rule": rule_name, "message": message})
         try:
             compiled += len(_compile_web_rule(raw))
         except Exception as exc:
@@ -208,6 +214,23 @@ def _compile_web_rule(raw: Dict[str, Any]) -> List[WebAttackRule]:
             remediation=remediation,
         ))
     return compiled
+
+
+def _lint_regex_patterns(patterns: Any) -> List[str]:
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    if not isinstance(patterns, list):
+        return []
+    issues: List[str] = []
+    for pattern in patterns:
+        text = str(pattern)
+        if len(text) > 800:
+            issues.append("正则长度超过 800 字符，建议拆分为多条更小的规则")
+        if _NESTED_QUANTIFIER_RE.search(text):
+            issues.append(f"正则可能存在灾难性回溯风险: {text[:120]}")
+        if _REPEATED_DOTSTAR_RE.search(text):
+            issues.append(f"正则包含多个 .*，建议改成有边界的字段匹配: {text[:120]}")
+    return issues
 
 
 def _as_str_list(value: Any) -> List[str]:

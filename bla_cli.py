@@ -21,6 +21,7 @@ import json
 import tempfile
 import time
 import tracemalloc
+import hashlib
 from pathlib import Path
 from typing import List, Optional
 
@@ -57,7 +58,7 @@ from bla.output import (
     print_terminal_report,
 )
 from bla.parsers import list_parser_names
-from bla.utils.helpers import reset_counter, safe_print as print
+from bla.utils.helpers import escape_markdown_text, reset_counter, safe_print as print, strip_terminal_control
 from bla.models import ParseResult, ThreatLevel
 
 
@@ -74,6 +75,51 @@ def _exit_code_for_alerts(alerts, exit_on: str) -> int:
     if threshold is None:
         return 0
     return 1 if any(a.level.score >= threshold for a in alerts) else 0
+
+
+def _build_manifest_context(args: argparse.Namespace, run_result) -> dict:
+    return {
+        "inputs": [_input_manifest_record(path) for path in run_result.files],
+        "options": {
+            "profile": args.profile,
+            "parser": args.type,
+            "jobs": args.jobs,
+            "config": args.config,
+            "rules": args.rules or [],
+            "allowlist": args.allowlist,
+            "exit_on": args.exit_on,
+            "syslog_year": args.syslog_year,
+            "rdp_only": args.rdp,
+            "max_alerts": args.max_alerts,
+            "full_evidence": bool(args.full_evidence),
+        },
+        "parse_errors": run_result.parse_errors,
+        "suppressed_events": run_result.suppressed_events,
+    }
+
+
+def _input_manifest_record(path: str) -> dict:
+    record = {
+        "source": "local",
+        "path": os.path.basename(path),
+        "name": os.path.basename(path),
+        "size_bytes": 0,
+        "sha256": "",
+    }
+    try:
+        record["size_bytes"] = os.path.getsize(path)
+        record["sha256"] = _sha256_file(path)
+    except OSError:
+        pass
+    return record
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _dispatch_subcommand(argv: List[str]) -> bool:
@@ -103,15 +149,32 @@ def _cmd_ssh(argv: List[str]) -> None:
     parser.add_argument("-i", "--identity-file", help="SSH 私钥路径")
     parser.add_argument("--workdir", default=".", help="进入远程工作台后的初始目录，默认远程登录目录")
     parser.add_argument("--connect-timeout", type=int, default=10, help="SSH 连接超时秒数，默认 10")
+    parser.add_argument("--max-bytes", type=int, default=256 * 1024 * 1024,
+                        help="单个远程输入最大拉取字节数，默认 268435456")
+    parser.add_argument("--command-timeout", type=int, default=120,
+                        help="远程只读命令超时秒数，默认 120")
     args = parser.parse_args(argv)
 
-    client = SSHClient(
-        target=args.target,
-        port=args.port,
-        identity_file=args.identity_file,
-        connect_timeout=args.connect_timeout,
+    if args.max_bytes <= 0:
+        parser.error("--max-bytes 必须大于 0")
+    if args.command_timeout <= 0:
+        parser.error("--command-timeout 必须大于 0")
+    try:
+        client = SSHClient(
+            target=args.target,
+            port=args.port,
+            identity_file=args.identity_file,
+            connect_timeout=args.connect_timeout,
+        )
+    except ValueError as e:
+        parser.error(str(e))
+    workspace = RemoteWorkspace(
+        client,
+        initial_cwd=args.workdir,
+        print_fn=print,
+        max_fetch_bytes=args.max_bytes,
+        command_timeout=args.command_timeout,
     )
-    workspace = RemoteWorkspace(client, initial_cwd=args.workdir, print_fn=print)
     try:
         workspace.start()
     except RuntimeError as e:
@@ -253,44 +316,44 @@ def _cmd_explain(argv: List[str]) -> None:
 
 
 def _print_incident_text(incident: dict) -> None:
-    print(f"[案件] {incident.get('title')}")
-    print(f"级别: {incident.get('level')}  置信度: {incident.get('confidence')}")
-    print(incident.get("description", ""))
+    print(f"[案件] {_plain(incident.get('title'))}")
+    print(f"级别: {_plain(incident.get('level'))}  置信度: {_plain(incident.get('confidence'))}")
+    print(_plain(incident.get("description", "")))
     print("\n关键证据:")
     for item in incident.get("evidence", []):
-        print(f"  - {item}")
+        print(f"  - {_plain(item)}")
     print("\n建议补采:")
     for item in incident.get("next_logs", []):
-        print(f"  - {item}")
+        print(f"  - {_plain(item)}")
     print("\n处置动作:")
     for item in incident.get("recommended_actions", []):
-        print(f"  - {item}")
+        print(f"  - {_plain(item)}")
 
 
 def _print_alert_text(alert: dict) -> None:
-    print(f"[告警] {alert.get('rule_name')}")
-    print(f"规则: {alert.get('rule_id')}  级别: {alert.get('level')}  置信度: {alert.get('confidence')}")
-    print(alert.get("description", ""))
+    print(f"[告警] {_plain(alert.get('rule_name'))}")
+    print(f"规则: {_plain(alert.get('rule_id'))}  级别: {_plain(alert.get('level'))}  置信度: {_plain(alert.get('confidence'))}")
+    print(_plain(alert.get("description", "")))
     print("\n证据:")
     for item in alert.get("evidence", []):
-        print(f"  - {item}")
-    print(f"\n建议: {alert.get('recommendation', '')}")
+        print(f"  - {_plain(item)}")
+    print(f"\n建议: {_plain(alert.get('recommendation', ''))}")
 
 
 def _render_incident_markdown(incident: dict) -> str:
     """渲染 incident 为可直接粘贴进工单 / 复盘文档的 Markdown。"""
-    phases = incident.get("attack_phases", [])
-    source_types = incident.get("source_types", [])
-    source_ips = incident.get("source_ips", [])
-    accounts = incident.get("accounts", [])
-    assets = incident.get("assets", [])
+    phases = [_md(item) for item in incident.get("attack_phases", [])]
+    source_types = [_md(item) for item in incident.get("source_types", [])]
+    source_ips = [_md(item) for item in incident.get("source_ips", [])]
+    accounts = [_md(item) for item in incident.get("accounts", [])]
+    assets = [_md(item) for item in incident.get("assets", [])]
     timeline = incident.get("timeline", [])
 
     lines = [
-        f"## 案件 {incident.get('id', '?')}：{incident.get('title', '')}",
+        f"## 案件 {_md(incident.get('id', '?'))}：{_md(incident.get('title', ''))}",
         "",
-        f"- **级别**：{incident.get('level', '?')}",
-        f"- **置信度**：{incident.get('confidence', '?')}",
+        f"- **级别**：{_md(incident.get('level', '?'))}",
+        f"- **置信度**：{_md(incident.get('confidence', '?'))}",
         f"- **影响事件**：{incident.get('affected_event_count', 0)} 条",
         f"- **关联告警**：{len(incident.get('affected_alerts', []))} 个",
         f"- **日志源**：{', '.join(source_types) or '?'}",
@@ -301,56 +364,64 @@ def _render_incident_markdown(incident: dict) -> str:
         "",
         "### 描述",
         "",
-        incident.get("description", ""),
+        _md(incident.get("description", "")),
         "",
         "### 关键证据",
         "",
     ]
-    lines.extend(f"- {item}" for item in incident.get("evidence", []))
+    lines.extend(f"- {_md(item)}" for item in incident.get("evidence", []))
     if not incident.get("evidence"):
         lines.append("- （无）")
     lines.extend(["", "### 处置动作", ""])
-    lines.extend(f"- [ ] {item}" for item in incident.get("recommended_actions", []))
+    lines.extend(f"- [ ] {_md(item)}" for item in incident.get("recommended_actions", []))
     if not incident.get("recommended_actions"):
         lines.append("- [ ] （待补充）")
     lines.extend(["", "### 待补采日志", ""])
-    lines.extend(f"- {item}" for item in incident.get("next_logs", []))
+    lines.extend(f"- {_md(item)}" for item in incident.get("next_logs", []))
     if not incident.get("next_logs"):
         lines.append("- （无）")
     if timeline:
         lines.extend(["", "### 关键事件时间线", "", "| 时间 | 级别 | 来源 | 描述 |", "|---|---|---|---|"])
         for item in timeline[:20]:
-            ts = (item.get("timestamp") or "").replace("|", "\\|")
-            level = (item.get("level") or "").replace("|", "\\|")
-            src = (item.get("source_file") or "").replace("|", "\\|")
-            msg = (item.get("message") or "").replace("|", "\\|").replace("\n", " ")
+            ts = _md(item.get("timestamp"))
+            level = _md(item.get("level"))
+            src = _md(item.get("source_file"))
+            msg = _md(item.get("message"))
             lines.append(f"| {ts} | {level} | {src} | {msg} |")
     return "\n".join(lines)
 
 
 def _render_alert_markdown(alert: dict) -> str:
     lines = [
-        f"## 告警 {alert.get('id', '?')}：{alert.get('rule_name', '')}",
+        f"## 告警 {_md(alert.get('id', '?'))}：{_md(alert.get('rule_name', ''))}",
         "",
-        f"- **规则**：{alert.get('rule_id', '?')}",
-        f"- **级别**：{alert.get('level', '?')}",
-        f"- **置信度**：{alert.get('confidence', '?')}",
-        f"- **MITRE**：{alert.get('mitre_attack', '?')} / {alert.get('mitre_phase', '?')}",
+        f"- **规则**：{_md(alert.get('rule_id', '?'))}",
+        f"- **级别**：{_md(alert.get('level', '?'))}",
+        f"- **置信度**：{_md(alert.get('confidence', '?'))}",
+        f"- **MITRE**：{_md(alert.get('mitre_attack', '?'))} / {_md(alert.get('mitre_phase', '?'))}",
         f"- **影响事件**：{alert.get('affected_event_count', 0)} 条",
-        f"- **时间**：{alert.get('timestamp', '?')}",
+        f"- **时间**：{_md(alert.get('timestamp', '?'))}",
         "",
         "### 描述",
         "",
-        alert.get("description", ""),
+        _md(alert.get("description", "")),
         "",
         "### 证据",
         "",
     ]
-    lines.extend(f"- {item}" for item in alert.get("evidence", []))
+    lines.extend(f"- {_md(item)}" for item in alert.get("evidence", []))
     if not alert.get("evidence"):
         lines.append("- （无）")
-    lines.extend(["", "### 处置建议", "", alert.get("recommendation", "")])
+    lines.extend(["", "### 处置建议", "", _md(alert.get("recommendation", ""))])
     return "\n".join(lines)
+
+
+def _plain(value: object) -> str:
+    return strip_terminal_control(value)
+
+
+def _md(value: object) -> str:
+    return escape_markdown_text(value).replace("\r", " ").replace("\n", " ")
 
 
 def _collect_files(paths: List[str]) -> List[str]:
@@ -372,8 +443,8 @@ def _make_synthetic_p0_log(size_mb: int) -> Path:
     os.close(fd)
     path = Path(path_text)
     row_templates = [
-        '{{"log_type":"waf","time":"2024-03-15 10:00:{sec:02d}","src_ip":"8.8.8.{octet}","host":"www.example.com","uri":"/login?id=1 UNION SELECT NULL--","action":"block","attack_type":"SQL Injection","status":"403"}}\n',
-        '{{"log_type":"vpn","time":"2024-03-15 10:01:{sec:02d}","user":"alice","src_ip":"8.8.8.{octet}","result":"failed","reason":"bad password"}}\n',
+        '{{"log_type":"waf","time":"2024-03-15 10:00:{sec:02d}","src_ip":"203.0.113.{octet}","host":"app.example.test","uri":"/login?id=1 UNION SELECT NULL--","action":"block","attack_type":"SQL Injection","status":"403"}}\n',
+        '{{"log_type":"vpn","time":"2024-03-15 10:01:{sec:02d}","user":"alice","src_ip":"198.51.100.{octet}","result":"failed","reason":"bad password"}}\n',
         '{{"log_type":"dns","time":"2024-03-15 10:02:{sec:02d}","client_ip":"10.0.0.{octet}","query":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.evil.example","rcode":"NOERROR"}}\n',
         '{{"log_type":"proxy","time":"2024-03-15 10:03:{sec:02d}","src_ip":"10.0.0.{octet}","url":"http://evil.example/a.sh","bytes_out":"2048","action":"allow"}}\n',
         '{{"log_type":"edr","time":"2024-03-15 10:04:{sec:02d}","host":"win-{octet}","severity":"high","alert":"webshell beacon","process":"java.exe"}}\n',
@@ -439,7 +510,7 @@ def main():
     parser.add_argument(
         "--out",
         metavar="DIR",
-        help="生成标准报告目录（index.html/report.json/events.csv/iocs.txt/report.sarif）",
+        help="生成标准报告目录（index.html/report.json/events.csv/iocs.txt/report.sarif/manifest.json）",
     )
     parser.add_argument(
         "--config",
@@ -609,6 +680,7 @@ def main():
                 sarif=args.sarif,
                 bundle_dir=args.out,
             ),
+            manifest_context=_build_manifest_context(args, run_result),
         )
     except OSError as e:
         print(f"\n❌ 报告写入失败: {e}", file=sys.stderr)

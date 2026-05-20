@@ -3,15 +3,14 @@
 支持 macOS / Linux / Windows 10+ 终端 ANSI 颜色
 """
 from __future__ import annotations
-import re
 import sys
 from typing import List
 
 from ..__version__ import __version__
 from ..models import (
-    ParseResult, AnalysisSummary, DetectionAlert, ThreatLevel, LogEvent
+    ParseResult, AnalysisSummary, ThreatLevel, LogEvent
 )
-from ..utils.helpers import format_timestamp_local, is_placeholder_source, safe_stream
+from ..utils.helpers import format_timestamp_local, is_placeholder_source, safe_stream, strip_terminal_control
 
 # ANSI 颜色
 RESET  = "\033[0m"
@@ -31,12 +30,6 @@ BG_ORANGE = "\033[48;5;208m"
 BG_YELLOW = "\033[43m"
 BG_GREEN  = "\033[42m"
 BG_BLUE   = "\033[44m"
-
-_OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)", re.S)
-_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_ESC_RE = re.compile(r"\x1b[ -/]*[@-~]")
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-
 
 def _level_color(level: ThreatLevel) -> str:
     return {
@@ -92,11 +85,7 @@ def _evidence_text(text: str, full: bool, max_len: int = 220) -> str:
 
 
 def _safe_text(value: object) -> str:
-    text = str(value or "")
-    text = _OSC_RE.sub("", text)
-    text = _CSI_RE.sub("", text)
-    text = _ESC_RE.sub("", text)
-    return _CONTROL_RE.sub("", text)
+    return strip_terminal_control(value)
 
 
 def _basename(path: str) -> str:
@@ -206,7 +195,6 @@ def print_terminal_report(
     out.write(f"  关联案件:     {WHITE}{len(summary.incidents)}{RESET}\n")
 
     # 按级别统计
-    total_events = sum(r.stats.total for r in parse_results)
     crit  = sum(r.stats.critical for r in parse_results)
     high  = sum(r.stats.high for r in parse_results)
     med   = sum(r.stats.medium for r in parse_results)
@@ -214,7 +202,7 @@ def print_terminal_report(
     info  = sum(r.stats.info for r in parse_results)
 
     out.write(f"\n  {_hr()}\n")
-    out.write(f"  事件级别分布:\n")
+    out.write("  事件级别分布:\n")
     out.write(f"    {RED}{BOLD}严重: {crit:>5}{RESET}  {ORANGE}{BOLD}高危: {high:>5}{RESET}  "
               f"{YELLOW}中危: {med:>5}{RESET}  {GREEN}低危: {low:>5}{RESET}  {BLUE}信息: {info:>5}{RESET}\n")
 

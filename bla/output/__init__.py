@@ -6,6 +6,7 @@ from .csv_report import generate_csv_report
 from .ioc_report import generate_ioc_report
 from .sarif_report import generate_sarif_report
 from .bundle import generate_report_bundle
+from .manifest import generate_manifest
 
 __all__ = [
     "print_terminal_report",
@@ -15,4 +16,5 @@ __all__ = [
     "generate_ioc_report",
     "generate_sarif_report",
     "generate_report_bundle",
+    "generate_manifest",
 ]

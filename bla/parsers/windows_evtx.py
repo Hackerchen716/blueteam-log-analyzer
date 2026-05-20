@@ -14,7 +14,6 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Optional, Tuple
-from collections import defaultdict
 
 from ..models import LogEvent, ParseResult, ParseStats, ThreatLevel
 from ..utils.helpers import gen_id, normalize_timestamp, truncate

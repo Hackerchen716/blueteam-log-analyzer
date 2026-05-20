@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..models import AnalysisSummary, ParseResult
 from ..utils.helpers import safe_print
@@ -10,6 +10,7 @@ from .csv_report import generate_csv_report
 from .html_report import generate_html_report
 from .ioc_report import generate_ioc_report
 from .json_report import generate_json_report
+from .manifest import generate_manifest
 from .sarif_report import generate_sarif_report
 
 
@@ -17,6 +18,7 @@ def generate_report_bundle(
     parse_results: List[ParseResult],
     summary: AnalysisSummary,
     output_dir: str,
+    manifest_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
     """生成一套标准交付报告文件，并返回各产物路径。"""
     os.makedirs(output_dir, exist_ok=True)
@@ -26,6 +28,7 @@ def generate_report_bundle(
         "csv": os.path.join(output_dir, "events.csv"),
         "ioc": os.path.join(output_dir, "iocs.txt"),
         "sarif": os.path.join(output_dir, "report.sarif"),
+        "manifest": os.path.join(output_dir, "manifest.json"),
     }
 
     safe_print(f"  [✓] 报告目录: {output_dir}")
@@ -34,4 +37,11 @@ def generate_report_bundle(
     generate_csv_report(parse_results, summary, paths["csv"])
     generate_ioc_report(parse_results, summary, paths["ioc"])
     generate_sarif_report(parse_results, summary, paths["sarif"])
+    generate_manifest(
+        parse_results,
+        summary,
+        paths["manifest"],
+        context=manifest_context,
+        bundle_files={key: value for key, value in paths.items() if key != "manifest"},
+    )
     return paths

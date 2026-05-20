@@ -18,7 +18,7 @@ from typing import Any, Dict, List
 
 from ..__version__ import __version__
 from ..models import AnalysisSummary, DetectionAlert, ParseResult, ThreatLevel
-from ..utils.helpers import safe_print
+from ..utils.helpers import safe_print, sanitize_report_text
 
 
 SARIF_VERSION = "2.1.0"
@@ -38,17 +38,17 @@ _LEVEL_MAP = {
 
 def _build_rule(alert: DetectionAlert) -> Dict[str, Any]:
     return {
-        "id": alert.rule_id,
-        "name": alert.rule_name,
-        "shortDescription": {"text": alert.rule_name},
-        "fullDescription": {"text": alert.description},
+        "id": sanitize_report_text(alert.rule_id),
+        "name": sanitize_report_text(alert.rule_name),
+        "shortDescription": {"text": sanitize_report_text(alert.rule_name)},
+        "fullDescription": {"text": sanitize_report_text(alert.description)},
         "helpUri": "https://attack.mitre.org/techniques/" + alert.mitre_attack.replace(".", "/")
         if alert.mitre_attack else "",
         "properties": {
-            "category": alert.category,
-            "mitre_phase": alert.mitre_phase,
-            "mitre_attack": alert.mitre_attack,
-            "tags": ["security", "blueteam", alert.category],
+            "category": sanitize_report_text(alert.category),
+            "mitre_phase": sanitize_report_text(alert.mitre_phase),
+            "mitre_attack": sanitize_report_text(alert.mitre_attack),
+            "tags": ["security", "blueteam", sanitize_report_text(alert.category)],
         },
     }
 
@@ -56,10 +56,10 @@ def _build_rule(alert: DetectionAlert) -> Dict[str, Any]:
 def _build_result(alert: DetectionAlert, source_file: str) -> Dict[str, Any]:
     uri = _artifact_uri(source_file)
     return {
-        "ruleId": alert.rule_id,
+        "ruleId": sanitize_report_text(alert.rule_id),
         "level": _LEVEL_MAP.get(alert.level, "warning"),
         "message": {
-            "text": f"{alert.description}\n建议: {alert.recommendation}",
+            "text": sanitize_report_text(f"{alert.description}\n建议: {alert.recommendation}"),
         },
         "locations": [
             {
@@ -69,12 +69,12 @@ def _build_result(alert: DetectionAlert, source_file: str) -> Dict[str, Any]:
             }
         ],
         "properties": {
-            "confidence": alert.confidence,
-            "evidence": alert.evidence,
+            "confidence": sanitize_report_text(alert.confidence),
+            "evidence": [sanitize_report_text(item) for item in alert.evidence],
             "affected_events": alert.affected_events,
             "affected_event_count": len(alert.affected_events),
-            "timestamp": alert.timestamp,
-            "original_source_file": source_file,
+            "timestamp": sanitize_report_text(alert.timestamp),
+            "original_source_file": sanitize_report_text(source_file),
         },
     }
 
@@ -83,12 +83,13 @@ def _artifact_uri(source_file: str) -> str:
     source = str(source_file or "<merged>")
     if re.match(r"^[A-Za-z0-9_.-]+:", source) and "://" not in source:
         host, rest = source.split(":", 1)
+        host = sanitize_report_text(host)
         rest = rest.replace("\\", "/")
         if rest.startswith("journalctl:"):
             return f"remote/{host}/journalctl/{rest.split(':', 1)[1]}"
         if rest.startswith("/"):
             return f"remote/{host}{rest}"
-    return source.replace("\\", "/")
+    return sanitize_report_text(source).replace("\\", "/")
 
 
 def generate_sarif_report(

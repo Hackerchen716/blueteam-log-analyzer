@@ -6,6 +6,7 @@ keeps parsing, detection, correlation, and report generation on the local host.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shlex
 import subprocess
@@ -19,6 +20,7 @@ from ..core import AnalysisError, AnalysisOptions, AnalysisOutputs, run_analysis
 from ..models import ThreatLevel
 from ..output import print_terminal_report
 from ..parsers import list_parser_names
+from ..utils.helpers import strip_terminal_control
 
 PrintFn = Callable[..., None]
 
@@ -27,6 +29,8 @@ _EXIT_THRESHOLDS = {
     "high": ThreatLevel.HIGH.score,
     "medium": ThreatLevel.MEDIUM.score,
 }
+DEFAULT_REMOTE_MAX_BYTES = 256 * 1024 * 1024
+DEFAULT_REMOTE_COMMAND_TIMEOUT = 120
 
 
 @dataclass
@@ -54,6 +58,8 @@ class SSHClient:
         identity_file: Optional[str] = None,
         connect_timeout: int = 10,
     ) -> None:
+        if not _is_safe_ssh_target(target):
+            raise ValueError("SSH 目标不能以 '-' 开头；请使用 user@host、IP 或 ~/.ssh/config 主机别名")
         self.target = target
         self.port = port
         self.identity_file = identity_file
@@ -71,7 +77,26 @@ class SSHClient:
         )
         return RemoteCommandResult(completed.returncode, completed.stdout, completed.stderr)
 
-    def fetch_file(self, remote_path: str, local_path: str, cwd: str) -> None:
+    def fetch_file(
+        self,
+        remote_path: str,
+        local_path: str,
+        cwd: str,
+        max_bytes: int = DEFAULT_REMOTE_MAX_BYTES,
+        timeout: Optional[int] = DEFAULT_REMOTE_COMMAND_TIMEOUT,
+    ) -> None:
+        size_cmd = _remote_cd_command(cwd, f"test -f {_qp(remote_path)} && wc -c < {_qp(remote_path)}")
+        size_result = self.run(size_cmd, timeout=timeout)
+        if size_result.returncode != 0:
+            err = size_result.error_text.strip()
+            raise RuntimeError(err or f"无法读取远程文件: {remote_path}")
+        try:
+            size = int(size_result.text.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            size = 0
+        if max_bytes > 0 and size > max_bytes:
+            raise RuntimeError(f"远程文件过大: {size} bytes，超过上限 {max_bytes} bytes")
+
         remote_cmd = _remote_cd_command(cwd, f"test -f {_qp(remote_path)} && cat -- {_qp(remote_path)}")
         args = self._base_args()
         args.append(remote_cmd)
@@ -80,15 +105,25 @@ class SSHClient:
                 args,
                 stdout=out,
                 stderr=subprocess.PIPE,
-                timeout=None,
+                timeout=timeout,
                 check=False,
             )
         if completed.returncode != 0:
             err = completed.stderr.decode("utf-8", errors="replace").strip()
             raise RuntimeError(err or f"无法读取远程文件: {remote_path}")
 
-    def capture_command(self, command: str, local_path: str, cwd: str, timeout: Optional[int] = None) -> None:
-        remote_cmd = _remote_cd_command(cwd, command)
+    def capture_command(
+        self,
+        command: str,
+        local_path: str,
+        cwd: str,
+        timeout: Optional[int] = DEFAULT_REMOTE_COMMAND_TIMEOUT,
+        max_bytes: int = DEFAULT_REMOTE_MAX_BYTES,
+    ) -> None:
+        capped_command = command
+        if max_bytes > 0:
+            capped_command = f"({command}) | head -c {max_bytes + 1}"
+        remote_cmd = _remote_cd_command(cwd, capped_command)
         args = self._base_args()
         args.append(remote_cmd)
         with open(local_path, "wb") as out:
@@ -102,6 +137,12 @@ class SSHClient:
         if completed.returncode != 0:
             err = completed.stderr.decode("utf-8", errors="replace").strip()
             raise RuntimeError(err or f"远程命令失败: {command}")
+        if max_bytes > 0 and os.path.getsize(local_path) > max_bytes:
+            try:
+                os.unlink(local_path)
+            except OSError:
+                pass
+            raise RuntimeError(f"远程命令输出超过上限 {max_bytes} bytes: {command}")
 
     def _base_args(self) -> List[str]:
         args = [
@@ -115,6 +156,7 @@ class SSHClient:
             args.extend(["-p", str(self.port)])
         if self.identity_file:
             args.extend(["-i", self.identity_file])
+        args.append("--")
         args.append(self.target)
         return args
 
@@ -127,18 +169,22 @@ class RemoteWorkspace:
         client: SSHClient,
         initial_cwd: str = ".",
         print_fn: Optional[PrintFn] = None,
+        max_fetch_bytes: int = DEFAULT_REMOTE_MAX_BYTES,
+        command_timeout: int = DEFAULT_REMOTE_COMMAND_TIMEOUT,
     ) -> None:
         self.client = client
         self.cwd = initial_cwd or "."
         self.print = print_fn if print_fn is not None else print
+        self.max_fetch_bytes = max_fetch_bytes
+        self.command_timeout = command_timeout
 
     def start(self) -> None:
         self.cwd = self._resolve_remote_cwd(self.cwd)
-        self.print(f"已连接 {self.client.target}，远程目标无需安装 Python/pip/BLA。")
+        self.print(f"已连接 {_display_text(self.client.target)}，远程目标无需安装 Python/pip/BLA。")
         self.print("输入 help 查看命令；在远程目录中直接执行 bla access.log 即可本地分析。")
         while True:
             try:
-                line = input(f"bla@{self.client.target}:{self.cwd}$ ")
+                line = input(f"bla@{_display_text(self.client.target)}:{_display_text(self.cwd)}$ ")
             except EOFError:
                 self.print("")
                 return
@@ -183,7 +229,7 @@ class RemoteWorkspace:
             self.print("collect 暂未开放；请使用 bla FILE 或 bla journalctl:UNIT 拉回远程日志并在本机分析。")
             return 0
 
-        self.print(f"不支持远程任意命令: {command}。可用命令: help, ls, cd, pwd, find, tail, bla, exit")
+        self.print(f"不支持远程任意命令: {_display_text(command)}。可用命令: help, ls, cd, pwd, find, tail, bla, exit")
         return 2
 
     def _cmd_cd(self, args: Sequence[str]) -> int:
@@ -245,7 +291,7 @@ class RemoteWorkspace:
     def _cmd_bla(self, args: Sequence[str]) -> int:
         parser = argparse.ArgumentParser(prog="bla", add_help=True)
         parser.add_argument("paths", nargs="+", help="远程日志文件路径")
-        parser.add_argument("--out", metavar="DIR", help="本地标准报告目录")
+        parser.add_argument("--out", metavar="DIR", help="本地标准报告目录（含 manifest.json）")
         parser.add_argument("--html", metavar="FILE", help="本地 HTML 报告")
         parser.add_argument("--json", metavar="FILE", help="本地 JSON 报告")
         parser.add_argument("--csv", metavar="FILE", help="本地 CSV 事件列表")
@@ -337,6 +383,17 @@ class RemoteWorkspace:
                         sarif=parsed.sarif,
                         bundle_dir=parsed.out,
                     ),
+                    manifest_context=_remote_manifest_context(
+                        parsed,
+                        local_paths,
+                        labels,
+                        self.client.target,
+                        self.cwd,
+                        self.max_fetch_bytes,
+                        self.command_timeout,
+                        run_result.parse_errors,
+                        run_result.suppressed_events,
+                    ),
                 )
             except OSError as e:
                 self.print(f"报告写入失败: {e}", file=sys.stderr)
@@ -350,15 +407,27 @@ class RemoteWorkspace:
                 raise RuntimeError("journalctl: 后面需要服务名，例如 journalctl:ssh")
             safe_unit = "".join(ch if ch.isalnum() or ch in "._@-" else "_" for ch in unit)
             local_path = os.path.join(tmp, f"journalctl-{safe_unit}.log")
-            command = f"journalctl -u {_q(unit)} --no-pager -o short"
-            self.client.capture_command(command, local_path, self.cwd)
-            return local_path, f"{self.client.target}:journalctl:{unit}"
+            command = f"journalctl -u {_q(unit)} -n 5000 --no-pager -o short"
+            self.client.capture_command(
+                command,
+                local_path,
+                self.cwd,
+                timeout=self.command_timeout,
+                max_bytes=self.max_fetch_bytes,
+            )
+            return local_path, _display_text(f"{self.client.target}:journalctl:{unit}")
 
         display_path = self._display_path(remote_item)
         basename = PurePosixPath(display_path).name or "remote.log"
         local_path = _unique_path(tmp, basename)
-        self.client.fetch_file(remote_item, local_path, self.cwd)
-        return local_path, f"{self.client.target}:{display_path}"
+        self.client.fetch_file(
+            remote_item,
+            local_path,
+            self.cwd,
+            max_bytes=self.max_fetch_bytes,
+            timeout=self.command_timeout,
+        )
+        return local_path, _display_text(f"{self.client.target}:{display_path}")
 
     def _annotate_remote_sources(self, parse_results, labels: dict[str, str]) -> None:
         for result in parse_results:
@@ -407,18 +476,87 @@ class RemoteWorkspace:
 
     def _print_result(self, result: RemoteCommandResult) -> int:
         if result.stdout:
-            self.print(result.text.rstrip())
+            self.print(_display_text(result.text.rstrip()))
         if result.returncode != 0:
             self._print_remote_error(result)
         return result.returncode
 
     def _print_remote_error(self, result: RemoteCommandResult) -> None:
         message = result.error_text.strip() or result.text.strip() or f"远程命令失败，退出码 {result.returncode}"
+        message = _display_text(message)
         self.print(message, file=sys.stderr)
 
 
 def _q(value: str) -> str:
     return shlex.quote(value)
+
+
+def _display_text(value: object) -> str:
+    return strip_terminal_control(value)
+
+
+def _is_safe_ssh_target(value: str) -> bool:
+    return bool(str(value or "").strip()) and not str(value).lstrip().startswith("-")
+
+
+def _remote_manifest_context(
+    parsed: argparse.Namespace,
+    local_paths: Sequence[str],
+    labels: dict[str, str],
+    target: str,
+    cwd: str,
+    max_fetch_bytes: int,
+    command_timeout: int,
+    parse_errors: Sequence[str],
+    suppressed_events: int,
+) -> dict:
+    return {
+        "inputs": [_remote_input_manifest_record(path, labels) for path in local_paths],
+        "options": {
+            "profile": parsed.profile,
+            "parser": parsed.type,
+            "rules": parsed.rules or [],
+            "allowlist": parsed.allowlist,
+            "config": parsed.config,
+            "exit_on": parsed.exit_on,
+            "syslog_year": parsed.syslog_year,
+            "rdp_only": parsed.rdp,
+            "max_alerts": parsed.max_alerts,
+            "full_evidence": bool(parsed.full_evidence),
+        },
+        "remote": {
+            "target": target,
+            "cwd": cwd,
+            "max_fetch_bytes": max_fetch_bytes,
+            "command_timeout": command_timeout,
+        },
+        "parse_errors": list(parse_errors),
+        "suppressed_events": suppressed_events,
+    }
+
+
+def _remote_input_manifest_record(path: str, labels: dict[str, str]) -> dict:
+    name = Path(path).name
+    record = {
+        "remote_label": labels.get(name, name),
+        "local_name": name,
+        "size_bytes": 0,
+        "sha256": "",
+    }
+    try:
+        record["size_bytes"] = os.path.getsize(path)
+        record["sha256"] = _sha256_file(path)
+    except OSError:
+        pass
+    return record
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _split_workspace_line(line: str) -> List[str]:

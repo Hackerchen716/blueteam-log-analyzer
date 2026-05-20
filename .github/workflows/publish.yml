@@ -35,52 +35,7 @@ jobs:
       - name: Run validation
         run: |
           python -m pip install --upgrade build twine pytest
-          python -m pytest -q
-          python -m compileall -q bla bla_cli.py setup.py tests
-          python bla_cli.py validate-rules --strict-metadata
-          python bla_cli.py ssh --help
-
-      - name: Build package
-        run: python -m build
-
-      - name: Check distribution metadata
-        run: |
-          python -m twine check dist/*
-          python - <<'PY'
-          from pathlib import Path
-          import tarfile
-          import zipfile
-          from bla.__version__ import __version__
-
-          dist = Path("dist")
-          wheels = sorted(dist.glob("*.whl"))
-          sdists = sorted(dist.glob("*.tar.gz"))
-          if len(wheels) != 1 or len(sdists) != 1:
-              raise SystemExit("Expected exactly one wheel and one source distribution")
-
-          with zipfile.ZipFile(wheels[0]) as archive:
-              names = archive.namelist()
-              if "bla/rules/web_attacks.yaml" not in names:
-                  raise SystemExit("Wheel is missing bla/rules/web_attacks.yaml")
-              if "bla/remote/ssh_workspace.py" not in names:
-                  raise SystemExit("Wheel is missing bla/remote/ssh_workspace.py")
-
-          with tarfile.open(sdists[0]) as archive:
-              names = archive.getnames()
-              if not any(name.endswith("/bla/rules/web_attacks.yaml") for name in names):
-                  raise SystemExit("Source distribution is missing bla/rules/web_attacks.yaml")
-              if not any(name.endswith("/bla/remote/ssh_workspace.py") for name in names):
-                  raise SystemExit("Source distribution is missing bla/remote/ssh_workspace.py")
-              required = [
-                  f"/docs/releases/v{__version__}.md",
-                  "/sample_logs/auth.log",
-                  "/sample_logs/windows_rdp_sample.xml",
-                  "/tests/fixtures/p0/hvv_chain.jsonl",
-              ]
-              for suffix in required:
-                  if not any(name.endswith(suffix) for name in names):
-                      raise SystemExit(f"Source distribution is missing {suffix}")
-          PY
+          python scripts/release_check.py --build
 
       - name: Smoke test built wheel
         run: |

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import csv
 import datetime
-import io
 import json
 import os
 import re
@@ -66,6 +65,30 @@ _MALWARE_RE = re.compile(
     r'webshell|backdoor|木马|后门|cobalt|beacon|cs\b|哥斯拉|冰蝎|蚁剑)',
     re.I,
 )
+_KIND_FAST_ALIASES = {
+    "waf": "waf",
+    "webfirewall": "waf",
+    "modsecurity": "waf",
+    "websecurity": "waf",
+    "vpn": "vpn",
+    "sslvpn": "vpn",
+    "openvpn": "vpn",
+    "ztna": "vpn",
+    "bastion": "bastion",
+    "jumpserver": "bastion",
+    "jumphost": "bastion",
+    "dns": "dns",
+    "proxy": "proxy",
+    "swg": "proxy",
+    "firewall": "firewall",
+    "fw": "firewall",
+    "nat": "firewall",
+    "edr": "edr",
+    "xdr": "edr",
+    "hids": "edr",
+    "application": "app",
+    "app": "app",
+}
 
 
 def looks_like_p0_security_log(file_path: str, sample_text: str) -> bool:
@@ -652,6 +675,10 @@ def _dns_suspicion(query: str, category: str, rcode: str) -> Optional[Tuple[str,
 
 
 def _infer_kind(fields: Dict[str, str], source_file: str) -> str:
+    explicit = _explicit_kind(fields)
+    if explicit:
+        return explicit
+
     hay = " ".join([source_file.lower(), *fields.keys(), *list(fields.values())[:20]])
     checks = [
         ("waf", r'\bwaf\b|web.?security|modsecurity|web.?firewall|attacktype|ruleid|rulename'),
@@ -666,6 +693,21 @@ def _infer_kind(fields: Dict[str, str], source_file: str) -> str:
     for kind, pattern in checks:
         if re.search(pattern, hay, re.I):
             return kind
+    return ""
+
+
+def _explicit_kind(fields: Dict[str, str]) -> str:
+    """Use normalized product/source fields before falling back to broad regex."""
+    for key in ("p0kind", "logtype", "sourcetype", "source", "type", "product", "category"):
+        value = fields.get(key, "").strip().lower()
+        if not value:
+            continue
+        compact = _norm_key(value)
+        if compact in _KIND_FAST_ALIASES:
+            return _KIND_FAST_ALIASES[compact]
+        for alias, kind in _KIND_FAST_ALIASES.items():
+            if alias and alias in compact:
+                return kind
     return ""
 
 
