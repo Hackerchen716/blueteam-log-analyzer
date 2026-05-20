@@ -235,6 +235,17 @@ def iter_file_lines(path: str) -> Iterator[str]:
         for line in f:
             yield line.rstrip('\n\r')
 
+
+def iter_file_chunks(path: str, chunk_size: int = 1024 * 1024) -> Iterator[str]:
+    """按文本块读取文件，供 XML/JSON 等解析器避免一次性读入大文件。"""
+    enc = detect_encoding(_read_prefix(path))
+    with open(path, 'r', encoding=enc, errors='replace') as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+
 def file_size(path: str) -> int:
     try:
         return os.path.getsize(path)

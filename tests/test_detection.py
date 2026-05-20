@@ -1,5 +1,6 @@
 from _support import *
 
+
 class DetectionRegressionTests(unittest.TestCase):
     def test_high_frequency_success_requests_create_volume_alert(self):
         content = "".join(
@@ -467,6 +468,56 @@ web_attacks:
         self.assertIn("web-attacks", list_detector_names())
         summary = run_detection([event], pre_enriched=True, detector_registry=registry)
         self.assertEqual([alert.rule_id for alert in summary.alerts], ["REG-001"])
+
+    def test_detector_registry_selector_limits_candidate_events(self):
+        hot = LogEvent(
+            id="hot",
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.HIGH,
+            category="测试",
+            source="fixture",
+            source_file="events.log",
+            message="hot",
+            raw_line="hot",
+            tags=["fixture-hot"],
+        )
+        noise = LogEvent(
+            id="noise",
+            timestamp="2024-03-15T10:00:01",
+            level=ThreatLevel.INFO,
+            category="噪声",
+            source="fixture",
+            source_file="events.log",
+            message="noise",
+            raw_line="noise",
+        )
+        seen_counts = []
+
+        def _fixture_detector(events):
+            seen_counts.append(len(events))
+            return [DetectionAlert(
+                id="a-select",
+                rule_id="REG-SEL-001",
+                rule_name="Registry selector",
+                description=f"saw {len(events)} selected event(s)",
+                level=ThreatLevel.HIGH,
+                category="测试",
+                mitre_attack="T1190",
+                mitre_phase="初始访问",
+                affected_events=[event.id for event in events],
+                evidence=["selector evidence"],
+                recommendation="selector recommendation",
+                timestamp=events[0].timestamp,
+                confidence="high",
+            )]
+
+        registry = DetectorRegistry()
+        registry.register(DetectorSpec("fixture-select", _fixture_detector, selector=lambda index: index.tags_any("fixture-hot")))
+
+        summary = run_detection([noise, hot], pre_enriched=True, detector_registry=registry)
+
+        self.assertEqual(seen_counts, [1])
+        self.assertEqual(summary.alerts[0].affected_events, ["hot"])
 
     def test_timeline_is_chronological_not_severity_sorted(self):
         early_medium = LogEvent(

@@ -2,22 +2,19 @@
 威胁检测引擎核心逻辑
 """
 from __future__ import annotations
+
 import datetime
 import hashlib
 import re
 from collections import defaultdict
-from typing import List, Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .. import config
-from ..models import (
-    LogEvent, DetectionAlert, TimelineEntry, AttackChainEntry,
-    AnalysisSummary, ThreatLevel
-)
+from ..models import AnalysisSummary, AttackChainEntry, DetectionAlert, LogEvent, ThreatLevel, TimelineEntry
 from ..utils.helpers import gen_id, is_private_ip
 from .correlation import correlate_incidents
 from .enrichment import enrich_events
-from .registry import DetectorRegistry, DetectorSpec, normalize_profiles
-
+from .registry import DetectionEventIndex, DetectorRegistry, DetectorSpec, normalize_profiles
 
 _CONFIDENCE_DOWNGRADE = {"high": "medium", "medium": "low", "low": "low"}
 _WINDOWS_ACCOUNT_CHAIN_WINDOW_SECONDS = 10 * 60
@@ -53,8 +50,11 @@ def run_detection(
         events = enrich_events(events)
     alerts: List[DetectionAlert] = []
     registry = detector_registry or get_default_detector_registry()
+    event_index = DetectionEventIndex(events)
     for detector in registry.list(profile):
-        alerts += detector.run(events)
+        detector_events = detector.select_events(event_index)
+        if detector_events or detector.selector is None:
+            alerts += detector.run(detector_events)
     alerts = _dedup_alerts(alerts)
 
     lvl_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -1078,24 +1078,79 @@ def list_detector_names(profile: Optional[str] = None) -> List[str]:
     return get_default_detector_registry().names(profile)
 
 
+def _select_auth_failures(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.tags_any("failed-login", "failed-logon")
+
+
+def _select_windows_account_chain(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.event_ids("4720", "4722", "4724", "4728", "4732", "4738", "4756", "4624", "4776")
+
+
+def _select_privilege_events(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.tags_any("group-add", "sudo-denied", "root-login")
+
+
+def _select_persistence_events(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.tags_any("service-install", "scheduled-task", "account-creation")
+
+
+def _select_defense_evasion_events(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.tags_any("log-cleared", "audit-policy")
+
+
+def _select_execution_events(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.union(index.categories("PowerShell"), index.tags_any("lolbin"))
+
+
+def _select_lateral_events(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.tags_any("rdp", "lateral-movement", "explicit-creds")
+
+
+def _select_recon_events(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.union(
+        index.categories("流量异常"),
+        index.tags_any("scanning", "scanner", "recon", "ddos"),
+    )
+
+
+def _select_p0_events(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.tags_any(
+        "c2", "dns-tunnel", "exfiltration", "bastion-command",
+        "exposed-service", "edr",
+    )
+
+
+def _select_cn_hvv_events(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.tags_any("cn-hvv", "failed-login", "failed-logon", "successful-login")
+
+
 def _ensure_default_detectors() -> None:
     global _DEFAULT_DETECTORS_REGISTERED
     if _DEFAULT_DETECTORS_REGISTERED:
         return
     for spec in (
-        DetectorSpec("brute-force", detect_brute_force),
-        DetectorSpec("password-spray", detect_password_spray),
-        DetectorSpec("windows-account-remote-access-chain", detect_windows_account_remote_access_chain),
-        DetectorSpec("privilege-escalation", detect_privilege_escalation),
-        DetectorSpec("persistence", detect_persistence),
-        DetectorSpec("defense-evasion", detect_defense_evasion),
+        DetectorSpec("brute-force", detect_brute_force, selector=_select_auth_failures),
+        DetectorSpec("password-spray", detect_password_spray, selector=_select_auth_failures),
+        DetectorSpec(
+            "windows-account-remote-access-chain",
+            detect_windows_account_remote_access_chain,
+            selector=_select_windows_account_chain,
+        ),
+        DetectorSpec("privilege-escalation", detect_privilege_escalation, selector=_select_privilege_events),
+        DetectorSpec("persistence", detect_persistence, selector=_select_persistence_events),
+        DetectorSpec("defense-evasion", detect_defense_evasion, selector=_select_defense_evasion_events),
         DetectorSpec("credential-access", detect_credential_access),
-        DetectorSpec("suspicious-execution", detect_suspicious_execution),
-        DetectorSpec("lateral-movement", detect_lateral_movement),
-        DetectorSpec("web-attacks", detect_web_attacks),
-        DetectorSpec("reconnaissance", detect_reconnaissance),
-        DetectorSpec("p0-security", detect_p0_security_events),
-        DetectorSpec("cn-hvv", detect_cn_hvv, profiles=normalize_profiles(("cn-hvv",))),
+        DetectorSpec("suspicious-execution", detect_suspicious_execution, selector=_select_execution_events),
+        DetectorSpec("lateral-movement", detect_lateral_movement, selector=_select_lateral_events),
+        DetectorSpec("web-attacks", detect_web_attacks, selector=lambda index: index.tags_any("web-attack")),
+        DetectorSpec("reconnaissance", detect_reconnaissance, selector=_select_recon_events),
+        DetectorSpec("p0-security", detect_p0_security_events, selector=_select_p0_events),
+        DetectorSpec(
+            "cn-hvv",
+            detect_cn_hvv,
+            profiles=normalize_profiles(("cn-hvv",)),
+            selector=_select_cn_hvv_events,
+        ),
     ):
         _DEFAULT_DETECTOR_REGISTRY.register(spec)
     _DEFAULT_DETECTORS_REGISTERED = True

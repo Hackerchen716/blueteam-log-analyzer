@@ -1,12 +1,12 @@
 """
 BlueTeam Log Analyzer - 威胁检测引擎
 """
-from .engine import run_detection as _engine_run_detection
-from .engine import list_detector_names, register_detector
 from .correlation import correlate_incidents
+from .engine import list_detector_names, register_detector
+from .engine import run_detection as _engine_run_detection
 from .enrichment import enrich_events
 from .evidence import enrich_alert_evidence
-from .registry import DetectorRegistry, DetectorSpec
+from .registry import DetectionEventIndex, DetectorRegistry, DetectorSpec
 
 
 def run_detection(events, profile: str = "default", pre_enriched: bool = False, detector_registry=None):
@@ -23,6 +23,7 @@ def run_detection(events, profile: str = "default", pre_enriched: bool = False, 
 __all__ = [
     "DetectorRegistry",
     "DetectorSpec",
+    "DetectionEventIndex",
     "correlate_incidents",
     "enrich_alert_evidence",
     "enrich_events",

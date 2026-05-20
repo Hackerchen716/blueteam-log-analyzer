@@ -1,5 +1,6 @@
 from _support import *
 
+
 class ReleaseHygieneRegressionTests(unittest.TestCase):
     def test_builtin_rule_metadata_validates_cleanly(self):
         """内置 YAML 规则必须具备可维护的元数据标准。"""

@@ -1,5 +1,6 @@
 from _support import *
 
+
 class ParserRegressionTests(unittest.TestCase):
     def test_web_payload_with_spaces_is_detected_as_sqli(self):
         content = (
@@ -432,6 +433,46 @@ web_attacks:
         self.assertEqual(result.log_type, "Web Access Log (Apache/Nginx)")
         self.assertGreater(result.file_size_bytes, 0)
         self.assertEqual(result.events[0].rule_name, "路径遍历")
+
+    def test_auto_parse_windows_xml_streams_from_file(self):
+        """Windows XML 文件入口不应为了解析而整文件读入。"""
+        xml = "".join(
+            "<Event><System><EventID>4625</EventID>"
+            f"<TimeCreated SystemTime=\"2024-03-15T01:02:{i:02d}.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">bob</Data>"
+            "<Data Name=\"IpAddress\">203.0.113.8</Data>"
+            "<Data Name=\"LogonType\">3</Data></EventData></Event>"
+            for i in range(3)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Security.xml"
+            path.write_text(xml, encoding="utf-8")
+            with mock.patch("bla.parsers.read_file", side_effect=AssertionError("full read not allowed")):
+                result = auto_parse(str(path))
+
+        self.assertEqual(result.log_type, "Windows Event Log (XML)")
+        self.assertEqual(len(result.events), 3)
+        self.assertGreater(result.file_size_bytes, 0)
+
+    def test_windows_xml_file_counts_trailing_incomplete_event(self):
+        good_xml = (
+            "<Event><System><EventID>4624</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:02:03.000Z\"/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">bob</Data></EventData></Event>"
+        )
+        truncated_xml = (
+            "<Event><System><EventID>4625</EventID>"
+            "<TimeCreated SystemTime=\"2024-03-15T01:03:03.000Z\"/>"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Security.xml"
+            path.write_text(good_xml + truncated_xml, encoding="utf-8")
+            result = parse_windows_xml_file(str(path), path.name)
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.stats.parse_errors, 1)
 
     def test_parser_registry_supports_explicit_type_and_content_input(self):
         """解析层应支持强制类型和内存内容，方便 Remote Collector 复用。"""

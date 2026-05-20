@@ -1,5 +1,6 @@
 from _support import *
 
+
 class P0SecurityRegressionTests(unittest.TestCase):
     def test_p0_waf_csv_detects_web_attack(self):
         content = (
@@ -150,6 +151,77 @@ class P0SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(result.events[0].level, ThreatLevel.CRITICAL)
         self.assertIn("malware-indicator", result.events[0].tags)
         self.assertIn("lsass-dump", result.events[0].tags)
+
+    def test_p0_json_array_file_streams_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "vpn.json"
+            path.write_text(
+                _json.dumps([
+                    {
+                        "log_type": "vpn",
+                        "time": "2024-03-15 10:00:00",
+                        "user": "alice",
+                        "src_ip": "198.51.100.44",
+                        "result": "failed",
+                    },
+                    {
+                        "log_type": "vpn",
+                        "time": "2024-03-15 10:00:01",
+                        "user": "alice",
+                        "src_ip": "198.51.100.44",
+                        "result": "failed",
+                    },
+                ]),
+                encoding="utf-8",
+            )
+            result = parse_p0_security_json_file(str(path), path.name)
+
+        self.assertEqual(len(result.events), 2)
+        self.assertTrue(all("failed-login" in event.tags for event in result.events))
+        self.assertGreater(result.file_size_bytes, 0)
+
+    def test_p0_json_wrapper_records_file_is_supported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "edr.json"
+            path.write_text(
+                _json.dumps({
+                    "records": [{
+                        "log_type": "edr",
+                        "time": "2024-03-15 10:04:00",
+                        "host": "win-01",
+                        "severity": "critical",
+                        "alert": "Mimikatz credential dumping",
+                    }]
+                }),
+                encoding="utf-8",
+            )
+            result = parse_p0_security_json_file(str(path), path.name)
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].source, "EDR/XDR")
+        self.assertIn("lsass-dump", result.events[0].tags)
+
+    def test_p0_json_file_keeps_partial_events_and_counts_decode_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "vpn.json"
+            path.write_text(
+                '['
+                '{"log_type":"vpn","time":"2024-03-15 10:00:00","user":"alice","src_ip":"198.51.100.44","result":"failed"},'
+                '{"log_type":"vpn","time":"2024-03-15 10:00:01","user":"alice","src_ip":'
+                ,
+                encoding="utf-8",
+            )
+            result = parse_p0_security_json_file(str(path), path.name)
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.stats.parse_errors, 1)
+        self.assertIn("failed-login", result.events[0].tags)
+
+    def test_p0_adapter_registry_exposes_expected_kinds(self):
+        self.assertEqual(
+            list_p0_adapter_kinds(),
+            ["waf", "vpn", "edr", "dns", "proxy", "firewall", "bastion", "app"],
+        )
 
     def test_auto_parse_p0_application_log_detects_exploit_trace(self):
         with tempfile.TemporaryDirectory() as tmp:

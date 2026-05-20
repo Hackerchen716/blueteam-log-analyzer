@@ -13,20 +13,25 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from functools import lru_cache
 from itertools import chain, islice
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from ..models import LogEvent, ParseResult, ParseStats, ThreatLevel
 from ..rules import get_web_attack_rules
 from ..utils.helpers import (
-    file_size, gen_id, iter_file_lines, normalize_timestamp, read_file,
-    read_file_sample, truncate,
+    file_size,
+    gen_id,
+    iter_file_chunks,
+    iter_file_lines,
+    normalize_timestamp,
+    read_file_sample,
+    truncate,
 )
 from .stats import compute_stats
 from .web_access import _ATTACK_PATTERNS, _decode_url
-
 
 _P0_FILENAME_HINTS = (
     "waf", "webfirewall", "modsecurity", "vpn", "sslvpn", "ztna",
@@ -90,6 +95,19 @@ _KIND_FAST_ALIASES = {
     "app": "app",
 }
 
+P0Builder = Callable[[Dict[str, str], str, str], Optional[LogEvent]]
+
+
+@dataclass(frozen=True)
+class P0Adapter:
+    """P0 source adapter metadata used for routing structured records."""
+
+    kind: str
+    source_label: str
+    build: P0Builder
+    aliases: Tuple[str, ...]
+    infer_pattern: str
+
 
 def looks_like_p0_security_log(file_path: str, sample_text: str) -> bool:
     """判断是否适合走 P0 结构化安全日志解析器。"""
@@ -111,24 +129,21 @@ def parse_p0_security_file(path: str, source_file: Optional[str] = None) -> Pars
     sample = read_file_sample(path)
     source_name = source_file or os.path.basename(path)
     if _looks_like_csv_header(sample):
-        content = read_file(path)
         return parse_p0_security_lines(
-            content.splitlines(),
+            iter_file_lines(path),
             source_name,
             file_size_bytes=file_size(path),
             parser_hint="csv",
         )
     stripped = sample.lstrip()
-    if stripped.startswith("["):
-        content = read_file(path)
-        return parse_p0_security_json(content, source_name, file_size(path))
     if stripped.startswith("{"):
-        content = read_file(path)
-        parsed = parse_p0_security_json(content, source_name, file_size(path))
+        parsed = parse_p0_security_json_file(path, source_name)
         if parsed.stats.parse_errors == 0:
             return parsed
-        fallback = parse_p0_security_lines(content.splitlines(), source_name, file_size_bytes=file_size(path))
+        fallback = parse_p0_security_lines(iter_file_lines(path), source_name, file_size_bytes=file_size(path))
         return fallback if fallback.events else parsed
+    if stripped.startswith("["):
+        return parse_p0_security_json_file(path, source_name)
     return parse_p0_security_lines(
         iter_file_lines(path),
         source_name,
@@ -153,6 +168,110 @@ def parse_p0_security_json(content: str, source_file: str, file_size_bytes: int 
         if ev:
             events.append(ev)
     return _result(source_file, events, t0, file_size_bytes)
+
+
+def parse_p0_security_json_file(path: str, source_file: Optional[str] = None) -> ParseResult:
+    """Stream JSON object/array/JSONL P0 exports from disk.
+
+    JSON arrays are decoded one record at a time so large vendor exports do not
+    need to be materialized as a single Python list before event normalization.
+    """
+    t0 = time.time()
+    source_name = source_file or os.path.basename(path)
+    events: List[LogEvent] = []
+    parse_errors = 0
+    try:
+        for row in _iter_json_records_from_chunks(iter_file_chunks(path)):
+            ev = _event_from_record(row, json.dumps(row, ensure_ascii=False), source_name)
+            if ev:
+                events.append(ev)
+    except json.JSONDecodeError:
+        parse_errors += 1
+    return _result(source_name, events, t0, file_size(path), parse_errors=parse_errors)
+
+
+def _iter_json_records_from_chunks(chunks: Iterable[str]) -> Iterator[Dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    iterator = iter(chunks)
+    buffer = ""
+    pos = 0
+    eof = False
+    mode = ""
+
+    def fill() -> bool:
+        nonlocal buffer, eof
+        if eof:
+            return False
+        try:
+            buffer += next(iterator)
+            return True
+        except StopIteration:
+            eof = True
+            return False
+
+    def skip_ws() -> bool:
+        nonlocal buffer, pos
+        while True:
+            while pos < len(buffer) and buffer[pos].isspace():
+                pos += 1
+            if pos < len(buffer):
+                return True
+            if not fill():
+                return False
+            if pos > 1024 * 1024:
+                buffer = buffer[pos:]
+                pos = 0
+
+    def decode_value() -> Any:
+        nonlocal buffer, pos
+        while True:
+            try:
+                value, end = decoder.raw_decode(buffer, pos)
+                pos = end
+                if pos > 1024 * 1024:
+                    buffer = buffer[pos:]
+                    pos = 0
+                return value
+            except json.JSONDecodeError:
+                if not fill():
+                    raise
+
+    while True:
+        if not skip_ws():
+            return
+        if not mode:
+            if buffer[pos] == "[":
+                mode = "array"
+                pos += 1
+                continue
+            mode = "sequence"
+
+        if mode == "array":
+            if not skip_ws():
+                raise json.JSONDecodeError("unterminated JSON array", buffer, pos)
+            if buffer[pos] == "]":
+                return
+            if buffer[pos] == ",":
+                pos += 1
+                continue
+            yield from _json_value_records(decode_value())
+            continue
+
+        yield from _json_value_records(decode_value())
+
+
+def _json_value_records(value: Any) -> Iterator[Dict[str, Any]]:
+    if isinstance(value, dict):
+        for key in ("events", "records", "logs", "items", "data"):
+            nested = value.get(key)
+            if isinstance(nested, list) and all(isinstance(item, dict) for item in nested):
+                yield from nested
+                return
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                yield item
 
 
 def parse_p0_security_lines(
@@ -231,22 +350,9 @@ def _parse_structured_line(line: str) -> Optional[Dict[str, Any]]:
 def _event_from_record(record: Dict[str, Any], raw_line: str, source_file: str) -> Optional[LogEvent]:
     fields = _normalize_record(record)
     kind = _infer_kind(fields, source_file)
-    if kind == "waf":
-        return _build_waf_event(fields, raw_line, source_file)
-    if kind == "vpn":
-        return _build_vpn_event(fields, raw_line, source_file)
-    if kind == "bastion":
-        return _build_bastion_event(fields, raw_line, source_file)
-    if kind == "dns":
-        return _build_dns_event(fields, raw_line, source_file)
-    if kind == "proxy":
-        return _build_proxy_event(fields, raw_line, source_file)
-    if kind == "firewall":
-        return _build_firewall_event(fields, raw_line, source_file)
-    if kind == "edr":
-        return _build_edr_event(fields, raw_line, source_file)
-    if kind == "app":
-        return _build_app_event(fields, raw_line, source_file)
+    builder = _P0_ADAPTER_BUILDERS.get(kind)
+    if builder:
+        return builder(fields, raw_line, source_file)
     return _build_generic_security_event(fields, raw_line, source_file)
 
 
@@ -680,17 +786,7 @@ def _infer_kind(fields: Dict[str, str], source_file: str) -> str:
         return explicit
 
     hay = " ".join([source_file.lower(), *fields.keys(), *list(fields.values())[:20]])
-    checks = [
-        ("waf", r'\bwaf\b|web.?security|modsecurity|web.?firewall|attacktype|ruleid|rulename'),
-        ("vpn", r'\bvpn\b|sslvpn|openvpn|forticlient|zero.?trust|ztna|mfa'),
-        ("edr", r'\bedr\b|\bxdr\b|hids|antivirus|endpoint|threatname|alertname|processname'),
-        ("dns", r'\bdns\b|queryname|qname|fqdn|rcode'),
-        ("proxy", r'\bproxy\b|swg|上网行为|\burl\b|fullurl|web.?gateway'),
-        ("firewall", r'firewall|\bfw\b|\bnat\b|session|srcport|dstport|dport|destinationport'),
-        ("bastion", r'bastion|jumpserver|jump.?host|堡垒|command.?audit|session.?audit'),
-        ("app", r'application|spring|tomcat|appname|exception|stacktrace|traceid'),
-    ]
-    for kind, pattern in checks:
+    for kind, pattern in _P0_ADAPTER_INFER_PATTERNS:
         if re.search(pattern, hay, re.I):
             return kind
     return ""
@@ -703,9 +799,9 @@ def _explicit_kind(fields: Dict[str, str]) -> str:
         if not value:
             continue
         compact = _norm_key(value)
-        if compact in _KIND_FAST_ALIASES:
-            return _KIND_FAST_ALIASES[compact]
-        for alias, kind in _KIND_FAST_ALIASES.items():
+        if compact and compact in _P0_ADAPTER_ALIAS_MAP:
+            return _P0_ADAPTER_ALIAS_MAP[compact]
+        for alias, kind in _P0_ADAPTER_ALIAS_MAP.items():
             if alias and alias in compact:
                 return kind
     return ""
@@ -910,3 +1006,79 @@ def _looks_like_csv_header(sample: str) -> bool:
         return False
     lower = first.lower()
     return sum(1 for hint in _P0_FIELD_HINTS if hint in lower) >= 2
+
+
+_P0_ADAPTERS: Tuple[P0Adapter, ...] = (
+    P0Adapter(
+        kind="waf",
+        source_label="WAF",
+        build=_build_waf_event,
+        aliases=("waf", "webfirewall", "websecurity", "modsecurity", "web firewall"),
+        infer_pattern=r'\bwaf\b|web.?security|modsecurity|web.?firewall|attacktype|ruleid|rulename',
+    ),
+    P0Adapter(
+        kind="vpn",
+        source_label="VPN",
+        build=_build_vpn_event,
+        aliases=("vpn", "sslvpn", "openvpn", "forticlient", "zero trust", "ztna"),
+        infer_pattern=r'\bvpn\b|sslvpn|openvpn|forticlient|zero.?trust|ztna|mfa',
+    ),
+    P0Adapter(
+        kind="edr",
+        source_label="EDR/XDR",
+        build=_build_edr_event,
+        aliases=("edr", "xdr", "hids", "antivirus", "endpoint"),
+        infer_pattern=r'\bedr\b|\bxdr\b|hids|antivirus|endpoint|threatname|alertname|processname',
+    ),
+    P0Adapter(
+        kind="dns",
+        source_label="DNS",
+        build=_build_dns_event,
+        aliases=("dns",),
+        infer_pattern=r'\bdns\b|queryname|qname|fqdn|rcode',
+    ),
+    P0Adapter(
+        kind="proxy",
+        source_label="Proxy/SWG",
+        build=_build_proxy_event,
+        aliases=("proxy", "swg", "web gateway", "上网行为"),
+        infer_pattern=r'\bproxy\b|swg|上网行为|\burl\b|fullurl|web.?gateway',
+    ),
+    P0Adapter(
+        kind="firewall",
+        source_label="Firewall/NAT",
+        build=_build_firewall_event,
+        aliases=("firewall", "fw", "nat", "session"),
+        infer_pattern=r'firewall|\bfw\b|\bnat\b|session|srcport|dstport|dport|destinationport',
+    ),
+    P0Adapter(
+        kind="bastion",
+        source_label="Bastion",
+        build=_build_bastion_event,
+        aliases=("bastion", "jumpserver", "jumphost", "jump host", "堡垒"),
+        infer_pattern=r'bastion|jumpserver|jump.?host|堡垒|command.?audit|session.?audit',
+    ),
+    P0Adapter(
+        kind="app",
+        source_label="Application",
+        build=_build_app_event,
+        aliases=("application", "app", "spring", "tomcat"),
+        infer_pattern=r'application|spring|tomcat|appname|exception|stacktrace|traceid',
+    ),
+)
+_P0_ADAPTER_BUILDERS: Dict[str, P0Builder] = {adapter.kind: adapter.build for adapter in _P0_ADAPTERS}
+_P0_ADAPTER_ALIAS_MAP: Dict[str, str] = {
+    _norm_key(alias): adapter.kind
+    for adapter in _P0_ADAPTERS
+    for alias in adapter.aliases
+    if _norm_key(alias)
+}
+_P0_ADAPTER_ALIAS_MAP.update(_KIND_FAST_ALIASES)
+_P0_ADAPTER_INFER_PATTERNS: Tuple[Tuple[str, str], ...] = tuple(
+    (adapter.kind, adapter.infer_pattern) for adapter in _P0_ADAPTERS
+)
+
+
+def list_p0_adapter_kinds() -> List[str]:
+    """Return registered P0 adapter kinds for tests, docs, and future CLI surfacing."""
+    return [adapter.kind for adapter in _P0_ADAPTERS]

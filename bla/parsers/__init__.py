@@ -18,12 +18,16 @@ from .. import config
 from ..models import LogEvent, ParseResult, ThreatLevel
 from ..utils.helpers import file_size, gen_id, read_file, read_file_sample, safe_write
 from .linux_auth import parse_linux_auth, parse_linux_auth_file
-from .p0_security import looks_like_p0_security_log, parse_p0_security_file, parse_p0_security_json, parse_p0_security_lines
+from .p0_security import (
+    looks_like_p0_security_log,
+    parse_p0_security_file,
+    parse_p0_security_json,
+    parse_p0_security_lines,
+)
 from .registry import ParserContext, ParserRegistry, ParserSpec, normalize_aliases
 from .stats import compute_stats
 from .web_access import parse_web_access, parse_web_access_file
-from .windows_evtx import parse_windows_evtx, parse_windows_xml
-
+from .windows_evtx import parse_windows_evtx, parse_windows_xml, parse_windows_xml_file
 
 _DEFAULT_REGISTRY = ParserRegistry()
 _DEFAULTS_REGISTERED = False
@@ -93,7 +97,7 @@ def _ensure_default_parsers() -> None:
             name="windows-xml",
             aliases=normalize_aliases(("xml", "windows", "winxml")),
             can_parse=_can_parse_windows_xml,
-            parse_file=lambda ctx: parse_windows_xml(read_file(ctx.file_path or ""), ctx.source_name),
+            parse_file=lambda ctx: parse_windows_xml_file(ctx.file_path or "", ctx.source_name),
             parse_content=lambda ctx: parse_windows_xml(ctx.content or "", ctx.source_name),
             description="Windows Event XML exports",
         ),

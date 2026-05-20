@@ -1,7 +1,7 @@
 """
 Windows 事件日志解析器
 支持格式:
-  - XML 导出 (.xml)  — wevtutil epl Security Security.xml /lf:true
+  - XML 导出 (.xml)  — wevtutil qe Security /f:RenderedXml /e:Events > Security.xml
   - 二进制 EVTX (.evtx) — 需要 python-evtx 库（可选）
   - 纯文本事件导出
 
@@ -9,14 +9,15 @@ Windows 事件日志解析器
 """
 
 from __future__ import annotations
+
 import os
 import re
 import time
 import xml.etree.ElementTree as ET
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..models import LogEvent, ParseResult, ParseStats, ThreatLevel
-from ..utils.helpers import gen_id, normalize_timestamp, truncate
+from ..utils.helpers import file_size, gen_id, iter_file_chunks, normalize_timestamp, truncate
 
 _LOGON_TYPE_MAP = {
     "2": "交互式",
@@ -679,16 +680,50 @@ def _parse_xml_event(xml_text: str, source_file: str) -> Optional[LogEvent]:
     )
 
 
-def parse_windows_xml(content: str, source_file: str) -> ParseResult:
-    """解析 Windows XML 事件日志"""
-    t0 = time.time()
+_XML_EVENT_RE = re.compile(r'<Event[\s>][\s\S]*?</Event>', re.IGNORECASE)
+_XML_EVENT_START_RE = re.compile(r'<Event(?=[\s>])', re.IGNORECASE)
+
+
+def _iter_xml_event_blocks_from_text(content: str):
+    last_end = 0
+    for match in _XML_EVENT_RE.finditer(content):
+        yield match.group()
+        last_end = match.end()
+    tail_start = _last_xml_event_start(content[last_end:])
+    if tail_start >= 0:
+        yield content[last_end + tail_start:]
+
+
+def _iter_xml_event_blocks_from_chunks(chunks):
+    """Yield complete ``<Event>...</Event>`` blocks while keeping only a small tail buffer."""
+    buffer = ""
+    for chunk in chunks:
+        buffer += chunk
+        while True:
+            match = _XML_EVENT_RE.search(buffer)
+            if not match:
+                tail_start = _last_xml_event_start(buffer)
+                buffer = buffer[tail_start:] if tail_start >= 0 else buffer[-64:]
+                break
+            yield match.group()
+            buffer = buffer[match.end():]
+    tail_start = _last_xml_event_start(buffer)
+    if tail_start >= 0:
+        yield buffer[tail_start:]
+
+
+def _last_xml_event_start(text: str) -> int:
+    last = -1
+    for match in _XML_EVENT_START_RE.finditer(text):
+        last = match.start()
+    return last
+
+
+def _parse_windows_xml_blocks(blocks, source_file: str, file_size_bytes: int, t0: float) -> ParseResult:
     events: List[LogEvent] = []
     parse_errors = 0
-
-    # 逐块提取 <Event>...</Event>
-    pattern = re.compile(r'<Event[\s>][\s\S]*?</Event>', re.IGNORECASE)
-    for m in pattern.finditer(content):
-        ev, err = _parse_xml_event_with_error(m.group(), source_file)
+    for block in blocks:
+        ev, err = _parse_xml_event_with_error(block, source_file)
         if ev:
             events.append(ev)
         elif err:
@@ -702,7 +737,30 @@ def parse_windows_xml(content: str, source_file: str) -> ParseResult:
         events         = events,
         stats          = stats,
         parse_time_ms  = (time.time() - t0) * 1000,
-        file_size_bytes= len(content.encode()),
+        file_size_bytes= file_size_bytes,
+    )
+
+
+def parse_windows_xml(content: str, source_file: str) -> ParseResult:
+    """解析内存中的 Windows XML 事件日志。"""
+    t0 = time.time()
+    return _parse_windows_xml_blocks(
+        _iter_xml_event_blocks_from_text(content),
+        source_file,
+        len(content.encode()),
+        t0,
+    )
+
+
+def parse_windows_xml_file(path: str, source_file: Optional[str] = None) -> ParseResult:
+    """从文件流式解析 Windows XML，避免大日志一次性读入内存。"""
+    t0 = time.time()
+    source_name = source_file or os.path.basename(path)
+    return _parse_windows_xml_blocks(
+        _iter_xml_event_blocks_from_chunks(iter_file_chunks(path)),
+        source_name,
+        file_size(path),
+        t0,
     )
 
 
@@ -744,7 +802,8 @@ def parse_windows_evtx(path: str) -> ParseResult:
             "缺少可选依赖 python-evtx，EVTX 二进制日志未被解析。"
             "请先执行 python3 -m pip install -U \"blueteam-log-analyzer[evtx]\" 后重新运行；"
             "如果目标主机不方便安装 Python，可在 Windows 上用 "
-            "wevtutil epl Security out.xml /lf:true 导出 XML 后再分析。"
+            "wevtutil qe Security /f:RenderedXml /e:Events > Security.xml "
+            "导出 XML 后再分析。"
         ) from exc
 
 

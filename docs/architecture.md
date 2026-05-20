@@ -45,8 +45,9 @@ input/source
 2. Remote Workspace 已提供 `bla ssh` 交互入口，远程只执行白名单只读命令，本地复用 pipeline；后续继续补 collector 证据包和更多平台入口。
 3. Remote Collector 输出内存日志内容，复用 `parse_content()` 或 pipeline。
 4. Host Triage 独立定义结构化 findings，再与 incident 关联。
-5. P0 厂商日志逐步拆分到 adapter 层，避免单个解析器持续膨胀。
-6. 大文件场景优先补齐 Windows XML、CSV、JSON object/array 等流式处理路径。
+5. P0 厂商日志通过 adapter 注册表按 `kind` 路由，新增厂商格式优先扩展 adapter 元数据和 builder，避免单个解析器继续膨胀。
+6. 大文件场景优先走文件流式路径；Windows XML、P0 CSV、P0 JSON object/array/JSONL 文件入口不应整文件读入。
+7. Detector Registry 支持候选事件 selector，检测器应先按 tag、event_id、category 做轻量预筛，再进入聚合逻辑。
 
 ## Python 适用边界
 
