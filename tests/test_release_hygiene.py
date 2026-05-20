@@ -44,6 +44,8 @@ web_attacks:
             [sys.executable, "bla_cli.py", "--version"],
             cwd=repo,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=True,
         )
@@ -75,6 +77,8 @@ web_attacks:
             [sys.executable, "bla_cli.py", "benchmark", "--help"],
             cwd=repo,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=True,
         )
@@ -94,6 +98,8 @@ web_attacks:
             [sys.executable, "scripts/release_check.py", "--help"],
             cwd=repo,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=True,
         )
