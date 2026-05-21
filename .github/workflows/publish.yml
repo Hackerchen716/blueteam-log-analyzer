@@ -5,6 +5,9 @@ on:
     types: [published]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   pypi:
     name: Build and publish to PyPI
@@ -45,6 +48,7 @@ jobs:
           /tmp/bla-wheel-smoke/bin/bla --version
           /tmp/bla-wheel-smoke/bin/bla validate-rules --strict-metadata
           /tmp/bla-wheel-smoke/bin/bla ssh --help
+          /tmp/bla-wheel-smoke/bin/bla remote-log --help
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

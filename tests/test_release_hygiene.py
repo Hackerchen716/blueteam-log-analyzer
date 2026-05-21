@@ -87,6 +87,22 @@ web_attacks:
         self.assertIn("--memory", completed.stdout)
         self.assertIn("tracemalloc", completed.stdout)
 
+    def test_remote_log_help_exposes_collector_boundaries(self):
+        repo = Path(__file__).parents[1]
+        completed = subprocess.run(
+            [sys.executable, "bla_cli.py", "remote-log", "--help"],
+            cwd=repo,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=True,
+        )
+
+        self.assertIn("--tail", completed.stdout)
+        self.assertIn("--grep", completed.stdout)
+        self.assertIn("--audit-json", completed.stdout)
+
     def test_release_check_script_and_setup_version_are_safe(self):
         repo = Path(__file__).parents[1]
         setup_text = (repo / "setup.py").read_text(encoding="utf-8")

@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main, master]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
@@ -43,6 +46,9 @@ jobs:
 
       - name: Smoke test Remote Workspace CLI
         run: python bla_cli.py ssh --help
+
+      - name: Smoke test Remote Collector CLI
+        run: python bla_cli.py remote-log --help
 
       - name: Smoke test on sample logs
         shell: bash

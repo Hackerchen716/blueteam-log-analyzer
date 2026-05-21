@@ -123,7 +123,7 @@ def _sha256_file(path: str) -> str:
 
 
 def _dispatch_subcommand(argv: List[str]) -> bool:
-    if len(argv) < 2 or argv[1] not in {"validate-rules", "benchmark", "explain", "ssh"}:
+    if len(argv) < 2 or argv[1] not in {"validate-rules", "benchmark", "explain", "ssh", "remote-log"}:
         return False
     command = argv[1]
     if command == "validate-rules":
@@ -134,6 +134,8 @@ def _dispatch_subcommand(argv: List[str]) -> bool:
         _cmd_explain(argv[2:])
     elif command == "ssh":
         _cmd_ssh(argv[2:])
+    elif command == "remote-log":
+        _cmd_remote_log(argv[2:])
     return True
 
 
@@ -181,6 +183,109 @@ def _cmd_ssh(argv: List[str]) -> None:
         print(f"❌ 远程工作台启动失败: {e}", file=sys.stderr)
         sys.exit(2)
     sys.exit(0)
+
+
+def _cmd_remote_log(argv: List[str]) -> None:
+    from bla.remote import RemoteWorkspace, SSHClient
+
+    parser = argparse.ArgumentParser(
+        prog="bla remote-log",
+        description="通过 SSH 只读采集远程日志子集，并在本机复用 BLA 分析流程",
+    )
+    parser.add_argument("target", help="SSH 目标，例如 root@192.168.1.20 或 ~/.ssh/config 主机别名")
+    parser.add_argument("paths", nargs="+", help="远程日志路径，或 journalctl:UNIT")
+    parser.add_argument("-p", "--port", type=int, help="SSH 端口")
+    parser.add_argument("-i", "--identity-file", help="SSH 私钥路径")
+    parser.add_argument("--workdir", default=".", help="远程初始目录，默认远程登录目录")
+    parser.add_argument("--connect-timeout", type=int, default=10, help="SSH 连接超时秒数，默认 10")
+    parser.add_argument("--max-bytes", type=int, default=256 * 1024 * 1024,
+                        help="单个远程输入最大采集字节数，默认 268435456")
+    parser.add_argument("--command-timeout", type=int, default=120,
+                        help="远程只读命令超时秒数，默认 120")
+    parser.add_argument("--tail", type=int, help="仅采集远程文件最后 N 行")
+    parser.add_argument("--grep", action="append", metavar="TEXT", help="仅保留包含关键词的行，可重复指定")
+    parser.add_argument("--analyze", action="store_true", help="兼容显式分析语义；remote-log 默认进入本地分析流程")
+    parser.add_argument("--audit-json", metavar="FILE", help="写出远程采集审计记录 JSON")
+    parser.add_argument("--out", metavar="DIR", help="本地标准报告目录（含 manifest.json）")
+    parser.add_argument("--html", metavar="FILE", help="本地 HTML 报告")
+    parser.add_argument("--json", metavar="FILE", help="本地 JSON 报告")
+    parser.add_argument("--csv", metavar="FILE", help="本地 CSV 事件列表")
+    parser.add_argument("--ioc", metavar="FILE", help="本地 IOC 清单")
+    parser.add_argument("--sarif", metavar="FILE", help="本地 SARIF 报告")
+    parser.add_argument("--profile", choices=("default", "cn-hvv"), default="default")
+    parser.add_argument("--type", choices=["auto"] + list_parser_names(), default="auto")
+    parser.add_argument("--exit-on", choices=("none", "critical", "high", "medium"), default="critical")
+    parser.add_argument("--rules", action="append", metavar="DIR")
+    parser.add_argument("--allowlist", metavar="FILE")
+    parser.add_argument("--config", metavar="FILE")
+    parser.add_argument("--max-alerts", type=int, default=50)
+    parser.add_argument("--full", "--no-truncate", "--evidence", dest="full_evidence", action="store_true")
+    parser.add_argument("--no-color", action="store_true")
+    parser.add_argument("--syslog-year", type=int)
+    parser.add_argument("--rdp", action="store_true", help="仅保留带远程来源 IP 的 Windows 4624/4625 登录事件")
+    args = parser.parse_args(argv)
+
+    if args.max_bytes <= 0:
+        parser.error("--max-bytes 必须大于 0")
+    if args.command_timeout <= 0:
+        parser.error("--command-timeout 必须大于 0")
+    if args.connect_timeout <= 0:
+        parser.error("--connect-timeout 必须大于 0")
+
+    try:
+        client = SSHClient(
+            target=args.target,
+            port=args.port,
+            identity_file=args.identity_file,
+            connect_timeout=args.connect_timeout,
+        )
+    except ValueError as e:
+        parser.error(str(e))
+
+    workspace = RemoteWorkspace(
+        client,
+        initial_cwd=args.workdir,
+        print_fn=print,
+        max_fetch_bytes=args.max_bytes,
+        command_timeout=args.command_timeout,
+    )
+    try:
+        workspace.resolve_cwd()
+    except RuntimeError as e:
+        print(f"❌ 远程采集启动失败: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    remote_args = list(args.paths)
+    _append_optional_arg(remote_args, "--tail", args.tail)
+    for pattern in args.grep or []:
+        remote_args.extend(["--grep", pattern])
+    _append_optional_arg(remote_args, "--audit-json", args.audit_json)
+    _append_optional_arg(remote_args, "--out", args.out)
+    _append_optional_arg(remote_args, "--html", args.html)
+    _append_optional_arg(remote_args, "--json", args.json)
+    _append_optional_arg(remote_args, "--csv", args.csv)
+    _append_optional_arg(remote_args, "--ioc", args.ioc)
+    _append_optional_arg(remote_args, "--sarif", args.sarif)
+    remote_args.extend(["--profile", args.profile, "--type", args.type, "--exit-on", args.exit_on])
+    for rule_dir in args.rules or []:
+        remote_args.extend(["--rules", rule_dir])
+    _append_optional_arg(remote_args, "--allowlist", args.allowlist)
+    _append_optional_arg(remote_args, "--config", args.config)
+    remote_args.extend(["--max-alerts", str(args.max_alerts)])
+    if args.full_evidence:
+        remote_args.append("--full")
+    if args.no_color:
+        remote_args.append("--no-color")
+    _append_optional_arg(remote_args, "--syslog-year", args.syslog_year)
+    if args.rdp:
+        remote_args.append("--rdp")
+
+    sys.exit(workspace.run_bla(remote_args))
+
+
+def _append_optional_arg(target: List[str], flag: str, value) -> None:
+    if value is not None:
+        target.extend([flag, str(value)])
 
 
 def _cmd_validate_rules(argv: List[str]) -> None:

@@ -56,6 +56,7 @@ def generate_manifest(
         "outputs": _output_records(bundle_files.values()),
         "options": context.get("options", {}),
         "remote": context.get("remote", {}),
+        "remote_collection": context.get("remote_collection", []),
         "parse_errors": context.get("parse_errors", []),
         "suppressed_events": context.get("suppressed_events", 0),
     }

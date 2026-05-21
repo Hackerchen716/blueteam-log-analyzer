@@ -6,7 +6,9 @@ keeps parsing, detection, correlation, and report generation on the local host.
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
+import json
 import os
 import shlex
 import subprocess
@@ -192,7 +194,7 @@ class RemoteWorkspace:
         self.command_timeout = command_timeout
 
     def start(self) -> None:
-        self.cwd = self._resolve_remote_cwd(self.cwd)
+        self.resolve_cwd()
         self.print(f"已连接 {_display_text(self.client.target)}，远程目标无需安装 Python/pip/BLA。")
         self.print("输入 help 查看命令；在远程目录中直接执行 bla access.log 即可本地分析。")
         while True:
@@ -244,6 +246,13 @@ class RemoteWorkspace:
 
         self.print(f"不支持远程任意命令: {_display_text(command)}。可用命令: help, ls, cd, pwd, find, tail, bla, exit")
         return 2
+
+    def resolve_cwd(self) -> str:
+        self.cwd = self._resolve_remote_cwd(self.cwd)
+        return self.cwd
+
+    def run_bla(self, args: Sequence[str]) -> int:
+        return self._cmd_bla(args)
 
     def _cmd_cd(self, args: Sequence[str]) -> int:
         target = args[0] if args else "."
@@ -304,6 +313,9 @@ class RemoteWorkspace:
     def _cmd_bla(self, args: Sequence[str]) -> int:
         parser = argparse.ArgumentParser(prog="bla", add_help=True)
         parser.add_argument("paths", nargs="+", help="远程日志文件路径")
+        parser.add_argument("--tail", type=int, help="仅采集每个远程文件最后 N 行后分析")
+        parser.add_argument("--grep", action="append", metavar="TEXT", help="仅保留包含关键词的行，可重复指定")
+        parser.add_argument("--audit-json", metavar="FILE", help="写出远程采集审计记录 JSON")
         parser.add_argument("--out", metavar="DIR", help="本地标准报告目录（含 manifest.json）")
         parser.add_argument("--html", metavar="FILE", help="本地 HTML 报告")
         parser.add_argument("--json", metavar="FILE", help="本地 JSON 报告")
@@ -328,6 +340,12 @@ class RemoteWorkspace:
         if parsed.max_alerts < 0:
             self.print("--max-alerts 必须大于等于 0", file=sys.stderr)
             return 2
+        if parsed.tail is not None and not (1 <= parsed.tail <= 100000):
+            self.print("--tail 必须在 1 到 100000 之间", file=sys.stderr)
+            return 2
+        if any(not str(item or "").strip() for item in (parsed.grep or [])):
+            self.print("--grep 不能为空", file=sys.stderr)
+            return 2
         if parsed.syslog_year is not None and not (1970 <= parsed.syslog_year <= 2100):
             self.print("--syslog-year 必须在 1970 到 2100 之间", file=sys.stderr)
             return 2
@@ -335,14 +353,21 @@ class RemoteWorkspace:
         with tempfile.TemporaryDirectory(prefix="bla-remote-") as tmp:
             local_paths = []
             labels = {}
+            collection_records = []
             for remote_item in parsed.paths:
                 try:
-                    local_path, label = self._materialize_remote_source(remote_item, tmp)
+                    local_path, label, collection_record = self._materialize_remote_source(
+                        remote_item,
+                        tmp,
+                        tail_lines=parsed.tail,
+                        grep_patterns=parsed.grep or [],
+                    )
                 except RuntimeError as e:
                     self.print(f"读取远程输入失败: {remote_item}: {e}", file=sys.stderr)
                     return 1
                 local_paths.append(local_path)
                 labels[Path(local_path).name] = label
+                collection_records.append(collection_record)
 
             self.print(f"\n开始本地分析 {len(local_paths)} 个远程输入...\n")
             try:
@@ -406,21 +431,41 @@ class RemoteWorkspace:
                         self.command_timeout,
                         run_result.parse_errors,
                         run_result.suppressed_events,
+                        collection_records,
                     ),
                 )
+                if parsed.audit_json:
+                    _write_remote_collection_audit(
+                        parsed.audit_json,
+                        self.client.target,
+                        self.cwd,
+                        self.max_fetch_bytes,
+                        self.command_timeout,
+                        collection_records,
+                        run_result.parse_errors,
+                        run_result.suppressed_events,
+                    )
             except OSError as e:
                 self.print(f"报告写入失败: {e}", file=sys.stderr)
                 return 1
             return _exit_code_for_alerts(run_result.summary.alerts, parsed.exit_on)
 
-    def _materialize_remote_source(self, remote_item: str, tmp: str) -> tuple[str, str]:
+    def _materialize_remote_source(
+        self,
+        remote_item: str,
+        tmp: str,
+        tail_lines: Optional[int] = None,
+        grep_patterns: Optional[Sequence[str]] = None,
+    ) -> tuple[str, str, dict]:
+        grep_patterns = list(grep_patterns or [])
         if remote_item.startswith("journalctl:"):
             unit = remote_item.split(":", 1)[1].strip()
             if not unit:
                 raise RuntimeError("journalctl: 后面需要服务名，例如 journalctl:ssh")
             safe_unit = "".join(ch if ch.isalnum() or ch in "._@-" else "_" for ch in unit)
             local_path = os.path.join(tmp, f"journalctl-{safe_unit}.log")
-            command = f"journalctl -u {_q(unit)} -n 5000 --no-pager -o short"
+            method = _collection_method("journalctl", tail_lines, grep_patterns)
+            command = _remote_journalctl_command(unit, tail_lines, grep_patterns)
             self.client.capture_command(
                 command,
                 local_path,
@@ -428,19 +473,54 @@ class RemoteWorkspace:
                 timeout=self.command_timeout,
                 max_bytes=self.max_fetch_bytes,
             )
-            return local_path, _display_text(f"{self.client.target}:journalctl:{unit}")
+            label = _display_text(f"{self.client.target}:journalctl:{unit}")
+            return local_path, label, _remote_collection_record(
+                local_path,
+                label,
+                self.client.target,
+                self.cwd,
+                f"journalctl:{unit}",
+                method,
+                tail_lines,
+                grep_patterns,
+                self.max_fetch_bytes,
+                self.command_timeout,
+            )
 
         display_path = self._display_path(remote_item)
         basename = PurePosixPath(display_path).name or "remote.log"
         local_path = _unique_path(tmp, basename)
-        self.client.fetch_file(
-            remote_item,
+        if tail_lines is not None or grep_patterns:
+            method = _collection_method("file", tail_lines, grep_patterns)
+            self.client.capture_command(
+                _remote_file_capture_command(remote_item, tail_lines, grep_patterns),
+                local_path,
+                self.cwd,
+                max_bytes=self.max_fetch_bytes,
+                timeout=self.command_timeout,
+            )
+        else:
+            method = "file"
+            self.client.fetch_file(
+                remote_item,
+                local_path,
+                self.cwd,
+                max_bytes=self.max_fetch_bytes,
+                timeout=self.command_timeout,
+            )
+        label = _display_text(f"{self.client.target}:{display_path}")
+        return local_path, label, _remote_collection_record(
             local_path,
+            label,
+            self.client.target,
             self.cwd,
-            max_bytes=self.max_fetch_bytes,
-            timeout=self.command_timeout,
+            display_path,
+            method,
+            tail_lines,
+            grep_patterns,
+            self.max_fetch_bytes,
+            self.command_timeout,
         )
-        return local_path, _display_text(f"{self.client.target}:{display_path}")
 
     def _annotate_remote_sources(self, parse_results, labels: dict[str, str]) -> None:
         for result in parse_results:
@@ -481,6 +561,7 @@ class RemoteWorkspace:
                 "  find [PATH] [PATTERN]     查找远程日志文件，默认当前目录、最多 3 层",
                 "  tail FILE [N]             查看远程文件最后 N 行，默认 80",
                 "  bla FILE [--out DIR]      拉回远程文件并在本机分析",
+                "  bla FILE --tail N --grep TEXT  采集远程文件子集并在本机分析",
                 "  bla FILE --rdp            仅保留 LogonType=10 且带远程来源 IP 的 Windows 登录事件",
                 "  bla journalctl:ssh        拉回远程 journalctl 输出并在本机分析",
                 "  exit                      退出",
@@ -522,6 +603,7 @@ def _remote_manifest_context(
     command_timeout: int,
     parse_errors: Sequence[str],
     suppressed_events: int,
+    collection_records: Optional[Sequence[dict]] = None,
 ) -> dict:
     return {
         "inputs": [_remote_input_manifest_record(path, labels) for path in local_paths],
@@ -543,6 +625,7 @@ def _remote_manifest_context(
             "max_fetch_bytes": max_fetch_bytes,
             "command_timeout": command_timeout,
         },
+        "remote_collection": list(collection_records or []),
         "parse_errors": list(parse_errors),
         "suppressed_events": suppressed_events,
     }
@@ -570,6 +653,108 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _remote_file_capture_command(
+    remote_path: str,
+    tail_lines: Optional[int],
+    grep_patterns: Sequence[str],
+) -> str:
+    read_cmd = f"cat -- {_qp(remote_path)}"
+    if tail_lines is not None:
+        read_cmd = f"tail -n {tail_lines} -- {_qp(remote_path)}"
+    if not grep_patterns:
+        return f"test -r {_qp(remote_path)} && {read_cmd}"
+    pipeline = _append_fixed_grep(read_cmd, grep_patterns)
+    return f"test -r {_qp(remote_path)} && {{ {pipeline}; status=$?; test $status -eq 0 -o $status -eq 1; }}"
+
+
+def _remote_journalctl_command(unit: str, tail_lines: Optional[int], grep_patterns: Sequence[str]) -> str:
+    line_count = tail_lines if tail_lines is not None else 5000
+    command = f"journalctl -u {_q(unit)} -n {line_count} --no-pager -o short"
+    if not grep_patterns:
+        return command
+    pipeline = _append_fixed_grep(command, grep_patterns)
+    return f"{{ {pipeline}; status=$?; test $status -eq 0 -o $status -eq 1; }}"
+
+
+def _append_fixed_grep(command: str, grep_patterns: Sequence[str]) -> str:
+    for pattern in grep_patterns:
+        command = f"({command}) | grep -F -e {_q(pattern)}"
+    return command
+
+
+def _collection_method(base: str, tail_lines: Optional[int], grep_patterns: Sequence[str]) -> str:
+    suffixes = []
+    if tail_lines is not None:
+        suffixes.append("tail")
+    if grep_patterns:
+        suffixes.append("grep")
+    if not suffixes:
+        return base
+    return "-".join([base, *suffixes])
+
+
+def _remote_collection_record(
+    local_path: str,
+    label: str,
+    target: str,
+    cwd: str,
+    remote_path: str,
+    method: str,
+    tail_lines: Optional[int],
+    grep_patterns: Sequence[str],
+    max_bytes: int,
+    command_timeout: int,
+) -> dict:
+    record = {
+        "source": "remote",
+        "target": _display_text(target),
+        "cwd": _display_text(cwd),
+        "remote_path": _display_text(remote_path),
+        "remote_label": _display_text(label),
+        "local_name": Path(local_path).name,
+        "method": method,
+        "tail_lines": tail_lines,
+        "grep_patterns": [_display_text(item) for item in grep_patterns],
+        "max_bytes": max_bytes,
+        "command_timeout": command_timeout,
+        "size_bytes": 0,
+        "sha256": "",
+    }
+    try:
+        record["size_bytes"] = os.path.getsize(local_path)
+        record["sha256"] = _sha256_file(local_path)
+    except OSError:
+        pass
+    return record
+
+
+def _write_remote_collection_audit(
+    output_path: str,
+    target: str,
+    cwd: str,
+    max_bytes: int,
+    command_timeout: int,
+    collection_records: Sequence[dict],
+    parse_errors: Sequence[str],
+    suppressed_events: int,
+) -> None:
+    audit = {
+        "schema": "bla-remote-collection-audit-v1",
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "remote": {
+            "target": _display_text(target),
+            "cwd": _display_text(cwd),
+            "max_fetch_bytes": max_bytes,
+            "command_timeout": command_timeout,
+        },
+        "collection": list(collection_records),
+        "parse_errors": [_display_text(item) for item in parse_errors],
+        "suppressed_events": suppressed_events,
+    }
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(audit, f, ensure_ascii=False, indent=2)
 
 
 def _split_workspace_line(line: str) -> List[str]:

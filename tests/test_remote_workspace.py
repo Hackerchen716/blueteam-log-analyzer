@@ -178,6 +178,43 @@ class RemoteWorkspaceRegressionTests(unittest.TestCase):
         self.assertEqual(data["events"][0]["source_file"], "web01:journalctl:ssh")
         self.assertEqual(data["events"][0]["category"], "SSH")
 
+    def test_remote_workspace_can_tail_grep_and_write_collection_audit(self):
+        class FakeSSH:
+            target = "web01"
+
+            def __init__(self):
+                self.captures = []
+
+            def capture_command(self, command, local_path, cwd, **kwargs):
+                self.captures.append((command, cwd, kwargs))
+                Path(local_path).write_text(
+                    "Mar 15 10:01:00 web01 sshd[123]: "
+                    "Failed password for root from 9.9.9.9 port 22 ssh2\n",
+                    encoding="utf-8",
+                )
+
+        fake = FakeSSH()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout", io.StringIO()):
+            workspace = RemoteWorkspace(fake, initial_cwd="/var/log", print_fn=lambda *a, **k: print(*a, **k))
+            code = workspace.execute_line(
+                f"bla auth.log --tail 200 --grep Failed --out {tmp}/case "
+                f"--audit-json {tmp}/audit.json --exit-on none --no-color"
+            )
+            report = _json.loads((Path(tmp) / "case" / "report.json").read_text(encoding="utf-8"))
+            manifest = _json.loads((Path(tmp) / "case" / "manifest.json").read_text(encoding="utf-8"))
+            audit = _json.loads((Path(tmp) / "audit.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0)
+        self.assertIn("tail -n 200 -- auth.log", fake.captures[0][0])
+        self.assertIn("grep -F -e Failed", fake.captures[0][0])
+        self.assertEqual(fake.captures[0][1], "/var/log")
+        self.assertEqual(report["files"][0]["name"], "web01:/var/log/auth.log")
+        self.assertEqual(manifest["remote_collection"][0]["method"], "file-tail-grep")
+        self.assertEqual(manifest["remote_collection"][0]["tail_lines"], 200)
+        self.assertEqual(manifest["remote_collection"][0]["grep_patterns"], ["Failed"])
+        self.assertEqual(audit["schema"], "bla-remote-collection-audit-v1")
+        self.assertEqual(audit["collection"][0]["remote_label"], "web01:/var/log/auth.log")
+
     def test_ssh_client_rejects_target_option_injection_and_inserts_separator(self):
         with self.assertRaises(ValueError):
             SSHClient("-oProxyCommand=sh")

@@ -190,6 +190,7 @@ def main() -> int:
         [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
         [sys.executable, "bla_cli.py", "validate-rules", "--strict-metadata"],
         [sys.executable, "bla_cli.py", "ssh", "--help"],
+        [sys.executable, "bla_cli.py", "remote-log", "--help"],
         [sys.executable, "bla_cli.py", "benchmark", "--size-mb", "1"],
         [sys.executable, "bla_cli.py", "benchmark", "--size-mb", "1", "--memory"],
     ]

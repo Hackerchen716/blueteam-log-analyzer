@@ -19,13 +19,15 @@ Use this checklist before publishing a GitHub Release or uploading to PyPI.
 - Run `python3 -m unittest discover -s tests -v`.
 - Run `python3 bla_cli.py validate-rules --strict-metadata`.
 - Run `python3 bla_cli.py ssh --help`.
+- Run `python3 bla_cli.py remote-log --help`.
 - Run sample smoke tests with `--exit-on none`, including Linux auth, Web access, Remote Workspace sample, Windows RDP sample, and P0 fixture.
 - Confirm `--out` bundles contain `index.html`, `report.json`, `events.csv`, `iocs.txt`, `report.sarif`, and `manifest.json`.
 - Run `python3 bla_cli.py benchmark --size-mb 1` and `python3 bla_cli.py benchmark --size-mb 1 --memory`.
 - Build the package with `python3 -m build`.
 - Run `python3 -m twine check dist/*` when `twine` is available.
 - Inspect the wheel for package code/rules (`bla/rules/web_attacks.yaml`, `bla/remote/ssh_workspace.py`) and the source distribution for release notes, scripts, sample logs, and P0 fixtures.
-- Install the built wheel in a fresh venv and run `bla --version`, `bla validate-rules --strict-metadata`, and `bla ssh --help`.
+- Install the built wheel in a fresh venv and run `bla --version`, `bla validate-rules --strict-metadata`, `bla ssh --help`, and `bla remote-log --help`.
+- Review GitHub Actions annotations for runtime deprecation warnings, especially JavaScript action runtime changes such as the Node.js 24 migration.
 
 ## GitHub Release
 
@@ -43,4 +45,4 @@ Use this checklist before publishing a GitHub Release or uploading to PyPI.
 - Do not manually upload with `twine` before creating the GitHub Release unless the publish workflow is intentionally skipped.
 - After upload, install from PyPI in a fresh environment and run `bla --version`.
 - Smoke test `bla validate-rules` from the installed package.
-- Smoke test `bla ssh --help` and one local sample analysis from the installed package.
+- Smoke test `bla ssh --help`, `bla remote-log --help`, and one local sample analysis from the installed package.
