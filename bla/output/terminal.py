@@ -4,11 +4,12 @@
 """
 from __future__ import annotations
 import sys
-from typing import List
+import unicodedata
+from typing import Dict, List, Tuple
 
 from ..__version__ import __version__
 from ..models import (
-    ParseResult, AnalysisSummary, ThreatLevel, LogEvent
+    ParseResult, AnalysisSummary, ThreatLevel, LogEvent, Incident, TimelineEntry
 )
 from ..utils.helpers import format_timestamp_local, is_placeholder_source, safe_stream, strip_terminal_control
 
@@ -30,6 +31,51 @@ BG_ORANGE = "\033[48;5;208m"
 BG_YELLOW = "\033[43m"
 BG_GREEN  = "\033[42m"
 BG_BLUE   = "\033[44m"
+
+_PHASE_ORDER = [
+    "侦察",
+    "初始访问",
+    "身份突破",
+    "执行",
+    "持久化",
+    "权限提升",
+    "主机失陷",
+    "远程访问",
+    "横向移动",
+    "命令控制",
+    "数据外传",
+    "凭据访问",
+    "防御规避",
+    "网络活动",
+    "其他",
+]
+
+_EVENT_FAMILY_PHASE = {
+    "reconnaissance": "侦察",
+    "initial-access": "初始访问",
+    "identity": "身份突破",
+    "execution": "执行",
+    "persistence": "持久化",
+    "privilege-escalation": "权限提升",
+    "compromise": "主机失陷",
+    "remote-access": "远程访问",
+    "lateral-movement": "横向移动",
+    "command-control": "命令控制",
+    "exfiltration": "数据外传",
+    "network": "网络活动",
+    "other": "其他",
+}
+
+_PHASE_HINTS = {
+    "T1110": "凭据访问",
+    "T1078": "身份突破",
+    "T1136": "持久化",
+    "T1548": "权限提升",
+    "T1190": "初始访问",
+    "T1505": "主机失陷",
+    "T1071": "命令控制",
+    "T1041": "数据外传",
+}
 
 def _level_color(level: ThreatLevel) -> str:
     return {
@@ -55,6 +101,22 @@ def _section(title: str, color: str = "") -> str:
     line = "═" * 80
     color = color or CYAN
     return f"\n{BOLD}{color}{line}\n  {title}\n{line}{RESET}\n"
+
+
+def _display_width(text: str) -> int:
+    width = 0
+    for char in text:
+        width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+    return width
+
+
+def _banner_line(text: str, width: int = 78) -> str:
+    text_width = _display_width(text)
+    if text_width >= width:
+        return f"║{text}║\n"
+    left = (width - text_width) // 2
+    right = width - text_width - left
+    return f"║{' ' * left}{text}{' ' * right}║\n"
 
 
 def _fmt_top(items: list, key: str, limit: int = 3) -> str:
@@ -159,6 +221,161 @@ def _render_process_creation_event_detail(event: LogEvent, full_evidence: bool) 
     ]
 
 
+def _phase_rank(phase: str) -> int:
+    try:
+        return _PHASE_ORDER.index(phase)
+    except ValueError:
+        return len(_PHASE_ORDER)
+
+
+def _event_phase(event: LogEvent, item: TimelineEntry) -> str:
+    family = _safe_text(event.details.get("event_family") or "")
+    if family in _EVENT_FAMILY_PHASE:
+        return _EVENT_FAMILY_PHASE[family]
+    technique = _safe_text(item.mitre_attack or event.mitre_attack or "")
+    for prefix, phase in _PHASE_HINTS.items():
+        if technique.startswith(prefix):
+            return phase
+    return "其他"
+
+
+def _short_time(ts: str) -> str:
+    formatted = _safe_text(_fmt_time(ts))
+    if len(formatted) >= 19 and formatted[4:5] == "-":
+        return formatted[11:19]
+    return _truncate_text(formatted, 19)
+
+
+def _join_values(values: List[str], limit: int = 3) -> str:
+    clean = []
+    for value in values:
+        value = _safe_text(value)
+        if value and value not in clean:
+            clean.append(value)
+    if not clean:
+        return "?"
+    suffix = f" +{len(clean) - limit}" if len(clean) > limit else ""
+    return ", ".join(clean[:limit]) + suffix
+
+
+def _event_entity_hint(event: LogEvent) -> str:
+    details = event.details
+    bits = []
+    src = details.get("src_ip") or details.get("source_ip") or event.ip
+    dst = details.get("dst_ip") or details.get("asset") or event.host
+    account = details.get("account") or details.get("target_account") or event.user
+    source_type = details.get("source_type")
+    if source_type:
+        bits.append(_safe_text(str(source_type)))
+    if src and dst and str(src) != str(dst):
+        bits.append(f"{_safe_text(src)} → {_safe_text(dst)}")
+    elif src:
+        bits.append(f"src={_safe_text(src)}")
+    elif dst:
+        bits.append(f"asset={_safe_text(dst)}")
+    if account:
+        bits.append(f"account={_safe_text(account)}")
+    return "  " + DIM + "[" + " | ".join(bits[:3]) + "]" + RESET if bits else ""
+
+
+def _render_stage_topology(summary: AnalysisSummary) -> List[str]:
+    active_phases = {c.phase: c for c in summary.attack_chain}
+    ordered = sorted(active_phases.values(), key=lambda item: _phase_rank(item.phase))
+    if not ordered:
+        return []
+
+    lines = [
+        f"  {BOLD}{CYAN}● 攻击阶段拓扑{RESET}  {DIM}按 ATT&CK / 应急 kill chain 顺序排列{RESET}"
+    ]
+    for idx, chain in enumerate(ordered):
+        connector = "└─" if idx == len(ordered) - 1 else "├─"
+        color = _level_color(chain.level)
+        techs = ", ".join(_safe_text(item) for item in chain.techniques[:4]) or "-"
+        lines.append(
+            f"  {GRAY}{connector}{RESET} {BOLD}{color}{_safe_text(chain.phase)}{RESET}  "
+            f"{WHITE}{chain.event_count} 个事件{RESET}  {DIM}{techs}{RESET}"
+        )
+
+    missed = [
+        phase for phase in ("侦察", "执行", "防御规避", "横向移动", "命令控制", "数据外传")
+        if phase not in active_phases
+    ]
+    if missed:
+        lines.append(f"  {DIM}未命中阶段: {', '.join(missed)}{RESET}")
+    return lines
+
+
+def _render_incident_topology(
+    incident: Incident,
+    event_by_id: Dict[str, LogEvent],
+    full_evidence: bool,
+) -> List[str]:
+    timeline_pairs: List[Tuple[TimelineEntry, LogEvent]] = []
+    for item in incident.timeline:
+        event = event_by_id.get(item.event_id)
+        if event:
+            timeline_pairs.append((item, event))
+
+    if not timeline_pairs:
+        return []
+
+    root_bits = []
+    if incident.source_ips:
+        root_bits.append(f"源IP {_join_values(incident.source_ips, 3)}")
+    if incident.assets:
+        root_bits.append(f"资产 {_join_values(incident.assets, 3)}")
+    if incident.accounts:
+        root_bits.append(f"账号 {_join_values(incident.accounts, 4)}")
+    root = " / ".join(root_bits) or _safe_text(incident.title)
+
+    grouped: Dict[str, List[Tuple[TimelineEntry, LogEvent]]] = {}
+    for item, event in timeline_pairs:
+        phase = _event_phase(event, item)
+        grouped.setdefault(phase, []).append((item, event))
+
+    phase_names = [
+        phase for phase in sorted(grouped, key=_phase_rank)
+        if phase in grouped
+    ]
+    lines = [
+        f"       {GRAY}攻击拓扑:{RESET}",
+        f"         {BOLD}{CYAN}● {_safe_text(root)}{RESET}",
+    ]
+
+    for phase_index, phase in enumerate(phase_names):
+        entries = grouped[phase]
+        phase_connector = "└─" if phase_index == len(phase_names) - 1 else "├─"
+        child_prefix = "   " if phase_index == len(phase_names) - 1 else "│  "
+        techniques = _join_values([
+            item.mitre_attack or event.mitre_attack or ""
+            for item, event in entries
+        ], 3)
+        sources = _join_values([
+            str(event.details.get("source_type") or "")
+            for _, event in entries
+        ], 4)
+        level = max((item.level for item, _ in entries), key=lambda item: item.score, default=ThreatLevel.INFO)
+        color = _level_color(level)
+        lines.append(
+            f"         {GRAY}{phase_connector}{RESET} {BOLD}{color}{phase}{RESET}  "
+            f"{WHITE}{len(entries)} 事件{RESET}  {DIM}{techniques} · {sources}{RESET}"
+        )
+        preview = entries if full_evidence else entries[:3]
+        for item_index, (item, event) in enumerate(preview):
+            is_last_child = item_index == len(preview) - 1 and len(entries) <= len(preview)
+            connector = "└─" if is_last_child else "├─"
+            message = _evidence_text(item.message, full_evidence, 92)
+            lines.append(
+                f"         {GRAY}{child_prefix}{connector}{RESET} "
+                f"{DIM}{_short_time(item.timestamp)}{RESET}  {message}{_event_entity_hint(event)}"
+            )
+        if len(entries) > len(preview):
+            lines.append(
+                f"         {GRAY}{child_prefix}└─{RESET} {DIM}还有 {len(entries) - len(preview)} 条同阶段事件，使用 --full 查看完整路径{RESET}"
+            )
+    return lines
+
+
 def print_terminal_report(
     parse_results: List[ParseResult],
     summary: AnalysisSummary,
@@ -180,8 +397,9 @@ def print_terminal_report(
     # ── 标题横幅 ──────────────────────────────────────────
     out.write(f"\n{BOLD}{BLUE}")
     out.write("╔══════════════════════════════════════════════════════════════════════════════╗\n")
-    out.write("║         BlueTeam Log Analyzer (BLA)  -  Blue Team Incident Response          ║\n")
-    out.write(f"║                    Version {__version__:<6} |  100% Offline  |  No AI                  ║\n")
+    out.write(_banner_line("BlueTeam Log Analyzer (BLA) - Blue Team Incident Response"))
+    out.write(_banner_line("南京澄安科技有限公司出品"))
+    out.write(_banner_line(f"Version {__version__} | 100% Offline | No AI"))
     out.write("╚══════════════════════════════════════════════════════════════════════════════╝\n")
     out.write(RESET)
 
@@ -324,19 +542,8 @@ def print_terminal_report(
     # ── ATT&CK 攻击链 ─────────────────────────────────────
     if summary.attack_chain:
         out.write(_section("⛓  ATT&CK 攻击链分析"))
-        chain_labels = ["侦察","初始访问","执行","持久化","权限提升","防御规避","凭据访问","横向移动","命令控制"]
-        active_phases = {c.phase: c for c in summary.attack_chain}
-
-        for i, phase in enumerate(chain_labels):
-            if phase in active_phases:
-                c = active_phases[phase]
-                color = _level_color(c.level)
-                techs = ", ".join(_safe_text(item) for item in c.techniques[:3])
-                out.write(f"  {BOLD}{color}▶ {phase}{RESET}  ({c.event_count} 个事件)  {DIM}{techs}{RESET}\n")
-                if i < len(chain_labels) - 1 and chain_labels[i+1] in active_phases:
-                    out.write(f"    {GRAY}│{RESET}\n")
-            else:
-                out.write(f"  {DIM}○ {phase}{RESET}\n")
+        for line in _render_stage_topology(summary):
+            out.write(f"{line}\n")
 
     # ── 应急案件视图 ──────────────────────────────────────
     if summary.incidents:
@@ -351,10 +558,10 @@ def print_terminal_report(
                 out.write(f"       {GRAY}关键证据:{RESET}\n")
                 for item in incident.evidence[:4]:
                     out.write(f"         • {_evidence_text(item, full_evidence)}\n")
-            if incident.timeline:
-                out.write(f"       {GRAY}攻击路径还原:{RESET}\n")
-                for step, item in enumerate(incident.timeline[:15], 1):
-                    out.write(f"         {step}. {_safe_text(_fmt_time(item.timestamp))}  {_evidence_text(item.message, full_evidence)}\n")
+            topology_lines = _render_incident_topology(incident, event_by_id, full_evidence)
+            if topology_lines:
+                for line in topology_lines:
+                    out.write(f"{line}\n")
             if incident.next_logs:
                 out.write(f"       {CYAN}建议补采: {', '.join(_safe_text(item) for item in incident.next_logs[:5])}{RESET}\n")
             if incident.recommended_actions:
