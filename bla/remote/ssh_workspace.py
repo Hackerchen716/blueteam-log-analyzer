@@ -97,7 +97,10 @@ class SSHClient:
         if max_bytes > 0 and size > max_bytes:
             raise RuntimeError(f"远程文件过大: {size} bytes，超过上限 {max_bytes} bytes")
 
-        remote_cmd = _remote_cd_command(cwd, f"test -f {_qp(remote_path)} && cat -- {_qp(remote_path)}")
+        read_cmd = f"test -f {_qp(remote_path)} && cat -- {_qp(remote_path)}"
+        if max_bytes > 0:
+            read_cmd = f"({read_cmd}) | head -c {max_bytes + 1}"
+        remote_cmd = _remote_cd_command(cwd, read_cmd)
         args = self._base_args()
         args.append(remote_cmd)
         with open(local_path, "wb") as out:
@@ -110,7 +113,17 @@ class SSHClient:
             )
         if completed.returncode != 0:
             err = completed.stderr.decode("utf-8", errors="replace").strip()
+            try:
+                os.unlink(local_path)
+            except OSError:
+                pass
             raise RuntimeError(err or f"无法读取远程文件: {remote_path}")
+        if max_bytes > 0 and os.path.getsize(local_path) > max_bytes:
+            try:
+                os.unlink(local_path)
+            except OSError:
+                pass
+            raise RuntimeError(f"远程文件过大: 超过上限 {max_bytes} bytes: {remote_path}")
 
     def capture_command(
         self,

@@ -2,6 +2,32 @@ from _support import *
 
 
 class ParserRegressionTests(unittest.TestCase):
+    def test_collect_files_prunes_hidden_dirs_and_symlink_escapes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "case"
+            root.mkdir()
+            inside = root / "auth.log"
+            inside.write_text("Mar 15 10:01:00 host sshd: accepted password\n", encoding="utf-8")
+            hidden_dir = root / ".git"
+            hidden_dir.mkdir()
+            hidden_file = hidden_dir / "config"
+            hidden_file.write_text("secret=1\n", encoding="utf-8")
+            outside = Path(tmp) / "outside.log"
+            outside.write_text("should not be collected through a symlink\n", encoding="utf-8")
+            link = root / "linked-outside.log"
+            try:
+                link.symlink_to(outside)
+                symlink_available = True
+            except (OSError, NotImplementedError):
+                symlink_available = False
+
+            files = collect_files([str(root)])
+
+        self.assertIn(str(inside), files)
+        self.assertNotIn(str(hidden_file), files)
+        if symlink_available:
+            self.assertNotIn(str(link), files)
+
     def test_web_payload_with_spaces_is_detected_as_sqli(self):
         content = (
             "1.1.1.1 - - [15/Mar/2024:10:00:00 +0800] "

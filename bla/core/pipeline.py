@@ -71,13 +71,37 @@ def collect_files(paths: Iterable[str]) -> List[str]:
         if os.path.isfile(path):
             files.append(path)
         elif os.path.isdir(path):
-            for root, _, fnames in os.walk(path):
-                for fname in fnames:
-                    if not fname.startswith("."):
-                        files.append(os.path.join(root, fname))
+            _collect_directory_files(path, files)
         else:
-            files.extend(glob.glob(path))
+            for match in glob.glob(path):
+                if os.path.isfile(match):
+                    files.append(match)
+                elif os.path.isdir(match):
+                    _collect_directory_files(match, files)
     return sorted(set(files))
+
+
+def _collect_directory_files(path: str, files: List[str]) -> None:
+    root_real = os.path.realpath(path)
+    for root, dirnames, fnames in os.walk(path, followlinks=False):
+        dirnames[:] = [
+            dirname for dirname in dirnames
+            if not dirname.startswith(".")
+            and _is_within_real_root(os.path.join(root, dirname), root_real)
+        ]
+        for fname in fnames:
+            if fname.startswith("."):
+                continue
+            candidate = os.path.join(root, fname)
+            if os.path.isfile(candidate) and _is_within_real_root(candidate, root_real):
+                files.append(candidate)
+
+
+def _is_within_real_root(path: str, root_real: str) -> bool:
+    try:
+        return os.path.commonpath([os.path.realpath(path), root_real]) == root_real
+    except ValueError:
+        return False
 
 
 def parse_files(

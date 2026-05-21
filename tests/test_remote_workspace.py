@@ -188,6 +188,26 @@ class RemoteWorkspaceRegressionTests(unittest.TestCase):
         self.assertIn("--", args)
         self.assertEqual(args[-2:], ["--", "user@example.test"])
 
+    def test_ssh_client_fetch_file_caps_actual_stream_after_size_check(self):
+        client = SSHClient("user@example.test")
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(args, 0, stdout=b"3\n", stderr=b"")
+            kwargs["stdout"].write(b"abcdef")
+            return subprocess.CompletedProcess(args, 0, stderr=b"")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.run", side_effect=fake_run):
+            local_path = Path(tmp) / "auth.log"
+            with self.assertRaisesRegex(RuntimeError, "超过上限"):
+                client.fetch_file("auth.log", str(local_path), "/var/log", max_bytes=5)
+
+            self.assertFalse(local_path.exists())
+
+        self.assertIn("head -c 6", calls[1][-1])
+
     def test_remote_workspace_strips_remote_terminal_sequences(self):
         marker = "\x1b]52;c;SGFja2Vk\x07\x1b[31m"
 
