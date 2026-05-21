@@ -218,6 +218,16 @@ class OutputRegressionTests(unittest.TestCase):
         self.assertNotIn("\x1b[31m", text)
         self.assertNotIn("\x07", text)
 
+    def test_terminal_truncation_uses_display_width_for_cjk_text(self):
+        from bla.output.terminal import _display_width, _truncate_text
+
+        text = "攻击路径=/var/www/html/uploads/一句很长的中文证据说明"
+        truncated = _truncate_text(text, 24)
+
+        self.assertLessEqual(_display_width(truncated), 24)
+        self.assertTrue(truncated.endswith("…"))
+        self.assertNotIn("\n", truncated)
+
     def test_terminal_report_filters_placeholder_top_ip_and_shows_utc8(self):
         result = ParseResult(
             "security.xml",

@@ -137,7 +137,22 @@ def _truncate_text(text: str, max_len: int) -> str:
     if max_len <= 0:
         return ""
     text = _safe_text(text)
-    return text if len(text) <= max_len else text[: max_len - 1] + "…"
+    if _display_width(text) <= max_len:
+        return text
+
+    if max_len == 1:
+        return "…"
+
+    max_body_width = max_len - 1
+    body = []
+    current_width = 0
+    for char in text:
+        char_width = 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+        if current_width + char_width > max_body_width:
+            break
+        body.append(char)
+        current_width += char_width
+    return "".join(body) + "…"
 
 
 def _evidence_text(text: str, full: bool, max_len: int = 220) -> str:
