@@ -5,7 +5,9 @@ HTML 报告输出
 from __future__ import annotations
 
 import datetime
+import base64
 from html import escape
+from importlib import resources
 from typing import List
 
 from ..ioc import extract_iocs
@@ -14,6 +16,16 @@ from ..utils.helpers import format_timestamp_local, safe_print, sanitize_report_
 
 
 TIMELINE_LIMIT = 100
+
+
+def _asset_data_uri(filename: str) -> str:
+    """Return an embedded package asset as a data URI for single-file offline reports."""
+    try:
+        data = resources.files("bla.output").joinpath("assets", filename).read_bytes()
+    except (FileNotFoundError, ModuleNotFoundError, OSError):
+        return ""
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 def _level_color_hex(level: ThreatLevel) -> str:
@@ -28,12 +40,12 @@ def _level_color_hex(level: ThreatLevel) -> str:
 
 def _level_bg_hex(level: ThreatLevel) -> str:
     return {
-        "critical": "#450a0a",
-        "high":     "#431407",
-        "medium":   "#422006",
-        "low":      "#052e16",
-        "info":     "#172554",
-    }.get(level.value, "#1f2937")
+        "critical": "#fff5f5",
+        "high":     "#fff7ed",
+        "medium":   "#fffbeb",
+        "low":      "#f0fdf4",
+        "info":     "#eff6ff",
+    }.get(level.value, "#f8fafc")
 
 
 def _h(value) -> str:
@@ -100,13 +112,13 @@ def generate_html_report(
 
     # 纯 CSS 图表，避免报告依赖外部 CDN，保持 100% 离线。
     level_rows = [
-        ("严重", crit, "#ef4444"),
-        ("高危", high, "#f97316"),
-        ("中危", med, "#eab308"),
-        ("低危", low, "#22c55e"),
-        ("信息", info, "#3b82f6"),
+        ("critical", "严重", crit, "#ef4444"),
+        ("high", "高危", high, "#f97316"),
+        ("medium", "中危", med, "#eab308"),
+        ("low", "低危", low, "#22c55e"),
+        ("info", "信息", info, "#3b82f6"),
     ]
-    nonzero = [(label, count, color) for label, count, color in level_rows if count > 0]
+    nonzero = [(label, count, color) for _level, label, count, color in level_rows if count > 0]
     if nonzero:
         cursor = 0.0
         segments = []
@@ -116,15 +128,27 @@ def generate_html_report(
             cursor = end
         donut_bg = "conic-gradient(" + ", ".join(segments) + ")"
     else:
-        donut_bg = "#334155"
+        donut_bg = "#e2e8f0"
 
     level_legend_html = ""
-    for label, count, color in level_rows:
+    for _level, label, count, color in level_rows:
         level_legend_html += f"""
         <div class="legend-row">
           <span><i style="background:{color};"></i>{_h(label)}</span>
           <strong>{count}</strong>
         </div>"""
+
+    stat_cards_html = ""
+    for level_value, label, count, color in level_rows[:4]:
+        disabled_class = " is-empty" if count <= 0 else ""
+        action_label = "查看事件" if count > 0 else "暂无事件"
+        stat_cards_html += f"""
+    <button class="stat-card stat-link{disabled_class}" type="button" data-level="{_h(level_value)}" onclick="jumpToEvents('{_h(level_value)}')" aria-label="查看{_h(label)}事件">
+      <span class="stat-accent" style="background:{color};"></span>
+      <span class="stat-num" style="color:{color};">{count}</span>
+      <span class="stat-label">{_h(label)}事件</span>
+      <span class="stat-action">{_h(action_label)}</span>
+    </button>"""
 
     max_ip_count = max((count for _, count in top_ips), default=1)
     ip_bars_html = ""
@@ -146,7 +170,7 @@ def generate_html_report(
         bg    = _level_bg_hex(alert.level)
         evidence_items = "".join(f"<li>{_h(e)}</li>" for e in alert.evidence)
         alerts_html += f"""
-        <div class="alert-card" data-level="{_h(alert.level.value)}" style="border-left:4px solid {color}; background:{bg};">
+        <div class="alert-card" id="alert-{i:02d}" data-level="{_h(alert.level.value)}" style="border-left:4px solid {color}; background:{bg};">
           <div class="alert-header">
             <span class="badge" style="background:{color};">{_h(alert.level.label)}</span>
             <span class="alert-num">#{i:02d}</span>
@@ -164,7 +188,7 @@ def generate_html_report(
             <summary>证据详情</summary>
             <ul class="evidence-list">{evidence_items}</ul>
           </details>
-          <div class="recommendation">💡 {_h(alert.recommendation)}</div>
+          <div class="recommendation"><strong>建议</strong><span>{_h(alert.recommendation)}</span></div>
         </div>"""
     if not alerts_html:
         alerts_html = '<div class="empty-state">未发现明显威胁告警</div>'
@@ -175,7 +199,7 @@ def generate_html_report(
         color = _level_color_hex(entry.level)
         mitre = f'<span class="mitre-tag">{_h(entry.mitre_attack)}</span>' if entry.mitre_attack else ""
         timeline_html += f"""
-        <div class="tl-entry">
+        <div class="tl-entry" data-level="{_h(entry.level.value)}">
           <div class="tl-dot" style="background:{color};"></div>
           <div class="tl-content">
             <span class="tl-time">{_h(format_timestamp_local(entry.timestamp))}</span>
@@ -195,7 +219,10 @@ def generate_html_report(
         timeline_html = '<div class="empty-state">暂无关键事件</div>'
 
     # 攻击链 HTML
-    chain_phases = ["侦察","初始访问","执行","持久化","权限提升","防御规避","凭据访问","横向移动","命令控制"]
+    chain_phases = [
+        "侦察","初始访问","身份突破","执行","持久化","权限提升","主机失陷",
+        "远程访问","横向移动","命令控制","数据外传","凭据访问","防御规避","网络活动","其他",
+    ]
     active_phases = {c.phase: c for c in summary.attack_chain}
     chain_parts: List[str] = []
     for idx, phase in enumerate(chain_phases):
@@ -355,6 +382,11 @@ def generate_html_report(
 
     risk_color = _level_color_hex(summary.risk_level)
     risk_score = summary.risk_score
+    logo_data_uri = _asset_data_uri("bla-logo.png")
+    logo_html = (
+        f'<img class="brand-logo" src="{logo_data_uri}" alt="BLA logo">'
+        if logo_data_uri else '<span class="brand-mark">BLA</span>'
+    )
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -364,110 +396,145 @@ def generate_html_report(
 <title>BLA 分析报告 - {now}</title>
 <style>
   :root {{
-    --bg: #0f172a; --bg2: #1e293b; --bg3: #334155;
-    --text: #e2e8f0; --text2: #94a3b8; --border: #334155;
-    --crit: #ef4444; --high: #f97316; --med: #eab308;
-    --low: #22c55e; --info: #3b82f6; --accent: #06b6d4;
+    --bg: #f4f7fb; --surface: #ffffff; --surface2: #f8fafc;
+    --text: #172033; --muted: #667085; --faint: #98a2b3; --border: #d9e2ec;
+    --crit: #d92d20; --high: #e26f20; --med: #b88700;
+    --low: #16803a; --info: #2563eb; --accent: #0e7490;
+    --shadow: 0 12px 30px rgba(15, 23, 42, .07);
   }}
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: 'SF Mono', 'JetBrains Mono', monospace; background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.6; }}
-  .container {{ max-width: 1400px; margin: 0 auto; padding: 20px; }}
-  h1 {{ font-size: 22px; color: var(--accent); margin-bottom: 4px; }}
-  h2 {{ font-size: 15px; color: var(--accent); margin: 24px 0 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }}
-  h3 {{ font-size: 13px; color: var(--text2); margin-bottom: 8px; }}
-  .header {{ background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }}
-  .header-left h1 span {{ color: var(--text2); font-size: 14px; }}
-  .header-meta {{ color: var(--text2); font-size: 11px; }}
-  .risk-badge {{ text-align: center; }}
-  .risk-score {{ font-size: 48px; font-weight: bold; color: {risk_color}; line-height: 1; }}
-  .risk-label {{ font-size: 12px; color: var(--text2); }}
-  .grid-4 {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }}
-  .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
-  @media (max-width: 860px) {{
-    .header, .grid-2 {{ display: block; }}
-    .risk-badge {{ margin-top: 16px; text-align: left; }}
-    .grid-4 {{ grid-template-columns: repeat(2, 1fr); }}
-    .stat-card, .card {{ margin-bottom: 12px; }}
+  html {{ scroll-behavior: smooth; }}
+  body {{
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px; line-height: 1.62;
   }}
-  .stat-card {{ background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; text-align: center; }}
-  .stat-num {{ font-size: 32px; font-weight: bold; }}
-  .stat-label {{ font-size: 11px; color: var(--text2); margin-top: 4px; }}
-  .card {{ background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }}
-  .badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; color: #fff; }}
-  .alert-card {{ border-radius: 8px; padding: 14px; margin-bottom: 12px; }}
-  .incident-card {{ background: var(--bg2); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 8px; padding: 14px; margin-bottom: 12px; }}
-  .incident-head {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }}
-  .incident-meta {{ display: flex; gap: 12px; flex-wrap: wrap; color: var(--text2); font-size: 11px; margin: 8px 0; }}
-  .incident-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 10px; }}
-  .incident-grid ul {{ margin-left: 16px; color: var(--text2); }}
-  .next-logs {{ display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }}
-  .next-logs code {{ background: #111827; border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; color: var(--accent); }}
-  .mini-timeline {{ margin: 8px 0 0 16px; color: var(--text2); }}
-  .mini-timeline span {{ color: var(--accent); margin-right: 8px; }}
-  .incident-killchain {{ display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin: 10px 0 6px; }}
-  .kc-chip {{ display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid; font-size: 11px; line-height: 1.6; }}
-  .kc-chip.kc-miss {{ opacity: 0.5; }}
-  .kc-sep {{ color: var(--text2); font-size: 12px; }}
-  .alert-header {{ display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }}
-  .alert-num {{ color: var(--text2); font-size: 11px; }}
-  .alert-desc {{ margin-bottom: 8px; }}
-  .alert-meta {{ display: flex; gap: 16px; font-size: 11px; color: var(--text2); margin-bottom: 8px; }}
-  .mitre-tag {{ background: #1e3a5f; color: #60a5fa; padding: 1px 6px; border-radius: 3px; font-size: 11px; }}
-  .phase-tag {{ background: #1e2a1e; color: #86efac; padding: 1px 6px; border-radius: 3px; font-size: 11px; }}
-  .evidence-list {{ margin: 8px 0 8px 16px; color: var(--text2); font-size: 12px; }}
-  .recommendation {{ background: #1c2a1c; border-left: 3px solid #22c55e; padding: 8px 12px; border-radius: 4px; font-size: 12px; margin-top: 8px; }}
-  details summary {{ cursor: pointer; color: var(--accent); font-size: 12px; margin: 4px 0; }}
-  .tl-entry {{ display: flex; gap: 12px; margin-bottom: 8px; align-items: flex-start; }}
-  .tl-dot {{ width: 10px; height: 10px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }}
-  .tl-content {{ flex: 1; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }}
-  .tl-time {{ color: var(--text2); font-size: 11px; white-space: nowrap; }}
-  .tl-cat {{ color: var(--text2); font-size: 11px; }}
-  .tl-msg {{ color: var(--text); }}
-  .chain-wrapper {{ display: flex; align-items: center; flex-wrap: wrap; gap: 4px; overflow-x: auto; padding: 8px 0; }}
-  .chain-item {{ border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; min-width: 90px; text-align: center; }}
-  .chain-item.active {{ background: var(--bg3); }}
-  .chain-item.inactive {{ opacity: 0.35; }}
-  .chain-phase {{ font-size: 12px; font-weight: bold; }}
-  .chain-count {{ font-size: 11px; color: var(--text2); }}
-  .chain-techs {{ font-size: 10px; color: var(--text2); margin-top: 2px; }}
-  .chain-arrow {{ color: var(--text2); font-size: 16px; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
-  th {{ background: var(--bg3); color: var(--text2); padding: 8px 10px; text-align: left; font-weight: normal; }}
-  td {{ padding: 7px 10px; border-bottom: 1px solid var(--border); }}
-  tr:hover td {{ background: var(--bg3); }}
-  .rec-list {{ list-style: none; }}
-  .rec-list li {{ padding: 8px 12px; border-left: 3px solid var(--accent); margin-bottom: 8px; background: var(--bg3); border-radius: 0 4px 4px 0; }}
-  .chart-wrap {{ display: grid; grid-template-columns: 180px 1fr; gap: 18px; align-items: center; min-height: 210px; }}
-  .donut {{ width: 170px; height: 170px; border-radius: 50%; background: {donut_bg}; position: relative; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }}
-  .donut::after {{ content: ""; position: absolute; inset: 42px; border-radius: 50%; background: var(--bg2); box-shadow: inset 0 0 0 1px var(--border); }}
-  .donut-label {{ position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 1; }}
-  .donut-label strong {{ font-size: 26px; }}
-  .donut-label span {{ color: var(--text2); font-size: 11px; }}
-  .legend-row {{ display: flex; justify-content: space-between; gap: 14px; padding: 6px 0; border-bottom: 1px solid rgba(148,163,184,.12); }}
-  .legend-row span {{ display: flex; align-items: center; gap: 8px; color: var(--text2); }}
-  .legend-row i {{ width: 9px; height: 9px; border-radius: 2px; display: inline-block; }}
-  .bar-row {{ display: grid; grid-template-columns: minmax(110px, 160px) 1fr 44px; align-items: center; gap: 10px; margin: 8px 0; }}
-  .bar-label {{ color: var(--text2); overflow-wrap: anywhere; }}
-  .bar-track {{ height: 12px; border-radius: 999px; background: var(--bg3); overflow: hidden; }}
-  .bar-fill {{ height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--high), var(--crit)); }}
-  .empty-state {{ color: var(--text2); padding: 20px 0; text-align: center; }}
-  .empty-inline {{ color: var(--text2); }}
-  .ioc-grid {{ display: grid; grid-template-columns: repeat(8, 1fr); gap: 10px; margin-bottom: 12px; }}
-  .ioc-card {{ background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 10px; text-align: center; }}
-  .ioc-num {{ font-size: 22px; font-weight: bold; color: var(--accent); }}
-  .ioc-label {{ color: var(--text2); font-size: 11px; }}
-  .ioc-preview {{ display: flex; gap: 6px; flex-wrap: wrap; }}
-  .ioc-preview code {{ background: #111827; border: 1px solid var(--border); color: var(--text2); border-radius: 4px; padding: 2px 6px; overflow-wrap: anywhere; }}
-  @media (max-width: 860px) {{ .ioc-grid {{ grid-template-columns: repeat(2, 1fr); }} }}
-  .tab-bar {{ display: flex; gap: 4px; margin-bottom: 12px; }}
-  .tab {{ padding: 6px 14px; border-radius: 6px 6px 0 0; cursor: pointer; background: var(--bg3); color: var(--text2); border: 1px solid var(--border); border-bottom: none; font-size: 12px; }}
-  .tab.active {{ background: var(--bg2); color: var(--text); }}
-  .tab-content {{ display: none; }}
-  .tab-content.active {{ display: block; }}
-  .filter-bar {{ display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }}
-  .filter-btn {{ padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg3); color: var(--text); cursor: pointer; font-size: 12px; }}
-  .filter-btn.active {{ border-color: var(--accent); color: var(--accent); }}
-  input[type=text] {{ background: var(--bg3); border: 1px solid var(--border); color: var(--text); padding: 4px 10px; border-radius: 4px; font-size: 12px; width: 240px; }}
+  button, input {{ font: inherit; }}
+  .container {{ max-width: 1480px; margin: 0 auto; padding: 32px 36px 48px; }}
+  h1 {{ display:flex; align-items:center; gap:14px; font-size: 24px; margin-bottom: 12px; }}
+  h2 {{ display:flex; align-items:center; gap:10px; font-size: 18px; color:#123243; margin: 30px 0 14px; }}
+  h2::before {{ content:""; width:4px; height:18px; border-radius:999px; background:#1f7a8c; }}
+  h3 {{ font-size: 14px; color: var(--muted); margin-bottom: 10px; }}
+  .mono, .chain-techs, .tl-time, code {{ font-family: "SF Mono", "JetBrains Mono", ui-monospace, monospace; }}
+  .header {{
+    min-height: 132px; background: linear-gradient(135deg, #fff, #f9fbff);
+    border: 1px solid var(--border); border-radius: 14px; padding: 26px 30px;
+    margin-bottom: 20px; display:flex; justify-content:space-between; align-items:center; box-shadow: var(--shadow);
+  }}
+  .brand-mark {{
+    width:42px; height:42px; border-radius:10px; display:inline-flex; align-items:center; justify-content:center;
+    color:#fff; background:#1f7a8c; font-size:12px; font-weight:800; letter-spacing:.05em;
+  }}
+  .brand-logo {{
+    width: 116px;
+    height: auto;
+    display: block;
+    flex-shrink: 0;
+  }}
+  .brand-name {{ font-weight: 800; color: #123243; }}
+  .report-title {{ padding-left: 16px; border-left:1px solid #cbd5e1; color: var(--muted); font-size: 16px; font-weight: 700; }}
+  .header-meta {{ display:flex; flex-wrap:wrap; gap:10px; color:var(--muted); font-size:12px; font-weight:650; }}
+  .header-meta span {{ padding:5px 9px; border:1px solid #e2e8f0; border-radius:999px; background:#fff; }}
+  .risk-badge {{ min-width: 146px; text-align:center; background:#fff5f5; border:1px solid #fecaca; border-radius:14px; padding:12px 16px; }}
+  .risk-score {{ font-size: 52px; font-weight: 850; color: {risk_color}; line-height: 1; }}
+  .risk-label {{ color: var(--muted); font-size: 12px; font-weight: 700; margin: 4px 0; }}
+  .grid-4 {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:14px; margin-bottom: 24px; }}
+  .grid-2 {{ display:grid; grid-template-columns: 1fr 1fr; gap:18px; }}
+  .card, .stat-card, .incident-card {{
+    background: var(--surface); border:1px solid var(--border); border-radius:14px; box-shadow: var(--shadow);
+  }}
+  .card {{ padding: 20px; margin-bottom: 18px; }}
+  .stat-card {{
+    position:relative; min-height:112px; padding: 20px 22px; text-align:left; overflow:hidden;
+    appearance:none; cursor:pointer; transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+  }}
+  .stat-card:hover {{ transform: translateY(-2px); border-color:#b7c4d4; box-shadow:0 16px 34px rgba(15,23,42,.11); }}
+  .stat-card:focus-visible {{ outline:3px solid rgba(14,116,144,.22); outline-offset:2px; }}
+  .stat-card.is-empty {{ cursor: default; }}
+  .stat-card.is-empty:hover {{ transform:none; }}
+  .stat-accent {{ position:absolute; inset:0 0 auto 0; height:4px; }}
+  .stat-num {{ display:block; font-size:34px; line-height:1; font-weight:850; margin-top:10px; }}
+  .stat-label {{ display:block; color:var(--muted); font-size:13px; font-weight:750; margin-top:10px; }}
+  .stat-action {{ display:block; color:var(--faint); font-size:11px; margin-top:4px; }}
+  .badge {{ display:inline-block; padding:3px 9px; border-radius:999px; font-size:11px; font-weight:750; color:#fff; }}
+  .alert-card {{ border-radius:14px; padding:16px; margin-bottom:12px; border:1px solid var(--border); color:var(--text); }}
+  .incident-card {{ border-left:4px solid var(--accent); padding:16px; margin-bottom:12px; }}
+  .incident-head {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; font-size:15px; }}
+  .incident-meta {{ display:flex; gap:12px; flex-wrap:wrap; color:var(--muted); font-size:12px; margin:9px 0; }}
+  .incident-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:12px; padding:14px; border:1px solid #e2e8f0; border-radius:12px; background:var(--surface2); }}
+  .incident-grid ul {{ margin-left:16px; color:var(--muted); }}
+  .next-logs {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }}
+  .next-logs code, .ioc-preview code {{ background:#f8fafc; border:1px solid var(--border); border-radius:5px; padding:2px 6px; color:#0e7490; }}
+  .mini-timeline {{ margin:8px 0 0 16px; color:var(--muted); }}
+  .mini-timeline span {{ color:#0e7490; margin-right:8px; }}
+  .incident-killchain {{ display:flex; gap:4px; flex-wrap:wrap; align-items:center; margin:10px 0 6px; }}
+  .kc-chip {{ display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid; font-size:11px; line-height:1.6; }}
+  .kc-chip.kc-miss {{ opacity:.45; }}
+  .kc-sep {{ color:var(--faint); font-size:12px; }}
+  .alert-header {{ display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap; }}
+  .alert-num, .alert-meta, .tl-time, .tl-cat {{ color:var(--muted); font-size:12px; }}
+  .alert-desc {{ margin-bottom:8px; }}
+  .alert-meta {{ display:flex; gap:16px; margin-bottom:8px; }}
+  .mitre-tag {{ background:#eff6ff; color:#1d4ed8; padding:2px 7px; border-radius:5px; font-size:11px; }}
+  .phase-tag {{ background:#ecfdf3; color:#047857; padding:2px 7px; border-radius:5px; font-size:11px; }}
+  .evidence-list {{ margin:8px 0 8px 16px; color:var(--muted); font-size:12px; }}
+  .recommendation {{ display:flex; gap:8px; background:#ecfdf3; border-left:3px solid #16a34a; padding:9px 12px; border-radius:6px; font-size:12px; margin-top:8px; }}
+  .recommendation strong {{ color:#047857; flex-shrink:0; }}
+  details summary {{ cursor:pointer; color:#0e7490; font-size:12px; margin:4px 0; }}
+  .chain-wrapper {{ display:flex; align-items:center; flex-wrap:wrap; gap:8px; overflow-x:auto; padding:10px 0; }}
+  .chain-item {{ border:1px solid var(--border); border-radius:12px; padding:11px 14px; min-width:104px; text-align:center; background:#fff; }}
+  .chain-item.active {{ background:#fff7ed; }}
+  .chain-item.inactive {{ color:var(--faint); background:var(--surface2); }}
+  .chain-phase {{ font-size:13px; font-weight:800; }}
+  .chain-count {{ font-size:12px; color:var(--muted); font-weight:700; }}
+  .chain-techs {{ font-size:11px; color:var(--muted); margin-top:2px; }}
+  .chain-arrow {{ color:var(--faint); font-size:16px; }}
+  table {{ width:100%; border-collapse:collapse; font-size:12px; }}
+  th {{ background:var(--surface2); color:var(--muted); padding:8px 10px; text-align:left; font-weight:700; }}
+  td {{ padding:7px 10px; border-bottom:1px solid var(--border); }}
+  tr:hover td {{ background:var(--surface2); }}
+  .rec-list {{ list-style:none; }}
+  .rec-list li {{ padding:9px 12px; border-left:3px solid var(--accent); margin-bottom:8px; background:var(--surface2); border-radius:0 6px 6px 0; }}
+  .chart-wrap {{ display:grid; grid-template-columns:180px 1fr; gap:18px; align-items:center; min-height:210px; }}
+  .donut {{ width:170px; height:170px; border-radius:50%; background:{donut_bg}; position:relative; }}
+  .donut::after {{ content:""; position:absolute; inset:42px; border-radius:50%; background:#fff; box-shadow:inset 0 0 0 1px var(--border); }}
+  .donut-label {{ position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:1; }}
+  .donut-label strong {{ font-size:28px; }}
+  .donut-label span {{ color:var(--muted); font-size:12px; }}
+  .legend-row {{ display:flex; justify-content:space-between; gap:14px; padding:7px 0; border-bottom:1px solid #edf1f6; }}
+  .legend-row span {{ display:flex; align-items:center; gap:8px; color:var(--muted); }}
+  .legend-row i {{ width:9px; height:9px; border-radius:2px; display:inline-block; }}
+  .bar-row {{ display:grid; grid-template-columns:minmax(110px,160px) 1fr 44px; align-items:center; gap:10px; margin:10px 0; }}
+  .bar-label {{ color:var(--muted); overflow-wrap:anywhere; }}
+  .bar-track {{ height:12px; border-radius:999px; background:#e8edf5; overflow:hidden; }}
+  .bar-fill {{ height:100%; border-radius:999px; background:linear-gradient(90deg, var(--high), var(--crit)); }}
+  .empty-state {{ color:var(--muted); padding:20px 0; text-align:center; }}
+  .empty-inline {{ color:var(--muted); }}
+  .ioc-grid {{ display:grid; grid-template-columns:repeat(8,1fr); gap:10px; margin-bottom:12px; }}
+  .ioc-card {{ background:var(--surface2); border:1px solid var(--border); border-radius:10px; padding:10px; text-align:center; }}
+  .ioc-num {{ font-size:22px; font-weight:800; color:var(--accent); }}
+  .ioc-label {{ color:var(--muted); font-size:11px; }}
+  .ioc-preview {{ display:flex; gap:6px; flex-wrap:wrap; }}
+  .filter-bar, .timeline-tools {{ display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; align-items:center; }}
+  .filter-btn {{ padding:6px 12px; border-radius:999px; border:1px solid var(--border); background:#fff; color:var(--muted); cursor:pointer; font-size:12px; font-weight:700; }}
+  .filter-btn:hover {{ border-color:#b7c4d4; color:var(--text); }}
+  .filter-btn.active {{ border-color:var(--accent); color:var(--accent); background:#effafa; }}
+  input[type=text] {{ background:#fff; border:1px solid var(--border); color:var(--text); padding:6px 11px; border-radius:999px; font-size:12px; width:240px; }}
+  .timeline-card {{ max-height:500px; overflow-y:auto; }}
+  .tl-entry {{ display:flex; gap:12px; margin-bottom:9px; align-items:flex-start; }}
+  .tl-entry.is-hidden, .alert-card.is-hidden {{ display:none; }}
+  .tl-dot {{ width:10px; height:10px; border-radius:50%; margin-top:6px; flex-shrink:0; }}
+  .tl-content {{ flex:1; display:flex; flex-wrap:wrap; gap:6px; align-items:baseline; }}
+  .tl-msg {{ color:var(--text); }}
+  @media (max-width: 860px) {{
+    .container {{ padding:20px; }}
+    .header, .grid-2 {{ display:block; }}
+    .risk-badge {{ margin-top:16px; text-align:left; }}
+    .grid-4 {{ grid-template-columns:repeat(2,1fr); }}
+    .incident-grid, .chart-wrap {{ display:block; }}
+    .ioc-grid {{ grid-template-columns:repeat(2,1fr); }}
+    .stat-card, .card {{ margin-bottom:12px; }}
+  }}
 </style>
 </head>
 <body>
@@ -476,10 +543,13 @@ def generate_html_report(
   <!-- 标题 -->
   <div class="header">
     <div class="header-left">
-      <h1>🛡 BlueTeam Log Analyzer <span>| 蓝队应急响应日志分析报告</span></h1>
+      <h1>{logo_html}<span class="brand-name">BlueTeam Log Analyzer</span><span class="report-title">蓝队应急响应日志分析报告</span></h1>
       <div class="header-meta">
-        生成时间: {now} &nbsp;|&nbsp; 分析文件: {summary.files_analyzed} 个 &nbsp;|&nbsp;
-        总事件: {total_events} 条 &nbsp;|&nbsp; 告警: {len(summary.alerts)} 个 &nbsp;|&nbsp; 案件: {len(summary.incidents)} 个
+        <span>生成时间: {now}</span>
+        <span>分析文件: {summary.files_analyzed} 个</span>
+        <span>总事件: {total_events} 条</span>
+        <span>告警: {len(summary.alerts)} 个</span>
+        <span>案件: {len(summary.incidents)} 个</span>
       </div>
     </div>
     <div class="risk-badge">
@@ -490,15 +560,11 @@ def generate_html_report(
   </div>
 
   <!-- 统计卡片 -->
-  <div class="grid-4">
-    <div class="stat-card"><div class="stat-num" style="color:#ef4444;">{crit}</div><div class="stat-label">严重事件</div></div>
-    <div class="stat-card"><div class="stat-num" style="color:#f97316;">{high}</div><div class="stat-label">高危事件</div></div>
-    <div class="stat-card"><div class="stat-num" style="color:#eab308;">{med}</div><div class="stat-label">中危事件</div></div>
-    <div class="stat-card"><div class="stat-num" style="color:#22c55e;">{low}</div><div class="stat-label">低危事件</div></div>
+  <div class="grid-4">{stat_cards_html}
   </div>
 
   <!-- ATT&CK 攻击链 -->
-  <h2>⛓ ATT&CK 攻击链</h2>
+  <h2>ATT&CK 攻击链</h2>
   <div class="card">
     <div class="chain-wrapper">{chain_html}</div>
   </div>
@@ -519,35 +585,43 @@ def generate_html_report(
   </div>
 
   <!-- 告警 -->
-  <h2>🧩 应急案件视图 ({len(summary.incidents)})</h2>
+  <h2>应急案件视图 ({len(summary.incidents)})</h2>
   <div>{incidents_html}</div>
 
   <!-- 告警 -->
-  <h2>🚨 威胁告警 ({len(summary.alerts)})</h2>
+  <h2 id="alertsSection">威胁告警 ({len(summary.alerts)})</h2>
   <div class="filter-bar">
     <input type="text" id="alertSearch" placeholder="搜索告警..." oninput="filterAlerts()">
-    <button class="filter-btn active" onclick="setFilter('all', this)">全部</button>
-    <button class="filter-btn" onclick="setFilter('critical', this)" style="color:#ef4444;">严重</button>
-    <button class="filter-btn" onclick="setFilter('high', this)" style="color:#f97316;">高危</button>
-    <button class="filter-btn" onclick="setFilter('medium', this)" style="color:#eab308;">中危</button>
+    <button class="filter-btn active" type="button" data-alert-filter="all" onclick="setFilter('all', this)">全部</button>
+    <button class="filter-btn" type="button" data-alert-filter="critical" onclick="setFilter('critical', this)" style="color:#d92d20;">严重</button>
+    <button class="filter-btn" type="button" data-alert-filter="high" onclick="setFilter('high', this)" style="color:#e26f20;">高危</button>
+    <button class="filter-btn" type="button" data-alert-filter="medium" onclick="setFilter('medium', this)" style="color:#b88700;">中危</button>
   </div>
   <div id="alertsContainer">{alerts_html}</div>
 
   <!-- IOC 摘要 -->
-  <h2>🧭 IOC 摘要</h2>
+  <h2>IOC 摘要</h2>
   <div class="card">
     <div class="ioc-grid">{ioc_summary_html}</div>
     <div class="ioc-preview">{ioc_preview_html}</div>
   </div>
 
   <!-- 时间线 -->
-  <h2>📅 关键事件时间线</h2>
-  <div class="card" style="max-height:500px; overflow-y:auto;">
+  <h2 id="timelineSection">关键事件时间线</h2>
+  <div class="timeline-tools">
+    <button class="filter-btn active" type="button" data-timeline-filter="all" onclick="setTimelineFilter('all', this)">全部事件</button>
+    <button class="filter-btn" type="button" data-timeline-filter="critical" onclick="setTimelineFilter('critical', this)" style="color:#d92d20;">严重</button>
+    <button class="filter-btn" type="button" data-timeline-filter="high" onclick="setTimelineFilter('high', this)" style="color:#e26f20;">高危</button>
+    <button class="filter-btn" type="button" data-timeline-filter="medium" onclick="setTimelineFilter('medium', this)" style="color:#b88700;">中危</button>
+    <button class="filter-btn" type="button" data-timeline-filter="low" onclick="setTimelineFilter('low', this)" style="color:#16803a;">低危</button>
+  </div>
+  <div class="card timeline-card">
     {timeline_html}
+    <div id="timelineEmpty" class="empty-state" style="display:none;">当前级别暂无关键事件</div>
   </div>
 
   <!-- 文件详情 -->
-  <h2>📁 文件解析详情</h2>
+  <h2>文件解析详情</h2>
   <div class="card">
     <table>
       <thead><tr>
@@ -560,10 +634,10 @@ def generate_html_report(
   </div>
 
   <!-- Windows 登录摘要 -->
-  {"<h2>🔐 Windows 登录事件摘要 (4624 / 4625)</h2>" + windows_logon_html if windows_logon_html else ""}
+  {"<h2>Windows 登录事件摘要 (4624 / 4625)</h2>" + windows_logon_html if windows_logon_html else ""}
 
   <!-- 建议 -->
-  <h2>💡 应急处置建议</h2>
+  <h2>应急处置建议</h2>
   <div class="card">
     <ul class="rec-list">{recs_html}</ul>
   </div>
@@ -575,8 +649,8 @@ def generate_html_report(
 let currentFilter = 'all';
 function setFilter(level, btn) {{
   currentFilter = level;
-  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
+  document.querySelectorAll('[data-alert-filter]').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
   filterAlerts();
 }}
 function filterAlerts() {{
@@ -584,8 +658,36 @@ function filterAlerts() {{
   document.querySelectorAll('.alert-card').forEach(card => {{
     const text = card.textContent.toLowerCase();
     const levelMatch = currentFilter === 'all' || card.dataset.level === currentFilter;
-    card.style.display = (text.includes(q) && levelMatch) ? '' : 'none';
+    card.classList.toggle('is-hidden', !(text.includes(q) && levelMatch));
   }});
+}}
+
+let currentTimelineFilter = 'all';
+function setTimelineFilter(level, btn) {{
+  currentTimelineFilter = level;
+  document.querySelectorAll('[data-timeline-filter]').forEach(b => b.classList.remove('active'));
+  if (btn) {{
+    btn.classList.add('active');
+  }} else {{
+    const target = document.querySelector(`[data-timeline-filter="${{level}}"]`);
+    if (target) target.classList.add('active');
+  }}
+  filterTimeline();
+}}
+function filterTimeline() {{
+  let visible = 0;
+  document.querySelectorAll('.tl-entry').forEach(entry => {{
+    const match = currentTimelineFilter === 'all' || entry.dataset.level === currentTimelineFilter;
+    entry.classList.toggle('is-hidden', !match);
+    if (match) visible += 1;
+  }});
+  const empty = document.getElementById('timelineEmpty');
+  if (empty) empty.style.display = visible ? 'none' : '';
+}}
+function jumpToEvents(level) {{
+  setTimelineFilter(level);
+  const section = document.getElementById('timelineSection');
+  if (section) section.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
 }}
 </script>
 </body>

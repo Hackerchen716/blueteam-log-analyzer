@@ -42,6 +42,58 @@ class OutputRegressionTests(unittest.TestCase):
         self.assertNotIn("<img src=x onerror=alert(1)>", html)
         self.assertIn("&lt;img src=x onerror=alert(1)&gt;", html)
 
+    def test_html_report_stat_cards_jump_to_timeline_filters(self):
+        """HTML 统计卡片应作为可点击入口，跳到对应级别事件时间线。"""
+        event = LogEvent(
+            id="evt-critical",
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.CRITICAL,
+            category="测试",
+            source="fixture",
+            source_file="events.log",
+            message="critical timeline event",
+            raw_line="critical timeline event",
+        )
+        result = ParseResult(
+            "events.log", "Fixture", [event],
+            ParseStats(total=1, critical=1),
+        )
+        summary = AnalysisSummary(
+            risk_score=80,
+            risk_level=ThreatLevel.CRITICAL,
+            alerts=[],
+            timeline=[
+                TimelineEntry(
+                    event_id=event.id,
+                    timestamp=event.timestamp,
+                    level=event.level,
+                    category=event.category,
+                    message=event.message,
+                    source_file=event.source_file,
+                )
+            ],
+            attack_chain=[],
+            recommendations=[],
+            total_events=1,
+            files_analyzed=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "report.html"
+            generate_html_report([result], summary, str(report_path))
+            html = report_path.read_text(encoding="utf-8")
+
+        self.assertIn('class="stat-card stat-link"', html)
+        self.assertIn('data-level="critical"', html)
+        self.assertIn("jumpToEvents('critical')", html)
+        self.assertIn('id="timelineSection"', html)
+        self.assertIn('class="tl-entry" data-level="critical"', html)
+        self.assertIn("function setTimelineFilter", html)
+        self.assertIn("function filterTimeline", html)
+        self.assertIn('class="brand-logo"', html)
+        self.assertIn("data:image/png;base64,", html)
+        self.assertNotIn("bla/output/assets/bla-logo.png", html)
+
     def test_csv_report_neutralizes_spreadsheet_formulas(self):
         event = LogEvent(
             id="evt-1",
@@ -297,10 +349,10 @@ class OutputRegressionTests(unittest.TestCase):
             report_path = Path(tmp) / "report.html"
             generate_html_report([result], summary, str(report_path))
             html = report_path.read_text(encoding="utf-8")
-        # chain-wrapper 内 9 个 phase 之间应该恰好 8 个箭头（不是 9 个）
+        # chain-wrapper 内 15 个 phase 之间应该恰好 14 个箭头（不是 15 个）
         chain_section = html.split('class="chain-wrapper"', 1)[1].split("</div>", 50)[0:50]
         chain_block = "".join(chain_section)
-        self.assertEqual(chain_block.count('class="chain-arrow"'), 8)
+        self.assertEqual(chain_block.count('class="chain-arrow"'), 14)
 
     def test_sarif_report_is_valid_and_maps_levels(self):
         """SARIF 输出应当包含 runs/tool/rules/results，且严重告警 → "error"。"""

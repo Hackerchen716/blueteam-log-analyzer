@@ -62,6 +62,8 @@ _EVENT_FAMILY_PHASE = {
     "lateral-movement": "横向移动",
     "command-control": "命令控制",
     "exfiltration": "数据外传",
+    "credential-access": "凭据访问",
+    "defense-evasion": "防御规避",
     "network": "网络活动",
     "other": "其他",
 }
@@ -245,12 +247,14 @@ def _phase_rank(phase: str) -> int:
 
 def _event_phase(event: LogEvent, item: TimelineEntry) -> str:
     family = _safe_text(event.details.get("event_family") or "")
-    if family in _EVENT_FAMILY_PHASE:
+    if family in _EVENT_FAMILY_PHASE and family != "other":
         return _EVENT_FAMILY_PHASE[family]
     technique = _safe_text(item.mitre_attack or event.mitre_attack or "")
     for prefix, phase in _PHASE_HINTS.items():
         if technique.startswith(prefix):
             return phase
+    if family in _EVENT_FAMILY_PHASE:
+        return _EVENT_FAMILY_PHASE[family]
     return "其他"
 
 

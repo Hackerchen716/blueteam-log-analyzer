@@ -23,6 +23,7 @@ setup(
     include_package_data=True,
     package_data={
         "bla.rules": ["*.yaml", "*.yml"],
+        "bla.output": ["assets/*.png"],
     },
     py_modules=["bla_cli"],
     entry_points={

@@ -112,7 +112,7 @@ def detect_brute_force(events: List[LogEvent]) -> List[DetectionAlert]:
         alerts.append(DetectionAlert(
             id="a"+gen_id("bf"), rule_id="BRUTE-001", rule_name="暴力破解攻击",
             description=f"来自 {ip} 的暴力破解，共失败 {n} 次，目标: {', '.join(users[:5])}{'...' if len(users)>5 else ''}",
-            level=level, category="暴力破解", mitre_attack="T1110.001", mitre_phase="凭据访问",
+            level=level, category="暴力破解", mitre_attack="T1110.001", mitre_phase="身份突破",
             affected_events=[e.id for e in evts],
             evidence=evidence,
             recommendation=f"立即封锁 IP {ip}，检查是否有成功登录，启用账户锁定策略和 MFA",
@@ -142,7 +142,7 @@ def detect_password_spray(events: List[LogEvent]) -> List[DetectionAlert]:
         alerts.append(DetectionAlert(
             id="a"+gen_id("sp"), rule_id="SPRAY-001", rule_name="密码喷洒攻击",
             description=f"来自 {ip} 的密码喷洒，针对 {len(unique_users)} 个账户，平均每账户 {avg:.1f} 次",
-            level=ThreatLevel.HIGH, category="密码喷洒", mitre_attack="T1110.003", mitre_phase="凭据访问",
+            level=ThreatLevel.HIGH, category="密码喷洒", mitre_attack="T1110.003", mitre_phase="身份突破",
             affected_events=[e.id for e in evts],
             evidence=evidence,
             recommendation="密码喷洒绕过锁定策略，检查所有目标账户是否有成功登录，实施异常登录检测",
@@ -316,6 +316,17 @@ def detect_privilege_escalation(events: List[LogEvent]) -> List[DetectionAlert]:
             affected_events=[e.id for e in sudo_denied], evidence=[e.message for e in sudo_denied[:3]],
             recommendation="检查被拒绝的 sudo 命令，审查 sudoers 配置",
             timestamp=max(e.timestamp for e in sudo_denied), confidence="medium",
+        ))
+    sudo_shell = [e for e in events if "sudo-shell" in e.tags]
+    if sudo_shell:
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("ss"), rule_id="PRIV-004", rule_name="Sudo 获取 Shell",
+            description=f"检测到 {len(sudo_shell)} 次 sudo 获取交互式 Shell 或高危解释器",
+            level=ThreatLevel.HIGH, category="权限提升", mitre_attack="T1548.003", mitre_phase="权限提升",
+            affected_events=[e.id for e in sudo_shell],
+            evidence=[f"{e.timestamp}: {e.message}" for e in sudo_shell[:3]],
+            recommendation="核查 sudo 会话是否授权，保全终端命令历史、进程树和登录来源",
+            timestamp=max(e.timestamp for e in sudo_shell), confidence="high",
         ))
     root_logins = [e for e in events if "root-login" in e.tags]
     if root_logins:
@@ -525,6 +536,8 @@ def detect_web_attacks(events: List[LogEvent]) -> List[DetectionAlert]:
         remediation = next((str(e.details.get("rule_remediation")) for e in evts if e.details.get("rule_remediation")), "")
         confidence_hint = next((str(e.details.get("rule_confidence")) for e in evts if e.details.get("rule_confidence")), "")
         fp_hints = next((str(e.details.get("rule_false_positive_hints")) for e in evts if e.details.get("rule_false_positive_hints")), "")
+        alert_mitre = _common_event_mitre(evts) or mitre_map.get(attack_type, "T1190")
+        alert_phase = _response_phase_for_events(evts) or _response_phase_for_mitre(alert_mitre) or "初始访问"
         evidence = [f"类型: {attack_type}", f"次数: {len(evts)}",
                     f"来源IP: {', '.join(ips[:3])}", f"示例: {evts[0].message}"]
         if fp_hints:
@@ -534,7 +547,7 @@ def detect_web_attacks(events: List[LogEvent]) -> List[DetectionAlert]:
             rule_name=f"Web攻击: {attack_type}",
             description=f"检测到 {len(evts)} 次 {attack_type} 攻击尝试",
             level=level, category="Web攻击",
-            mitre_attack=mitre_map.get(attack_type,"T1190"), mitre_phase="初始访问",
+            mitre_attack=alert_mitre, mitre_phase=alert_phase,
             affected_events=[e.id for e in evts],
             evidence=evidence,
             recommendation=remediation or f"修复 {attack_type} 漏洞，部署 WAF，封锁攻击源 IP",
@@ -635,7 +648,7 @@ def detect_cn_hvv(events: List[LogEvent]) -> List[DetectionAlert]:
             id="a"+gen_id("hs"), rule_id="CN-HVV-002", rule_name="爆破后成功登录",
             description=f"来源 {ip} 在 {len(failures)} 次失败登录后出现 {len(matched_successes)} 次成功登录",
             level=ThreatLevel.CRITICAL, category="护网画像",
-            mitre_attack="T1078", mitre_phase="初始访问",
+            mitre_attack="T1078", mitre_phase="身份突破",
             affected_events=[e.id for e in evts],
             evidence=[
                 f"失败次数: {len(failures)}",
@@ -726,6 +739,8 @@ def _append_p0_alert(
     max_level = actual_max_level if actual_max_level.score >= ThreatLevel.HIGH.score else ThreatLevel.HIGH
     ips = sorted(set(e.ip for e in evts if e.ip))
     hosts = sorted(set(e.host for e in evts if e.host))
+    alert_mitre = _common_event_mitre(evts) or mitre_attack
+    alert_phase = _response_phase_for_events(evts) or _response_phase_for_mitre(alert_mitre) or mitre_phase
     evidence = [
         f"事件数: {len(evts)}",
         f"IP: {', '.join(ips[:5]) or '?'}",
@@ -739,8 +754,8 @@ def _append_p0_alert(
         description=f"{rule_name}，共 {len(evts)} 条事件",
         level=max_level,
         category=category,
-        mitre_attack=mitre_attack,
-        mitre_phase=mitre_phase,
+        mitre_attack=alert_mitre,
+        mitre_phase=alert_phase,
         affected_events=[e.id for e in evts],
         evidence=evidence,
         recommendation=recommendation,
@@ -974,35 +989,106 @@ def _fallback_web_rule_id(attack_type: str) -> str:
     return f"WEB-{digest}"
 
 
-def _build_attack_chain(events: List[LogEvent], alerts: List[DetectionAlert]) -> List[AttackChainEntry]:
-    PHASE_MAP = {
-        "T1595":"侦察","T1083":"侦察","T1190":"初始访问","T1078":"初始访问",
-        "T1059":"执行","T1218":"执行","T1543":"持久化","T1053":"持久化",
-        "T1136":"持久化","T1547":"持久化","T1548":"权限提升","T1098":"权限提升",
-        "T1070":"防御规避","T1562":"防御规避","T1140":"防御规避",
-        "T1003":"凭据访问","T1110":"凭据访问","T1558":"凭据访问",
-        "T1021":"横向移动","T1550":"横向移动","T1071":"命令控制","T1505":"命令控制",
-    }
-    phases: Dict[str, Dict] = {p: {"count":0,"level":ThreatLevel.INFO,"techniques":set()}
-                                for p in ["侦察","初始访问","执行","持久化","权限提升","防御规避","凭据访问","横向移动","命令控制"]}
+_RESPONSE_FAMILY_PHASE = {
+    "reconnaissance": "侦察",
+    "initial-access": "初始访问",
+    "identity": "身份突破",
+    "execution": "执行",
+    "persistence": "持久化",
+    "privilege-escalation": "权限提升",
+    "compromise": "主机失陷",
+    "remote-access": "远程访问",
+    "lateral-movement": "横向移动",
+    "command-control": "命令控制",
+    "exfiltration": "数据外传",
+    "credential-access": "凭据访问",
+    "defense-evasion": "防御规避",
+    "network": "网络活动",
+    "other": "其他",
+}
 
-    def update(mitre: str, level: ThreatLevel):
-        prefix = mitre.split(".")[0]
-        phase  = PHASE_MAP.get(prefix) or PHASE_MAP.get(mitre)
+_RESPONSE_TECHNIQUE_PHASE = {
+    "T1595": "侦察", "T1083": "侦察", "T1190": "初始访问", "T1078": "身份突破",
+    "T1059": "执行", "T1218": "执行", "T1543": "持久化", "T1053": "持久化",
+    "T1136": "持久化", "T1547": "持久化", "T1548": "权限提升", "T1098": "权限提升",
+    "T1070": "防御规避", "T1562": "防御规避", "T1140": "防御规避",
+    "T1003": "凭据访问", "T1110": "身份突破", "T1558": "凭据访问",
+    "T1021": "横向移动", "T1550": "横向移动", "T1071": "命令控制", "T1105": "命令控制",
+    "T1505": "主机失陷", "T1041": "数据外传",
+}
+
+_RESPONSE_PHASE_ORDER = [
+    "侦察", "初始访问", "身份突破", "执行", "持久化", "权限提升",
+    "主机失陷", "远程访问", "横向移动", "命令控制", "数据外传",
+    "凭据访问", "防御规避", "网络活动", "其他",
+]
+
+
+def _response_phase_for_mitre(mitre: str) -> str:
+    prefix = mitre.split(".")[0]
+    return _RESPONSE_TECHNIQUE_PHASE.get(prefix) or _RESPONSE_TECHNIQUE_PHASE.get(mitre, "")
+
+
+def _response_phase_for_event(event: LogEvent) -> str:
+    family = str(event.details.get("event_family") or "")
+    if family and family != "other" and family in _RESPONSE_FAMILY_PHASE:
+        return _RESPONSE_FAMILY_PHASE[family]
+    return _response_phase_for_mitre(event.mitre_attack or "") or _RESPONSE_FAMILY_PHASE.get(family, "")
+
+
+def _response_phase_for_events(events: List[LogEvent]) -> str:
+    phases = {_response_phase_for_event(event) for event in events}
+    phases.discard("")
+    return next(iter(phases)) if len(phases) == 1 else ""
+
+
+def _common_event_mitre(events: List[LogEvent]) -> str:
+    mitres = {event.mitre_attack or "" for event in events}
+    mitres.discard("")
+    return next(iter(mitres)) if len(mitres) == 1 else ""
+
+
+def _build_attack_chain(events: List[LogEvent], alerts: List[DetectionAlert]) -> List[AttackChainEntry]:
+    phases: Dict[str, Dict] = {p: {"event_ids": set(), "level": ThreatLevel.INFO, "techniques": set()}
+                                for p in _RESPONSE_PHASE_ORDER}
+    alert_event_ids = {
+        event_id
+        for alert in alerts
+        for event_id in alert.affected_events
+    }
+    alert_context: Dict[str, List[Tuple[str, ThreatLevel, str]]] = defaultdict(list)
+
+    for alert in alerts:
+        alert_phase = _response_phase_for_mitre(alert.mitre_attack or "")
+        if not alert_phase:
+            continue
+        for event_id in alert.affected_events:
+            alert_context[event_id].append((alert_phase, alert.level, alert.mitre_attack or ""))
+
+    def update(event: LogEvent):
+        mitre = event.mitre_attack or ""
+        phase = _response_phase_for_event(event)
         if phase and phase in phases:
-            phases[phase]["count"] += 1
-            phases[phase]["techniques"].add(mitre)
-            if level.score > phases[phase]["level"].score:
-                phases[phase]["level"] = level
+            phases[phase]["event_ids"].add(event.id)
+            if mitre:
+                phases[phase]["techniques"].add(mitre)
+            if event.level.score > phases[phase]["level"].score:
+                phases[phase]["level"] = event.level
+            for alert_phase, alert_level, alert_mitre in alert_context.get(event.id, []):
+                if alert_phase != phase:
+                    continue
+                if alert_mitre:
+                    phases[phase]["techniques"].add(alert_mitre)
+                if alert_level.score > phases[phase]["level"].score:
+                    phases[phase]["level"] = alert_level
 
     for ev in events:
-        if ev.mitre_attack: update(ev.mitre_attack, ev.level)
-    for al in alerts:
-        if al.mitre_attack: update(al.mitre_attack, al.level)
+        if ev.level.score >= ThreatLevel.MEDIUM.score or ev.id in alert_event_ids:
+            update(ev)
 
-    return [AttackChainEntry(phase=p, event_count=d["count"], level=d["level"],
+    return [AttackChainEntry(phase=p, event_count=len(d["event_ids"]), level=d["level"],
                              techniques=sorted(d["techniques"]))
-            for p, d in phases.items() if d["count"] > 0]
+            for p, d in phases.items() if d["event_ids"]]
 
 
 def _calc_risk_score(events: List[LogEvent], alerts: List[DetectionAlert], incidents=None) -> int:
@@ -1087,7 +1173,7 @@ def _select_windows_account_chain(index: DetectionEventIndex) -> List[LogEvent]:
 
 
 def _select_privilege_events(index: DetectionEventIndex) -> List[LogEvent]:
-    return index.tags_any("group-add", "sudo-denied", "root-login")
+    return index.tags_any("group-add", "sudo-denied", "sudo-shell", "root-login")
 
 
 def _select_persistence_events(index: DetectionEventIndex) -> List[LogEvent]:

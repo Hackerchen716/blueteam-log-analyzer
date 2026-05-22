@@ -57,6 +57,7 @@ include = ["bla*"]
 
 [tool.setuptools.package-data]
 "bla.rules" = ["*.yaml", "*.yml"]
+"bla.output" = ["assets/*.png"]
 
 [tool.setuptools.dynamic]
 version = {attr = "bla.__version__.__version__"}

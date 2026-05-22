@@ -15,6 +15,32 @@ class DetectionRegressionTests(unittest.TestCase):
 
         summary = run_detection(result.events)
         self.assertTrue(any(alert.rule_id == "RECON-003" for alert in summary.alerts))
+        self.assertEqual(result.events[0].details.get("event_family"), "reconnaissance")
+        self.assertEqual(summary.attack_chain[0].phase, "侦察")
+
+    def test_post_error_web_event_does_not_fall_into_other_phase(self):
+        content = (
+            "1.1.1.1 - - [15/Mar/2024:10:01:00 +0800] "
+            "\"POST /system.php HTTP/1.1\" 404 10 \"-\" \"Mozilla/5.0\"\n"
+        )
+        result = parse_web_access(content, "access.log")
+        summary = run_detection(result.events)
+
+        self.assertEqual(result.events[0].rule_name, "POST 异常响应 404")
+        self.assertEqual(result.events[0].details.get("event_family"), "reconnaissance")
+        self.assertEqual(summary.attack_chain[0].phase, "侦察")
+
+    def test_web_recon_alert_uses_recon_phase(self):
+        content = (
+            "1.1.1.1 - - [15/Mar/2024:10:01:00 +0800] "
+            "\"GET /.env HTTP/1.1\" 404 10 \"-\" \"Mozilla/5.0\"\n"
+        )
+        result = parse_web_access(content, "access.log")
+        summary = run_detection(result.events)
+
+        alert = next(item for item in summary.alerts if item.rule_name == "Web攻击: 敏感文件探测")
+        self.assertEqual(alert.mitre_attack, "T1083")
+        self.assertEqual(alert.mitre_phase, "侦察")
 
     def test_run_analysis_rdp_only_keeps_logon_type_10_with_remote_source_only(self):
         xml = (
@@ -55,6 +81,24 @@ class DetectionRegressionTests(unittest.TestCase):
         self.assertEqual([event.details.get("source_ip") for event in result.events], ["8.8.4.4"])
         self.assertEqual(result.stats.total, 1)
         self.assertEqual(rdp.summary.total_events, 1)
+
+    def test_attack_chain_uses_response_phase_without_alert_double_counting(self):
+        lines = [
+            f"Mar 15 10:00:0{i} web sshd[100{i}]: Failed password for alice from 198.51.100.20 port 22 ssh2"
+            for i in range(5)
+        ]
+        lines.append(
+            "Mar 15 10:00:06 web sshd[1010]: Accepted password for alice from 198.51.100.20 port 22 ssh2"
+        )
+        result = parse_linux_auth("\n".join(lines) + "\n", "auth.log")
+        summary = run_detection(result.events, profile="cn-hvv")
+
+        chain = {item.phase: item for item in summary.attack_chain}
+        self.assertIn("身份突破", chain)
+        self.assertEqual(chain["身份突破"].event_count, 6)
+        self.assertEqual(chain["身份突破"].techniques, ["T1078", "T1110.001"])
+        self.assertNotIn("初始访问", chain)
+        self.assertEqual({alert.mitre_phase for alert in summary.alerts}, {"身份突破"})
 
     def test_cn_hvv_profile_detects_common_domestic_exploit_traces(self):
         content = (
@@ -304,6 +348,18 @@ class DetectionRegressionTests(unittest.TestCase):
         # detection 层仍要能产出告警
         summary = run_detection(result.events)
         self.assertTrue(any(a.rule_id == "BRUTE-001" for a in summary.alerts))
+
+    def test_sudo_shell_event_is_promoted_to_alert_and_incident(self):
+        content = (
+            "Mar 15 09:15:00 web sudo: ubuntu : TTY=pts/0 ; PWD=/home/ubuntu ; "
+            "USER=root ; COMMAND=/bin/bash\n"
+        )
+        result = parse_linux_auth(content, "auth.log")
+        summary = run_detection(result.events)
+
+        self.assertTrue(any(alert.rule_id == "PRIV-004" for alert in summary.alerts))
+        self.assertTrue(summary.incidents)
+        self.assertIn("权限提升", summary.incidents[0].attack_phases)
 
     def test_thresholds_can_be_overridden_at_runtime(self):
         """通过 set_thresholds 临时降低阈值，让小样本也能触发暴力破解告警。"""

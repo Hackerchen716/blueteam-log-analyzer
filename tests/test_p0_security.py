@@ -292,6 +292,15 @@ class P0SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(top.attack_phases, golden["top_incident"]["attack_phases"])
         self.assertGreaterEqual(len(top.timeline), 4)
         self.assertTrue(top.next_logs)
+        chain = {item.phase: item for item in summary.attack_chain}
+        self.assertEqual(chain["初始访问"].event_count, 2)
+        self.assertEqual(chain["主机失陷"].event_count, 1)
+        self.assertEqual(chain["命令控制"].event_count, 2)
+        self.assertEqual(chain["数据外传"].event_count, 1)
+        self.assertNotIn("执行", chain)
+        edr_alert = next(alert for alert in summary.alerts if alert.rule_id == "P0-EDR-001")
+        self.assertEqual(edr_alert.mitre_attack, "T1505.003")
+        self.assertEqual(edr_alert.mitre_phase, "主机失陷")
 
     def test_p0_benign_noise_does_not_create_high_risk_incident(self):
         """健康检查、正常堡垒机命令、少量 VPN 输错密码不应升级为案件。"""

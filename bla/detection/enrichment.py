@@ -229,28 +229,61 @@ def _auth_result(event: LogEvent) -> str:
 
 def _event_family(event: LogEvent, normalized: Dict[str, str]) -> str:
     tags = set(event.tags)
-    if tags & {"web-attack", "exploit"}:
-        return "initial-access"
+    if tags & {"scanning", "scanner", "recon", "reconnaissance", "ddos", "post-error"}:
+        return "reconnaissance"
     if tags & {"malware-indicator", "lsass-dump", "webshell"}:
         return "compromise"
+    if tags & {"web-attack", "exploit"}:
+        return "initial-access"
     if tags & {"c2", "dns-tunnel", "malicious-domain"}:
         return "command-control"
     if tags & {"exfiltration"}:
         return "exfiltration"
-    if tags & {"bastion-command", "lolbin", "sudo-shell", "sudo-command"}:
-        return "execution"
     if tags & {"account-creation", "account-enabled", "account-deletion", "account-disabled", "service-install", "scheduled-task", "persistence"}:
         return "persistence"
     if tags & {"group-add", "password-reset", "account-modified", "privilege-escalation", "sensitive-call"}:
         return "privilege-escalation"
+    if tags & {"bastion-command", "lolbin"}:
+        return "execution"
     if tags & {"remote-access", "remote-logon"} or ("credential-validation" in tags and "auth-success" in tags):
         return "remote-access"
     if tags & {"lateral-movement", "explicit-creds", "rdp", "smb", "exposed-service"}:
         return "lateral-movement"
     if tags & {"failed-login", "failed-logon", "successful-login", "authentication"}:
         return "identity"
-    if tags & {"scanning", "scanner", "recon"}:
-        return "reconnaissance"
+    mitre_family = _event_family_from_mitre(event.mitre_attack or "")
+    if mitre_family:
+        return mitre_family
     if normalized.get("source_type") in {"proxy", "dns"}:
         return "network"
     return "other"
+
+
+def _event_family_from_mitre(mitre: str) -> str:
+    prefix = mitre.split(".")[0]
+    return {
+        "T1595": "reconnaissance",
+        "T1083": "reconnaissance",
+        "T1190": "initial-access",
+        "T1078": "identity",
+        "T1110": "identity",
+        "T1059": "execution",
+        "T1218": "execution",
+        "T1543": "persistence",
+        "T1053": "persistence",
+        "T1136": "persistence",
+        "T1547": "persistence",
+        "T1548": "privilege-escalation",
+        "T1098": "privilege-escalation",
+        "T1070": "defense-evasion",
+        "T1562": "defense-evasion",
+        "T1140": "defense-evasion",
+        "T1003": "credential-access",
+        "T1558": "credential-access",
+        "T1021": "lateral-movement",
+        "T1550": "lateral-movement",
+        "T1071": "command-control",
+        "T1105": "command-control",
+        "T1505": "compromise",
+        "T1041": "exfiltration",
+    }.get(prefix, "")

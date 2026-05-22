@@ -28,6 +28,8 @@ _FAMILY_PHASE = {
     "lateral-movement": "横向移动",
     "command-control": "命令控制",
     "exfiltration": "数据外传",
+    "credential-access": "凭据访问",
+    "defense-evasion": "防御规避",
     "network": "网络活动",
     "other": "其他",
 }
@@ -47,6 +49,8 @@ KILL_CHAIN_ORDER = (
     "横向移动",
     "命令控制",
     "数据外传",
+    "凭据访问",
+    "防御规避",
     "网络活动",
     "其他",
 )

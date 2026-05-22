@@ -99,6 +99,7 @@ def _check_distribution(version: str) -> None:
     with zipfile.ZipFile(wheels[0]) as archive:
         names = set(archive.namelist())
         _assert("bla/rules/web_attacks.yaml" in names, "wheel is missing bla/rules/web_attacks.yaml")
+        _assert("bla/output/assets/bla-logo.png" in names, "wheel is missing bla/output/assets/bla-logo.png")
         _assert("bla/remote/ssh_workspace.py" in names, "wheel is missing bla/remote/ssh_workspace.py")
         _assert("bla/output/manifest.py" in names, "wheel is missing bla/output/manifest.py")
         _assert("bla_cli.py" in names, "wheel is missing bla_cli.py")
@@ -107,6 +108,11 @@ def _check_distribution(version: str) -> None:
         names = archive.getnames()
         suffixes = [
             f"/docs/releases/v{version}.md",
+            "/docs/assets/bla-cover.png",
+            "/docs/screenshots/bla-p0-terminal-chain.png",
+            "/docs/screenshots/bla-p0-report-overview.png",
+            "/docs/screenshots/bla-p0-incident-alerts.png",
+            "/bla/output/assets/bla-logo.png",
             "/bla_cli.py",
             "/scripts/release_check.py",
             "/sample_logs/auth.log",
