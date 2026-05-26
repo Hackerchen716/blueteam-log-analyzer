@@ -22,9 +22,12 @@ _ESC_RE = re.compile(r"\x1b[ -/]*[@-~]")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 _SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?i)\b("
-    r"authorization|cookie|set-cookie|x-api-key|api[_-]?key|token|access[_-]?token|"
+    r"cookie|set-cookie|x-api-key|api[_-]?key|token|access[_-]?token|"
     r"refresh[_-]?token|id[_-]?token|secret|passwd|password|pwd|session[_-]?id"
     r")\b\s*[:=]\s*([^\s;&,\"]+|\"[^\"]*\"|'[^']*')"
+)
+_AUTHORIZATION_RE = re.compile(
+    r"(?i)\b(authorization)\b\s*[:=]\s*(?:Bearer\s+)?([^\s;&,\"]+|\"[^\"]*\"|'[^']*')"
 )
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 
@@ -132,6 +135,7 @@ def strip_terminal_control(value: object) -> str:
 def redact_sensitive_text(value: object) -> str:
     """Mask common secrets before writing shareable reports."""
     text = str(value or "")
+    text = _AUTHORIZATION_RE.sub(lambda m: f"{m.group(1)}=<redacted>", text)
     text = _BEARER_RE.sub("Bearer <redacted>", text)
     return _SENSITIVE_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}=<redacted>", text)
 

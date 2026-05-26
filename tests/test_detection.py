@@ -159,6 +159,22 @@ class DetectionRegressionTests(unittest.TestCase):
         self.assertIn("证据类型: Shell 命令历史", evidence)
         self.assertEqual({incident.confidence for incident in summary.incidents}, {"medium"})
 
+    def test_shell_history_incident_uses_extracted_account_and_asset_context(self):
+        result = parse_shell_history("cat /etc/shadow\n", "server01:/home/alice/.zsh_history")
+        summary = run_detection(result.events)
+
+        self.assertTrue(summary.incidents)
+        titles = "\n".join(incident.title for incident in summary.incidents)
+        descriptions = "\n".join(incident.description for incident in summary.incidents)
+        evidence = "\n".join(item for incident in summary.incidents for item in incident.evidence)
+
+        self.assertIn("alice 的 Shell 凭据访问轨迹", titles)
+        self.assertIn("账号: alice", descriptions)
+        self.assertIn("资产: server01", descriptions)
+        self.assertIn("核心账号: alice", evidence)
+        self.assertIn("资产: server01", evidence)
+        self.assertIn("证据类型: Shell 命令历史", evidence)
+
     def test_allowlist_suppresses_trusted_noise_before_detection(self):
         content = (
             "10.0.0.5 - - [15/Mar/2024:10:00:00 +0800] "

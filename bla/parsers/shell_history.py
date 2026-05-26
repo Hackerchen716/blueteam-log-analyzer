@@ -5,15 +5,18 @@ from __future__ import annotations
 import datetime
 import re
 import time
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from ..models import LogEvent, ParseResult, ThreatLevel
-from ..utils.helpers import file_size, gen_id, iter_file_lines, truncate
+from ..utils.helpers import file_size, gen_id, iter_file_lines, strip_terminal_control, truncate
 from .stats import compute_stats
 
 _BASH_EXTENDED_RE = re.compile(r"^:\s*(\d{9,})(?::\d+)?;(.*)$")
 _NUMBERED_HISTORY_RE = re.compile(r"^\s*\d{1,6}\s+(.+)$")
 _URL_RE = re.compile(r"https?://[^\s\"']+", re.I)
+_REMOTE_PATH_RE = re.compile(r"^([^:/\\]+):(?:/|\\).+")
+_UNIX_HOME_RE = re.compile(r"(?:^|/)(?:home|Users)/([^/\\]+)(?:/|$)")
+_WIN_USER_RE = re.compile(r"(?:^|[\\/])Users[\\/]([^\\/]+)(?:[\\/]|$)", re.I)
 
 _NOISE_RE = re.compile(
     r"^(?:ls(?:\s+-[\w-]+)?|cd(?:\s+.+)?|pwd|clear|exit|logout|nano\s+.+|vim\s+.+|vi\s+.+|touch\s+.+|mkdir\s+.+)\s*$",
@@ -63,14 +66,19 @@ def parse_shell_history(content: str, source_file: str) -> ParseResult:
         content.splitlines(),
         source_file,
         file_size_bytes=len(content.encode()),
+        source_context=_source_context(source_file),
     )
 
 
 def parse_shell_history_file(path: str, source_file: Optional[str] = None) -> ParseResult:
+    display_name = source_file or path
+    source_context = _source_context(path)
+    source_context.update(_source_context(display_name))
     return parse_shell_history_lines(
         iter_file_lines(path),
-        source_file or path,
+        display_name,
         file_size_bytes=file_size(path),
+        source_context=source_context,
     )
 
 
@@ -78,9 +86,11 @@ def parse_shell_history_lines(
     lines: Iterable[str],
     source_file: str,
     file_size_bytes: int = 0,
+    source_context: Optional[Dict[str, str]] = None,
 ) -> ParseResult:
     t0 = time.time()
     events: List[LogEvent] = []
+    source_context = source_context if source_context is not None else _source_context(source_file)
     for index, line in enumerate(lines, start=1):
         parsed = _extract_history_command(line)
         if not parsed:
@@ -88,7 +98,7 @@ def parse_shell_history_lines(
         command, timestamp = parsed
         if not command.strip() or _NOISE_RE.match(command.strip()):
             continue
-        ev = _command_to_event(command.strip(), line.rstrip("\n"), source_file, index, timestamp)
+        ev = _command_to_event(command.strip(), line.rstrip("\n"), source_file, index, timestamp, source_context)
         if ev:
             events.append(ev)
 
@@ -127,12 +137,32 @@ def _epoch_to_iso(value: str) -> str:
         return ""
 
 
+def _source_context(source_file: str) -> Dict[str, str]:
+    text = strip_terminal_control(source_file)
+    context: Dict[str, str] = {}
+
+    remote = _REMOTE_PATH_RE.match(text)
+    if remote:
+        context["asset"] = remote.group(1)
+
+    account = ""
+    home = _UNIX_HOME_RE.search(text) or _WIN_USER_RE.search(text)
+    if home:
+        account = home.group(1)
+    elif re.search(r"(?:^|/)root(?:/|$)", text):
+        account = "root"
+    if account:
+        context["account"] = account
+    return context
+
+
 def _command_to_event(
     command: str,
     raw_line: str,
     source_file: str,
     sequence: int,
     timestamp: str,
+    source_context: Optional[Dict[str, str]] = None,
 ) -> Optional[LogEvent]:
     lower = command.lower()
     level = ThreatLevel.INFO
@@ -210,6 +240,12 @@ def _command_to_event(
     }
     if url:
         details["url"] = url
+    account = (source_context or {}).get("account", "")
+    asset = (source_context or {}).get("asset", "")
+    if account:
+        details["account"] = account
+    if asset:
+        details["asset"] = asset
 
     return LogEvent(
         id=gen_id("sh"),
@@ -220,6 +256,8 @@ def _command_to_event(
         source_file=source_file,
         message=f"{rule_name}: {truncate(command, 110)}",
         raw_line=raw_line,
+        user=account or None,
+        host=asset or None,
         process=_command_name(command),
         details=details,
         tags=tags,

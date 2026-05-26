@@ -115,8 +115,11 @@ web_attacks:
         self.assertIn("world-countries.geojson", release_check_text)
         self.assertIn("shell_history.py", release_check_text)
         self.assertIn("_run_v141_feature_smoke", release_check_text)
+        self.assertIn("_run_v142_hardening_smoke", release_check_text)
         self.assertIn("攻击源地理分布", release_check_text)
         self.assertIn("Shell 凭据访问轨迹", release_check_text)
+        self.assertIn("access_token=<redacted>", release_check_text)
+        self.assertIn("缺少地理数据", release_check_text)
         self.assertIn("未知实体", release_check_text)
 
         completed = subprocess.run(

@@ -12,11 +12,19 @@ import os
 import re
 import sys
 import time
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from .. import config
 from ..models import LogEvent, ParseResult, ThreatLevel
-from ..utils.helpers import file_size, gen_id, read_file, read_file_sample, safe_write
+from ..utils.helpers import (
+    file_size,
+    gen_id,
+    iter_file_lines,
+    read_file,
+    read_file_sample,
+    safe_write,
+    sanitize_report_text,
+)
 from .linux_auth import parse_linux_auth, parse_linux_auth_file
 from .p0_security import (
     looks_like_p0_security_log,
@@ -138,7 +146,7 @@ def _ensure_default_parsers() -> None:
             name="generic",
             aliases=normalize_aliases(("text", "fallback")),
             can_parse=lambda _ctx: True,
-            parse_file=lambda ctx: _parse_generic(read_file(ctx.file_path or ""), ctx.source_name),
+            parse_file=lambda ctx: _parse_generic_file(ctx.file_path or "", ctx.source_name),
             parse_content=lambda ctx: _parse_generic(ctx.content or "", ctx.source_name),
             description="Generic text fallback",
         ),
@@ -223,50 +231,47 @@ def _looks_like_shell_history(sample: str) -> bool:
 
 def _parse_generic(content: str, source_file: str) -> ParseResult:
     """通用日志解析（fallback）"""
+    return _parse_generic_lines(
+        content.splitlines(),
+        source_file,
+        file_size_bytes=len(content.encode()),
+    )
+
+
+def _parse_generic_file(path: str, source_file: str) -> ParseResult:
+    """Stream fallback parsing from disk without loading the whole file."""
+    return _parse_generic_lines(
+        iter_file_lines(path),
+        source_file,
+        file_size_bytes=file_size(path),
+    )
+
+
+def _parse_generic_lines(
+    lines: Iterable[str],
+    source_file: str,
+    file_size_bytes: int = 0,
+) -> ParseResult:
+    """通用日志解析（fallback）"""
     t0 = time.time()
-    lines = content.splitlines()
     events: List[LogEvent] = []
 
     line_limit = config.THRESHOLDS.generic_parse_line_limit
-    if len(lines) > line_limit:
+    total_lines = 0
+    for total_lines, line in enumerate(lines, start=1):
+        if total_lines > line_limit:
+            continue
+        event = _generic_line_to_event(line, source_file)
+        if event:
+            events.append(event)
+
+    if total_lines > line_limit:
         safe_write(
             f"⚠️  通用解析器只处理前 {line_limit} 行，"
-            f"{source_file} 共 {len(lines)} 行，剩余 {len(lines) - line_limit} 行被截断。\n"
+            f"{sanitize_report_text(source_file)} 共 {total_lines} 行，剩余 {total_lines - line_limit} 行被截断。\n"
             "    建议显式指定日志类型，或使用更精确的解析器。\n",
             sys.stderr,
         )
-
-    for line in lines[:line_limit]:
-        if not line.strip() or len(line) < 10:
-            continue
-
-        level = ThreatLevel.INFO
-        lower = line.lower()
-        if any(kw in lower for kw in ("critical", "fatal", "emergency")):
-            level = ThreatLevel.CRITICAL
-        elif any(kw in lower for kw in ("error", "err", "alert")):
-            level = ThreatLevel.HIGH
-        elif any(kw in lower for kw in ("warning", "warn")):
-            level = ThreatLevel.MEDIUM
-        elif any(kw in lower for kw in ("notice", "info")):
-            level = ThreatLevel.LOW
-
-        ts_m = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2}[T\s]\d{2}:\d{2}:\d{2})', line)
-        ip_m = re.search(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b', line)
-
-        events.append(LogEvent(
-            id=gen_id("gen"),
-            timestamp=ts_m.group(1) if ts_m else "",
-            level=level,
-            category="通用",
-            source=source_file,
-            source_file=source_file,
-            message=line[:200],
-            raw_line=line,
-            ip=ip_m.group(1) if ip_m else None,
-            details={},
-            tags=[],
-        ))
 
     stats = compute_stats(events)
     return ParseResult(
@@ -275,7 +280,40 @@ def _parse_generic(content: str, source_file: str) -> ParseResult:
         events=events,
         stats=stats,
         parse_time_ms=(time.time() - t0) * 1000,
-        file_size_bytes=len(content.encode()),
+        file_size_bytes=file_size_bytes,
+    )
+
+
+def _generic_line_to_event(line: str, source_file: str) -> Optional[LogEvent]:
+    if not line.strip() or len(line) < 10:
+        return None
+
+    level = ThreatLevel.INFO
+    lower = line.lower()
+    if any(kw in lower for kw in ("critical", "fatal", "emergency")):
+        level = ThreatLevel.CRITICAL
+    elif any(kw in lower for kw in ("error", "err", "alert")):
+        level = ThreatLevel.HIGH
+    elif any(kw in lower for kw in ("warning", "warn")):
+        level = ThreatLevel.MEDIUM
+    elif any(kw in lower for kw in ("notice", "info")):
+        level = ThreatLevel.LOW
+
+    ts_m = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2}[T\s]\d{2}:\d{2}:\d{2})', line)
+    ip_m = re.search(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b', line)
+
+    return LogEvent(
+        id=gen_id("gen"),
+        timestamp=ts_m.group(1) if ts_m else "",
+        level=level,
+        category="通用",
+        source=source_file,
+        source_file=source_file,
+        message=line[:200],
+        raw_line=line,
+        ip=ip_m.group(1) if ip_m else None,
+        details={},
+        tags=[],
     )
 
 

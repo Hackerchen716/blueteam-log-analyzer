@@ -751,10 +751,10 @@ def main():
             print_fn=print,
         )
     except AnalysisError as e:
-        print(f"\n❌ {e}", file=sys.stderr)
+        print(f"\n❌ {strip_terminal_control(e)}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ 分析流程失败: {e}", file=sys.stderr)
+        print(f"\n❌ 分析流程失败: {strip_terminal_control(e)}", file=sys.stderr)
         sys.exit(1)
 
     parse_results = run_result.parse_results
@@ -764,7 +764,7 @@ def main():
     if run_result.parse_errors:
         print(f"\n⚠️  有 {len(run_result.parse_errors)} 个输入解析失败，已从本次分析结果中排除:", file=sys.stderr)
         for item in run_result.parse_errors[:10]:
-            print(f"  - {item}", file=sys.stderr)
+            print(f"  - {strip_terminal_control(item)}", file=sys.stderr)
         if len(run_result.parse_errors) > 10:
             print(f"  ... 还有 {len(run_result.parse_errors) - 10} 个失败输入未展示", file=sys.stderr)
 

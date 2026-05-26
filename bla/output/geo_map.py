@@ -61,7 +61,7 @@ def build_geo_map_section(
     fields or from an explicit local JSON cache, and returns empty strings when
     no public source IP can be geolocated.
     """
-    ip_counts, ip_sources, event_geo = _collect_public_source_ips(parse_results)
+    ip_counts, ip_sources, event_geo, excluded_counts = _collect_source_ip_geo_inputs(parse_results)
     if not ip_counts:
         return "", ""
 
@@ -108,6 +108,12 @@ def build_geo_map_section(
     ip_rows = _render_ip_rows(located)
     located_ip_count = len({item["ip"] for item in located})
     located_event_count = sum(item["count"] for item in located)
+    located_ips = {item["ip"] for item in located}
+    unlocated_public = Counter({ip: count for ip, count in ip_counts.items() if ip not in located_ips})
+    excluded_ip_count = len(excluded_counts)
+    excluded_event_count = sum(excluded_counts.values())
+    unlocated_ip_count = len(unlocated_public)
+    unlocated_event_count = sum(unlocated_public.values())
 
     css = _geo_css()
     html = f"""
@@ -125,6 +131,8 @@ def build_geo_map_section(
       <div class="geo-foot">
         <span>已定位 {located_ip_count} 个公网源 IP</span>
         <span>覆盖 {located_event_count} 条事件命中</span>
+        <span>已排除 {excluded_ip_count} 个内网/回环/保留源 IP（{excluded_event_count} 条事件）</span>
+        <span>{unlocated_ip_count} 个公网源 IP 缺少地理数据（{unlocated_event_count} 条事件）</span>
       </div>
     </section>
     <aside class="geo-side">
@@ -141,16 +149,21 @@ def build_geo_map_section(
     return css, html
 
 
-def _collect_public_source_ips(parse_results: Sequence[ParseResult]) -> Tuple[Counter, Dict[str, Counter], Dict[str, dict]]:
+def _collect_source_ip_geo_inputs(parse_results: Sequence[ParseResult]) -> Tuple[Counter, Dict[str, Counter], Dict[str, dict], Counter]:
     counts: Counter = Counter()
     sources: Dict[str, Counter] = defaultdict(Counter)
     geo_by_ip: Dict[str, dict] = {}
+    excluded: Counter = Counter()
 
     for result in parse_results:
         source_label = result.log_type or "log"
         for event in result.events:
             ip = _event_source_ip(event)
-            if not _is_public_ip(ip):
+            scope = _ip_scope(ip)
+            if scope == "invalid":
+                continue
+            if scope != "public":
+                excluded[ip] += 1
                 continue
             counts[ip] += 1
             sources[ip][_event_source_label(event, source_label)] += 1
@@ -158,7 +171,7 @@ def _collect_public_source_ips(parse_results: Sequence[ParseResult]) -> Tuple[Co
             if event_geo and ip not in geo_by_ip:
                 event_geo["source"] = "event"
                 geo_by_ip[ip] = event_geo
-    return counts, sources, geo_by_ip
+    return counts, sources, geo_by_ip, excluded
 
 
 def _event_source_ip(event: Any) -> str:
@@ -176,10 +189,15 @@ def _event_source_label(event: Any, fallback: str) -> str:
 
 
 def _is_public_ip(value: str) -> bool:
+    return _ip_scope(value) == "public"
+
+
+def _ip_scope(value: str) -> str:
     try:
-        return ip_address(str(value).strip()).is_global
+        parsed = ip_address(str(value).strip())
     except ValueError:
-        return False
+        return "invalid"
+    return "public" if parsed.is_global else "non-public"
 
 
 def _load_geoip_cache(path: Optional[str]) -> Dict[str, dict]:

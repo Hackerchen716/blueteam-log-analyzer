@@ -7,6 +7,7 @@ from typing import Dict, Iterable, List, Optional, Set
 from urllib.parse import urlparse
 
 from .models import DetectionAlert, LogEvent
+from .utils.helpers import sanitize_report_text
 
 
 IOC_TYPES = ("ips", "domains", "urls", "file_paths", "hashes", "users", "processes", "commands")
@@ -92,7 +93,7 @@ def format_ioc_report(iocs: Dict[str, List[str]]) -> str:
         values = iocs.get(key, [])
         lines.append(f"## {labels[key]} ({len(values)})")
         if values:
-            lines.extend(values)
+            lines.extend(sanitize_report_text(value) for value in values)
         else:
             lines.append("(none)")
         lines.append("")

@@ -23,7 +23,7 @@ from ..output import (
 from ..parsers import auto_parse
 from ..parsers.stats import compute_stats
 from ..rules import set_rule_dirs
-from ..utils.helpers import reset_counter, set_syslog_year
+from ..utils.helpers import reset_counter, sanitize_report_text, set_syslog_year
 
 PrintFn = Callable[..., None]
 
@@ -122,7 +122,7 @@ def parse_files(
     emit = print_fn if print_fn is not None else print
     if len(files) <= 1 or workers == 1:
         for i, fpath in enumerate(files, 1):
-            fname = os.path.basename(fpath)
+            fname = sanitize_report_text(os.path.basename(fpath))
             if not quiet:
                 emit(f"  [{i}/{len(files)}] 解析: {fname} ...", end=" ", flush=True)
             try:
@@ -133,9 +133,10 @@ def parse_files(
                 if not quiet:
                     emit(f"✓ ({result.stats.total} 事件)")
             except Exception as e:
-                errors.append(f"{fname}: {e}")
+                safe_error = sanitize_report_text(e)
+                errors.append(f"{fname}: {safe_error}")
                 if not quiet:
-                    emit(f"✗ 错误: {e}", flush=True)
+                    emit(f"✗ 错误: {safe_error}", flush=True)
                 continue
     else:
         if not quiet:
@@ -144,7 +145,7 @@ def parse_files(
             future_to_path = {pool.submit(auto_parse, fpath, parser_name): fpath for fpath in files}
             for done, future in enumerate(as_completed(future_to_path), 1):
                 fpath = future_to_path[future]
-                fname = os.path.basename(fpath)
+                fname = sanitize_report_text(os.path.basename(fpath))
                 try:
                     result = future.result()
                     if rdp_only:
@@ -153,16 +154,17 @@ def parse_files(
                     if not quiet:
                         emit(f"  [{done}/{len(files)}] ✓ {fname} ({result.stats.total} 事件)")
                 except Exception as e:
-                    errors.append(f"{fname}: {e}")
+                    safe_error = sanitize_report_text(e)
+                    errors.append(f"{fname}: {safe_error}")
                     if not quiet:
-                        emit(f"  [{done}/{len(files)}] ✗ {fname}: {e}", flush=True)
+                        emit(f"  [{done}/{len(files)}] ✗ {fname}: {safe_error}", flush=True)
+    if errors_out is not None:
+        errors_out.extend(errors)
     if errors and not parse_results:
         joined = "\n- ".join(errors)
         if quiet:
             raise AnalysisError(f"所有文件解析失败；请先处理解析错误：\n- {joined}")
         raise AnalysisError("所有文件解析失败；请先处理上方解析错误。")
-    if errors_out is not None:
-        errors_out.extend(errors)
     return parse_results
 
 

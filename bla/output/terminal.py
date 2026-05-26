@@ -11,7 +11,7 @@ from ..__version__ import __version__
 from ..models import (
     ParseResult, AnalysisSummary, ThreatLevel, LogEvent, Incident, TimelineEntry
 )
-from ..utils.helpers import format_timestamp_local, is_placeholder_source, safe_stream, strip_terminal_control
+from ..utils.helpers import format_timestamp_local, is_placeholder_source, safe_stream, sanitize_report_text
 
 # ANSI 颜色
 RESET  = "\033[0m"
@@ -164,7 +164,7 @@ def _evidence_text(text: str, full: bool, max_len: int = 220) -> str:
 
 
 def _safe_text(value: object) -> str:
-    return strip_terminal_control(value)
+    return sanitize_report_text(value)
 
 
 def _basename(path: str) -> str:

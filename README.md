@@ -71,22 +71,21 @@ bla logs/ --out report/ --geoip-cache geo-cache.json
 bla explain inc-001 --report report/report.json
 ```
 
-## v1.4.1
+## v1.4.2
 
-v1.4.1 聚焦真实日志研判和报告交付：同类爆破/喷洒不再刷屏，重复身份突破案件合并成活动视图；HTML 报告在有本地地理数据时展示攻击源国家/地区热力图，没有可定位公网源 IP 时不显示地图；新增 Shell History 解析后，主机命令轨迹也能进入 Incident、攻击链和交付报告。
+v1.4.2 聚焦输出安全和真实日志稳定性：IOC 导出会清洗终端控制字符并脱敏常见 secret；通用 fallback 解析改为逐行读取文件；Shell History 会从 history 文件路径中提取账号/资产上下文；Geo 地图在保留离线渲染的同时，说明被排除和缺少地理数据的源 IP。
 
-| 方向 | v1.4.1 变化 |
+| 方向 | v1.4.2 变化 |
 | --- | --- |
-| 攻击源地图 | HTML 报告可通过日志自带地理字段或 `--geoip-cache` 本地缓存渲染国家/地区热力图，全程离线 |
-| 显示规则 | 内网、回环、保留地址和无法匹配地理位置的 IP 不进地图；没有定位结果时整块隐藏 |
-| 告警合并 | 暴力破解、密码喷洒这类高重复告警在 HTML 展示层合并，JSON/SARIF 仍保留原始明细 |
-| 案件合并 | 仅源 IP 不同的身份突破案件合并成活动视图，突出 Top 来源 IP、账号和影响资产 |
-| Shell History | 解析 `.bash_history`、`.zsh_history` 和常见 history 文件，识别工具下载、TTY 升级、SUID/sudo 提权、凭据文件读取和清痕命令 |
-| 案件语义 | Shell 单源案件使用 `Shell 凭据访问轨迹`、`Shell 清痕轨迹` 等可研判主体，避免报告出现 `未知实体`、`未知来源` |
-| 报告跳转 | 顶部严重/高危/中危卡片可直接跳到对应告警或时间线，并自动套用过滤 |
-| 离线交付 | 地图边界作为包内静态资产随 HTML 生成链路使用，不依赖 CDN 或在线地图服务 |
+| IOC 导出 | `iocs.txt` 去除终端控制序列，并脱敏 token、Bearer、password、cookie 等常见敏感字段 |
+| 终端安全 | 终端报告、CLI 和远程采集工作区展示不可信文本时，会清洗控制字符并脱敏常见 secret |
+| 大文件稳定性 | 通用 fallback 解析器从文件路径逐行读取，不再为了 fallback 一次性读完整文件 |
+| Shell History | 保留 zsh 扩展时间戳，并从 `/home/user/.zsh_history`、`server:/home/user/.bash_history` 等路径提取账号/资产 |
+| 案件语义 | Shell 单源案件可生成 `alice 的 Shell 凭据访问轨迹` 这类带上下文的标题和证据 |
+| 攻击源地图 | 地图脚注展示已排除的内网/回环/保留源 IP，以及缺少地理数据的公网源 IP |
+| Release Gate | `scripts/release_check.py` 新增 v1.4.2 冒烟场景，覆盖 IOC 脱敏、Geo 计数和 Shell 上下文 |
 
-更多变更见 [v1.4.1 发布说明](docs/releases/v1.4.1.md)，历史版本见 [docs/releases](docs/releases)
+更多变更见 [v1.4.2 发布说明](docs/releases/v1.4.2.md)，历史版本见 [docs/releases](docs/releases)
 
 ## 多源攻击链示例
 

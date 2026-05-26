@@ -436,6 +436,28 @@ web_attacks:
         self.assertIn("截断", stderr)
         self.assertIn("10500", stderr.replace(",", ""))
 
+    def test_parse_errors_strip_controls_and_redact_secrets(self):
+        marker = "\x1b]52;c;SGFja2Vk\x07\x1b[31m"
+        errors = []
+        output = []
+
+        def capture(*values, **_kwargs):
+            output.append(" ".join(str(value) for value in values))
+
+        with mock.patch(
+            "bla.core.pipeline.auto_parse",
+            side_effect=RuntimeError(f"{marker}boom access_token=super-secret"),
+        ):
+            with self.assertRaises(AnalysisError):
+                parse_files([f"{marker}bad.log"], jobs=1, quiet=False, print_fn=capture, errors_out=errors)
+
+        text = "\n".join(errors + output)
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("SGFja2Vk", text)
+        self.assertNotIn("super-secret", text)
+        self.assertIn("access_token=<redacted>", text)
+        self.assertIn("boom", text)
+
     def test_web_alert_preserves_highest_event_level(self):
         """Web 聚合告警不应把单条 HIGH 事件降成 MEDIUM。"""
         content = (
@@ -482,6 +504,23 @@ web_attacks:
 
         self.assertEqual(result.log_type, "Windows Event Log (XML)")
         self.assertEqual(len(result.events), 3)
+        self.assertGreater(result.file_size_bytes, 0)
+
+    def test_auto_parse_generic_streams_from_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "unknown.log"
+            path.write_text(
+                "\n".join(
+                    f"2024-03-15T10:00:{i:02d} error from 9.9.9.{i}"
+                    for i in range(3)
+                ) + "\n",
+                encoding="utf-8",
+            )
+            with mock.patch("bla.parsers.read_file", side_effect=AssertionError("full read not allowed")):
+                result = auto_parse(str(path), parser_name="generic")
+
+        self.assertEqual(result.log_type, "通用日志")
+        self.assertEqual(result.stats.total, 3)
         self.assertGreater(result.file_size_bytes, 0)
 
     def test_windows_xml_file_counts_trailing_incomplete_event(self):
@@ -559,6 +598,20 @@ web_attacks:
         self.assertEqual({event.rule_name for event in result.events}, {"Linux 敏感凭据文件读取"})
         self.assertEqual({event.details.get("action") for event in result.events}, {"credential-file-read"})
         self.assertIn("T1552.004", {event.mitre_attack for event in result.events})
+
+    def test_shell_history_parser_extracts_zsh_time_and_source_context(self):
+        result = parse_shell_history(
+            ": 1710500000:0;cat /etc/shadow\n",
+            "server01:/home/alice/.zsh_history",
+        )
+
+        self.assertEqual(result.stats.total, 1)
+        event = result.events[0]
+        self.assertTrue(event.timestamp.endswith("+00:00"))
+        self.assertEqual(event.user, "alice")
+        self.assertEqual(event.host, "server01")
+        self.assertEqual(event.details.get("account"), "alice")
+        self.assertEqual(event.details.get("asset"), "server01")
 
     def test_parser_registry_detects_bash_history_file(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -388,17 +388,17 @@ class RemoteWorkspace:
                     print_fn=self.print,
                 )
             except AnalysisError as e:
-                self.print(f"分析失败: {e}", file=sys.stderr)
+                self.print(f"分析失败: {_display_text(e)}", file=sys.stderr)
                 return 1
             except Exception as e:
-                self.print(f"分析流程失败: {e}", file=sys.stderr)
+                self.print(f"分析流程失败: {_display_text(e)}", file=sys.stderr)
                 return 1
 
             self._annotate_remote_sources(run_result.parse_results, labels)
             if run_result.parse_errors:
                 self.print(f"有 {len(run_result.parse_errors)} 个输入解析失败，已从本次分析结果中排除:", file=sys.stderr)
                 for item in run_result.parse_errors[:10]:
-                    self.print(f"  - {item}", file=sys.stderr)
+                    self.print(f"  - {_display_text(item)}", file=sys.stderr)
                 if len(run_result.parse_errors) > 10:
                     self.print(f"  ... 还有 {len(run_result.parse_errors) - 10} 个失败输入未展示", file=sys.stderr)
             self.print(f"\n解析完成，共 {run_result.summary.total_events} 条事件")

@@ -466,11 +466,18 @@ def _description(
             f"资产: {', '.join(assets[:5]) or '?'}；"
             f"阶段: {', '.join(phases[:6]) or '未分类'}。"
         )
-    if _is_shell_history_subject(subject, source_types) and not (source_ips or accounts or assets or workstations):
+    if _is_shell_history_subject(subject, source_types):
+        context_parts = []
+        if assets:
+            context_parts.append(f"资产: {', '.join(assets[:5])}")
+        if accounts:
+            context_parts.append(f"账号: {', '.join(_human_accounts(accounts)[:5])}")
+        context_text = f"{'；'.join(context_parts)}；" if context_parts else ""
         return (
             f"{subject} 关联到 {len(alerts)} 个告警、{len(events)} 条关键命令；"
             f"阶段: {', '.join(phases[:6]) or '未分类'}；"
             "日志源: Shell History；"
+            f"{context_text}"
             "建议补采对应主机、账号、进程树和同时间窗口审计日志。"
         )
     return (
@@ -494,22 +501,33 @@ def _incident_subject(
         return source_ips[0]
     if workstations:
         return workstations[0]
+    if "shell-history" in source_types:
+        return _shell_history_subject(accounts, assets, phases)
     if assets:
         return assets[0]
     if accounts:
         return _first_human(accounts)
-    if "shell-history" in source_types:
-        for phase in phases:
-            if phase in _SHELL_HISTORY_PHASE_SUBJECT:
-                return _SHELL_HISTORY_PHASE_SUBJECT[phase]
-        return "Shell 命令轨迹"
     if source_types:
         return f"{source_types[0]} 日志线索"
     return "未归属线索"
 
 
 def _is_shell_history_subject(subject: str, source_types: Sequence[str]) -> bool:
-    return "shell-history" in source_types and subject.startswith("Shell ")
+    return "shell-history" in source_types and "Shell " in subject
+
+
+def _shell_history_subject(accounts: Sequence[str], assets: Sequence[str], phases: Sequence[str]) -> str:
+    base = "Shell 命令轨迹"
+    for phase in phases:
+        if phase in _SHELL_HISTORY_PHASE_SUBJECT:
+            base = _SHELL_HISTORY_PHASE_SUBJECT[phase]
+            break
+    account = _first_human(accounts)
+    if account:
+        return f"{account} 的 {base}"
+    if assets:
+        return f"{assets[0]} 的 {base}"
+    return base
 
 
 def _timeline(events: Sequence[LogEvent]) -> List[TimelineEntry]:
@@ -550,7 +568,7 @@ def _evidence(
         evidence.append(f"来源工作站: {', '.join(workstations[:5])}")
     if assets:
         evidence.append(f"资产: {', '.join(assets[:5])}")
-    if "shell-history" in source_types and not (source_ips or accounts or assets or workstations):
+    if "shell-history" in source_types:
         evidence.append("证据类型: Shell 命令历史")
     evidence.extend([
         f"日志源: {', '.join(source_types) or '?'}",

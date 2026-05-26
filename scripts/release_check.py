@@ -263,6 +263,79 @@ def _run_v141_feature_smoke() -> None:
                 "v1.4.1 smoke manifest did not include Shell History as a parsed file")
 
 
+def _run_v142_hardening_smoke() -> None:
+    """Exercise the v1.4.2 output-safety and parser-stability additions."""
+    with tempfile.TemporaryDirectory(prefix="bla-v142-smoke-") as tmp:
+        tmp_path = Path(tmp)
+        input_dir = tmp_path / "input"
+        history_dir = input_dir / "home" / "alice"
+        history_dir.mkdir(parents=True)
+        (input_dir / "access.log").write_text(
+            '8.8.8.8 - - [15/Mar/2024:10:00:00 +0800] '
+            '"GET /upload/shell.jsp?cmd=whoami HTTP/1.1" 200 10 "-" "curl/8"\n'
+            '9.9.9.9 - - [15/Mar/2024:10:00:01 +0800] '
+            '"GET /admin.php HTTP/1.1" 403 10 "-" "curl/8"\n'
+            '10.0.0.5 - - [15/Mar/2024:10:00:02 +0800] '
+            '"GET /admin.php HTTP/1.1" 403 10 "-" "internal-check"\n',
+            encoding="utf-8",
+        )
+        (history_dir / ".zsh_history").write_text(
+            "\n".join([
+                ": 1710500000:0;grep DB_PASSWORD access_token=super-secret /var/www/html/.env",
+                ": 1710500060:0;cat /etc/shadow",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        geo_cache = tmp_path / "geo-cache.json"
+        geo_cache.write_text(
+            json.dumps({
+                "8.8.8.8": {
+                    "status": "success",
+                    "country": "United States",
+                    "regionName": "California",
+                    "city": "Mountain View",
+                }
+            }),
+            encoding="utf-8",
+        )
+        out_dir = tmp_path / "report"
+
+        _run([
+            sys.executable,
+            "bla_cli.py",
+            str(input_dir),
+            "--out",
+            str(out_dir),
+            "--geoip-cache",
+            str(geo_cache),
+            "--exit-on",
+            "none",
+            "--no-color",
+            "--max-alerts",
+            "5",
+        ])
+
+        html = (out_dir / "index.html").read_text(encoding="utf-8")
+        report = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
+        iocs = (out_dir / "iocs.txt").read_text(encoding="utf-8")
+        report_text = json.dumps(report, ensure_ascii=False)
+
+        _assert("alice 的 Shell 凭据访问轨迹" in html,
+                "v1.4.2 smoke did not preserve shell account context in incident title")
+        _assert("证据类型: Shell 命令历史" in html,
+                "v1.4.2 smoke did not mark Shell History as evidence")
+        _assert("已排除 1 个内网/回环/保留源 IP" in html,
+                "v1.4.2 smoke did not report excluded non-public source IPs")
+        _assert("1 个公网源 IP 缺少地理数据" in html,
+                "v1.4.2 smoke did not report unlocated public source IPs")
+        _assert("access_token=<redacted>" in iocs,
+                "v1.4.2 smoke IOC export did not redact assignment-style secrets")
+        _assert("super-secret" not in iocs and "\x1b" not in iocs,
+                "v1.4.2 smoke IOC export leaked raw secret or terminal control data")
+        _assert("alice" in report_text,
+                "v1.4.2 smoke JSON did not keep shell account context")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run BLA's local release safety checks.")
     parser.add_argument("--build", action="store_true", help="build and inspect wheel/sdist artifacts")
@@ -285,6 +358,7 @@ def main() -> int:
         _run(command)
     _run_sample_smokes()
     _run_v141_feature_smoke()
+    _run_v142_hardening_smoke()
 
     if args.build:
         _check_distribution(version)
