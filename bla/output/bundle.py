@@ -19,6 +19,7 @@ def generate_report_bundle(
     summary: AnalysisSummary,
     output_dir: str,
     manifest_context: Optional[Dict[str, Any]] = None,
+    geoip_cache_path: Optional[str] = None,
 ) -> Dict[str, str]:
     """生成一套标准交付报告文件，并返回各产物路径。"""
     os.makedirs(output_dir, exist_ok=True)
@@ -32,7 +33,7 @@ def generate_report_bundle(
     }
 
     safe_print(f"  [✓] 报告目录: {output_dir}")
-    generate_html_report(parse_results, summary, paths["html"])
+    generate_html_report(parse_results, summary, paths["html"], geoip_cache_path=geoip_cache_path)
     generate_json_report(parse_results, summary, paths["json"])
     generate_csv_report(parse_results, summary, paths["csv"])
     generate_ioc_report(parse_results, summary, paths["ioc"])

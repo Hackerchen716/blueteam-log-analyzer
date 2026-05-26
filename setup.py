@@ -23,7 +23,7 @@ setup(
     include_package_data=True,
     package_data={
         "bla.rules": ["*.yaml", "*.yml"],
-        "bla.output": ["assets/*.png"],
+        "bla.output": ["assets/*.png", "assets/*.geojson"],
     },
     py_modules=["bla_cli"],
     entry_points={

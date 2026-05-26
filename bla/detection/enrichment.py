@@ -39,6 +39,7 @@ _SOURCE_TYPE_CHECKS = [
         ("edr", r"\bedr\b|\bxdr\b|sysmon|endpoint"),
         ("application", r"application|应用|tomcat|spring"),
         ("web", r"\bweb\b|access"),
+        ("shell-history", r"shell history|shell-history|bash_history|\.bash_history|zsh_history|\.zsh_history"),
         ("linux-auth", r"linux auth|auth\.log|secure|ssh|sudo"),
         ("windows-event", r"windows|security|event log"),
     )
@@ -198,7 +199,7 @@ def _asset_role(event: LogEvent, normalized: Dict[str, str]) -> str:
     for role, pattern in _ASSET_ROLE_PATTERNS:
         if pattern.search(text):
             return role
-    if source_type in {"linux-auth", "windows-event"}:
+    if source_type in {"linux-auth", "windows-event", "shell-history"}:
         return "server"
     return "unknown"
 
@@ -279,6 +280,7 @@ def _event_family_from_mitre(mitre: str) -> str:
         "T1562": "defense-evasion",
         "T1140": "defense-evasion",
         "T1003": "credential-access",
+        "T1552": "credential-access",
         "T1558": "credential-access",
         "T1021": "lateral-movement",
         "T1550": "lateral-movement",

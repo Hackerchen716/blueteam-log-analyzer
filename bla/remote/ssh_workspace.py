@@ -317,6 +317,8 @@ class RemoteWorkspace:
         parser.add_argument("--grep", action="append", metavar="TEXT", help="仅保留包含关键词的行，可重复指定")
         parser.add_argument("--audit-json", metavar="FILE", help="写出远程采集审计记录 JSON")
         parser.add_argument("--out", metavar="DIR", help="本地标准报告目录（含 manifest.json）")
+        parser.add_argument("--geoip-cache", metavar="FILE",
+                            help="加载本地 GeoIP JSON 缓存，仅用于 HTML 攻击源地理分布；不会联网查询")
         parser.add_argument("--html", metavar="FILE", help="本地 HTML 报告")
         parser.add_argument("--json", metavar="FILE", help="本地 JSON 报告")
         parser.add_argument("--csv", metavar="FILE", help="本地 CSV 事件列表")
@@ -420,6 +422,7 @@ class RemoteWorkspace:
                         ioc=parsed.ioc,
                         sarif=parsed.sarif,
                         bundle_dir=parsed.out,
+                        geoip_cache_path=parsed.geoip_cache,
                     ),
                     manifest_context=_remote_manifest_context(
                         parsed,
@@ -612,6 +615,7 @@ def _remote_manifest_context(
             "parser": parsed.type,
             "rules": parsed.rules or [],
             "allowlist": parsed.allowlist,
+            "geoip_cache": os.path.basename(parsed.geoip_cache) if parsed.geoip_cache else None,
             "config": parsed.config,
             "exit_on": parsed.exit_on,
             "syslog_year": parsed.syslog_year,

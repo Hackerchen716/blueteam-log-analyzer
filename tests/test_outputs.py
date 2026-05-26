@@ -94,6 +94,122 @@ class OutputRegressionTests(unittest.TestCase):
         self.assertIn("data:image/png;base64,", html)
         self.assertNotIn("bla/output/assets/bla-logo.png", html)
 
+    def test_html_report_renders_geo_map_from_local_geoip_cache(self):
+        """HTML 地图只使用本地 GeoIP 缓存，并按国家/地区聚合公网源 IP。"""
+        events = [
+            LogEvent(
+                id="geo-1", timestamp="2024-03-15T10:00:00",
+                level=ThreatLevel.HIGH, category="认证", source="linux-auth",
+                source_file="auth.log", message="failed login from 8.8.8.8",
+                raw_line="", ip="8.8.8.8",
+                details={"source_type": "linux-auth", "src_ip": "8.8.8.8"},
+            ),
+            LogEvent(
+                id="geo-2", timestamp="2024-03-15T10:00:01",
+                level=ThreatLevel.MEDIUM, category="Web", source="web-access",
+                source_file="access.log", message="GET / from 1.1.1.1",
+                raw_line="", ip="1.1.1.1",
+                details={"source_type": "web-access", "src_ip": "1.1.1.1"},
+            ),
+        ]
+        result = ParseResult("mixed.log", "Fixture", events, ParseStats(total=2, high=1, medium=1))
+        summary = AnalysisSummary(
+            risk_score=40,
+            risk_level=ThreatLevel.MEDIUM,
+            alerts=[],
+            timeline=[],
+            attack_chain=[],
+            recommendations=[],
+            total_events=2,
+            files_analyzed=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "geo-cache.json"
+            cache_path.write_text(_json.dumps({
+                "8.8.8.8": {"status": "success", "country": "United States", "regionName": "California", "city": "Mountain View"},
+                "1.1.1.1": {"status": "success", "country": "Australia", "regionName": "Queensland", "city": "South Brisbane"},
+            }), encoding="utf-8")
+            report_path = Path(tmp) / "report.html"
+            generate_html_report([result], summary, str(report_path), geoip_cache_path=str(cache_path))
+            html = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("攻击源地理分布", html)
+        self.assertIn("离线热力图", html)
+        self.assertIn("Top 国家/地区", html)
+        self.assertIn("United States", html)
+        self.assertIn("Australia", html)
+        self.assertIn("8.8.8.8", html)
+        self.assertIn("1.1.1.1", html)
+        self.assertNotIn("边界 SVG", html)
+        self.assertNotIn("正式版", html)
+
+    def test_html_report_hides_geo_map_without_located_public_ip(self):
+        """没有可定位公网源 IP 时，HTML 不展示地图区块。"""
+        event = LogEvent(
+            id="geo-empty", timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.INFO, category="测试", source="fixture",
+            source_file="events.log", message="internal event",
+            raw_line="", ip="10.0.0.10",
+            details={"source_type": "fixture", "src_ip": "10.0.0.10"},
+        )
+        result = ParseResult("events.log", "Fixture", [event], ParseStats(total=1, info=1))
+        summary = AnalysisSummary(
+            risk_score=0,
+            risk_level=ThreatLevel.INFO,
+            alerts=[],
+            timeline=[],
+            attack_chain=[],
+            recommendations=[],
+            total_events=1,
+            files_analyzed=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "report.html"
+            generate_html_report([result], summary, str(report_path))
+            html = report_path.read_text(encoding="utf-8")
+
+        self.assertNotIn("攻击源地理分布", html)
+        self.assertNotIn("geo-map", html)
+
+    def test_html_report_ignores_broken_geoip_cache_when_event_has_geo_fields(self):
+        """GeoIP 缓存损坏时，报告仍可使用日志内地理字段生成地图。"""
+        event = LogEvent(
+            id="geo-event-field", timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.HIGH, category="认证", source="linux-auth",
+            source_file="auth.log", message="failed login from 8.8.8.8",
+            raw_line="", ip="8.8.8.8",
+            details={
+                "source_type": "linux-auth",
+                "src_ip": "8.8.8.8",
+                "country": "United States",
+                "regionName": "California",
+            },
+        )
+        result = ParseResult("auth.log", "Fixture", [event], ParseStats(total=1, high=1))
+        summary = AnalysisSummary(
+            risk_score=40,
+            risk_level=ThreatLevel.MEDIUM,
+            alerts=[],
+            timeline=[],
+            attack_chain=[],
+            recommendations=[],
+            total_events=1,
+            files_analyzed=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "broken-geo-cache.json"
+            cache_path.write_text("{broken-json", encoding="utf-8")
+            report_path = Path(tmp) / "report.html"
+            generate_html_report([result], summary, str(report_path), geoip_cache_path=str(cache_path))
+            html = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("攻击源地理分布", html)
+        self.assertIn("United States", html)
+        self.assertIn("8.8.8.8", html)
+
     def test_csv_report_neutralizes_spreadsheet_formulas(self):
         event = LogEvent(
             id="evt-1",
@@ -578,6 +694,84 @@ class OutputRegressionTests(unittest.TestCase):
         self.assertIn("kc-chip", html)
         self.assertIn("kc-hit", html, "命中阶段必须以高亮 chip 渲染")
         self.assertIn("kc-miss", html, "未命中阶段也要渲染（灰色）")
+
+    def test_html_report_groups_repeated_identity_incidents_for_display(self):
+        """HTML 展示层应合并只差源 IP 的身份突破案件，JSON 原始数据仍可逐案保留。"""
+        from bla.models import Incident
+
+        events = [
+            LogEvent(
+                id="e1", timestamp="2024-03-15T10:00:00",
+                level=ThreatLevel.HIGH, category="认证", source="linux-auth",
+                source_file="auth.log", message="failed root from 1.1.1.1", raw_line="",
+                ip="1.1.1.1", user="root", host="host1",
+                details={"source_type": "linux-auth", "src_ip": "1.1.1.1", "account": "root", "asset": "host1"},
+            ),
+            LogEvent(
+                id="e2", timestamp="2024-03-15T10:01:00",
+                level=ThreatLevel.HIGH, category="认证", source="linux-auth",
+                source_file="auth.log", message="failed admin from 2.2.2.2", raw_line="",
+                ip="2.2.2.2", user="admin", host="host1",
+                details={"source_type": "linux-auth", "src_ip": "2.2.2.2", "account": "admin", "asset": "host1"},
+            ),
+            LogEvent(
+                id="e3", timestamp="2024-03-15T10:02:00",
+                level=ThreatLevel.CRITICAL, category="Web", source="waf",
+                source_file="access.log", message="web exploit", raw_line="",
+                ip="9.9.9.9", host="web1",
+                details={"source_type": "waf", "src_ip": "9.9.9.9", "asset": "web1"},
+            ),
+        ]
+        timeline = [
+            TimelineEntry(
+                timestamp=item.timestamp, level=item.level, category=item.category,
+                message=item.message, event_id=item.id, source_file=item.source_file,
+            )
+            for item in events
+        ]
+        incidents = [
+            Incident(
+                id="inc-001", title="严重案件: 9.9.9.9 / 初始访问",
+                description="web incident", level=ThreatLevel.CRITICAL, confidence="high",
+                affected_alerts=[], affected_events=["e3"], source_ips=["9.9.9.9"],
+                accounts=[], assets=["web1"], source_types=["waf"], attack_phases=["初始访问"],
+                evidence=["日志源: waf"], timeline=[timeline[2]],
+                recommended_actions=["核查入口"], next_logs=["WAF 原始命中详情"],
+            ),
+            Incident(
+                id="inc-002", title="高危案件: 1.1.1.1 / 身份突破",
+                description="identity 1", level=ThreatLevel.HIGH, confidence="medium",
+                affected_alerts=[], affected_events=["e1"], source_ips=["1.1.1.1"],
+                accounts=["root"], assets=["host1"], source_types=["linux-auth"], attack_phases=["身份突破"],
+                evidence=["来源IP: 1.1.1.1"], timeline=[timeline[0]],
+                recommended_actions=["核查账号登录源"], next_logs=["AD/域控 Security 日志"],
+            ),
+            Incident(
+                id="inc-003", title="高危案件: 2.2.2.2 / 身份突破",
+                description="identity 2", level=ThreatLevel.HIGH, confidence="medium",
+                affected_alerts=[], affected_events=["e2"], source_ips=["2.2.2.2"],
+                accounts=["admin"], assets=["host1"], source_types=["linux-auth"], attack_phases=["身份突破"],
+                evidence=["来源IP: 2.2.2.2"], timeline=[timeline[1]],
+                recommended_actions=["核查账号登录源"], next_logs=["AD/域控 Security 日志"],
+            ),
+        ]
+        result = ParseResult("auth.log", "linux-auth", events, ParseStats(total=3, critical=1, high=2))
+        summary = AnalysisSummary(
+            risk_score=80, risk_level=ThreatLevel.CRITICAL, alerts=[],
+            timeline=timeline, attack_chain=[], recommendations=[],
+            total_events=3, files_analyzed=1, incidents=incidents,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "report.html"
+            generate_html_report([result], summary, str(path))
+            html = path.read_text(encoding="utf-8")
+
+        self.assertEqual(html.count('class="incident-card"'), 2)
+        self.assertIn("应急案件视图 (3) · 合并展示 2 组", html)
+        self.assertIn("身份突破攻击活动（合并）", html)
+        self.assertIn("合并案件: 2 个", html)
+        self.assertIn("来源IP数: 2", html)
 
     def test_explain_markdown_format_renders_ticket_ready_doc(self):
         """explain --format markdown 应当产出可直接粘贴进工单的 Markdown。"""

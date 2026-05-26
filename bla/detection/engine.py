@@ -328,6 +328,22 @@ def detect_privilege_escalation(events: List[LogEvent]) -> List[DetectionAlert]:
             recommendation="核查 sudo 会话是否授权，保全终端命令历史、进程树和登录来源",
             timestamp=max(e.timestamp for e in sudo_shell), confidence="high",
         ))
+    shell_priv = [
+        e for e in events
+        if "shell-history" in e.tags
+        and "privilege-escalation" in e.tags
+        and "sudo-shell" not in e.tags
+    ]
+    if shell_priv:
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("shp"), rule_id="PRIV-005", rule_name="Shell 历史提权命令轨迹",
+            description=f"命令历史中检测到 {len(shell_priv)} 条提权枚举或提权执行痕迹",
+            level=ThreatLevel.HIGH, category="权限提升", mitre_attack="T1548", mitre_phase="权限提升",
+            affected_events=[e.id for e in shell_priv],
+            evidence=[f"{e.details.get('sequence', '?')}: {e.details.get('command') or e.message}" for e in shell_priv[:5]],
+            recommendation="保全 shell history、进程树和登录来源，核查 SUID/sudo 提权是否已成功并回滚异常权限。",
+            timestamp=max(e.timestamp for e in shell_priv), confidence="high",
+        ))
     root_logins = [e for e in events if "root-login" in e.tags]
     if root_logins:
         alerts.append(DetectionAlert(
@@ -408,11 +424,35 @@ def detect_defense_evasion(events: List[LogEvent]) -> List[DetectionAlert]:
             recommendation="立即恢复审计策略，检查是否有其他防御规避行为",
             timestamp=max(e.timestamp for e in audit_change), confidence="high",
         ))
+    artifact_delete = [e for e in events if "artifact-deletion" in e.tags]
+    if artifact_delete:
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("ad"), rule_id="EVAS-003", rule_name="可疑痕迹删除",
+            description=f"检测到 {len(artifact_delete)} 条删除脚本、日志或 Webshell 痕迹的命令",
+            level=ThreatLevel.HIGH, category="防御规避",
+            mitre_attack="T1070.004", mitre_phase="防御规避",
+            affected_events=[e.id for e in artifact_delete],
+            evidence=[f"{e.details.get('sequence', '?')}: {e.details.get('command') or e.message}" for e in artifact_delete[:5]],
+            recommendation="优先保全磁盘、Web 目录、shell history 和 Web 访问日志，检查被删除文件是否有备份或仍在进程/缓存中。",
+            timestamp=max(e.timestamp for e in artifact_delete), confidence="medium",
+        ))
     return alerts
 
 
 def detect_credential_access(events: List[LogEvent]) -> List[DetectionAlert]:
     alerts = []
+    linux_secret_reads = [e for e in events if "linux-credential-file" in e.tags]
+    if linux_secret_reads:
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("lc"), rule_id="CRED-003", rule_name="Linux 敏感凭据文件读取",
+            description=f"检测到 {len(linux_secret_reads)} 条读取 /etc/shadow、SSH key 或授权密钥的命令痕迹",
+            level=ThreatLevel.HIGH, category="凭据访问",
+            mitre_attack="T1003.008", mitre_phase="凭据访问",
+            affected_events=[e.id for e in linux_secret_reads],
+            evidence=[f"{e.details.get('sequence', '?')}: {e.details.get('command') or e.message}" for e in linux_secret_reads[:5]],
+            recommendation="立即核查相关账户与 SSH key 是否泄露，轮换凭据，检查后续横向移动和异常登录。",
+            timestamp=max(e.timestamp for e in linux_secret_reads), confidence="high",
+        ))
     mimi = [e for e in events if _has_credential_dump_indicator(e)]
     if mimi:
         alerts.append(DetectionAlert(
@@ -440,7 +480,7 @@ def detect_credential_access(events: List[LogEvent]) -> List[DetectionAlert]:
 
 
 def _has_credential_dump_indicator(event: LogEvent) -> bool:
-    if "lsass-dump" in event.tags or "credential-access" in event.tags:
+    if "lsass-dump" in event.tags or "credential-dump" in event.tags:
         return True
     text = event.message + " " + event.raw_line
     if _CREDENTIAL_TOOL_RE.search(text):
@@ -473,6 +513,34 @@ def detect_suspicious_execution(events: List[LogEvent]) -> List[DetectionAlert]:
             affected_events=[e.id for e in lolbins], evidence=[e.message for e in lolbins[:3]],
             recommendation="检查 LOLBins 命令行参数，验证是否为合法系统管理操作",
             timestamp=max(e.timestamp for e in lolbins), confidence="medium",
+        ))
+    shell_exec = [
+        e for e in events
+        if "shell-history" in e.tags and any(tag in e.tags for tag in ("shell-upgrade", "command-execution"))
+    ]
+    if shell_exec:
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("se"), rule_id="EXEC-003", rule_name="Shell 交互执行/TTY 升级",
+            description=f"命令历史中检测到 {len(shell_exec)} 条交互式 shell 或命令执行升级痕迹",
+            level=ThreatLevel.HIGH, category="执行",
+            mitre_attack="T1059.004", mitre_phase="执行",
+            affected_events=[e.id for e in shell_exec],
+            evidence=[f"{e.details.get('sequence', '?')}: {e.details.get('command') or e.message}" for e in shell_exec[:5]],
+            recommendation="核查 Webshell/反弹 shell 来源，补充 tty、进程树、Web access/error 和 EDR 证据。",
+            timestamp=max(e.timestamp for e in shell_exec), confidence="high",
+        ))
+    tool_downloads = [e for e in events if "tool-download" in e.tags]
+    if tool_downloads:
+        level = ThreatLevel.HIGH if any(e.level.score >= ThreatLevel.HIGH.score for e in tool_downloads) else ThreatLevel.MEDIUM
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("td"), rule_id="EXEC-004", rule_name="远程工具下载",
+            description=f"命令历史中检测到 {len(tool_downloads)} 条远程脚本或工具下载命令",
+            level=level, category="执行",
+            mitre_attack="T1105", mitre_phase="命令控制",
+            affected_events=[e.id for e in tool_downloads],
+            evidence=[f"{e.details.get('sequence', '?')}: {e.details.get('command') or e.message}" for e in tool_downloads[:5]],
+            recommendation="下载地址、落地文件和执行链需要纳入 IOC，检查代理/DNS/文件系统与进程执行证据。",
+            timestamp=max(e.timestamp for e in tool_downloads), confidence="medium",
         ))
     return alerts
 
@@ -590,14 +658,22 @@ def detect_reconnaissance(events: List[LogEvent]) -> List[DetectionAlert]:
         ))
     recon_events = [e for e in events if "recon" in e.tags]
     if len(recon_events) >= config.THRESHOLDS.recon_min_events:
+        shell_recon = all("shell-history" in e.tags for e in recon_events)
         alerts.append(DetectionAlert(
-            id="a"+gen_id("rf"), rule_id="RECON-002", rule_name="敏感文件/路径探测",
-            description=f"检测到 {len(recon_events)} 次敏感文件探测",
+            id="a"+gen_id("rf"), rule_id="RECON-002",
+            rule_name="主机信息枚举" if shell_recon else "敏感文件/路径探测",
+            description=(
+                f"命令历史中检测到 {len(recon_events)} 条主机、网络、账户或文件枚举命令"
+                if shell_recon else f"检测到 {len(recon_events)} 次敏感文件探测"
+            ),
             level=ThreatLevel.MEDIUM, category="侦察",
             mitre_attack="T1083", mitre_phase="侦察",
             affected_events=[e.id for e in recon_events],
             evidence=[e.message for e in recon_events[:3]],
-            recommendation="确保敏感文件不可公开访问，部署蜜罐文件",
+            recommendation=(
+                "结合登录来源、当前用户和后续提权/凭据访问命令，判断是否已进入交互式入侵阶段。"
+                if shell_recon else "确保敏感文件不可公开访问，部署蜜罐文件"
+            ),
             timestamp=max(e.timestamp for e in recon_events), confidence="medium",
         ))
     return alerts
@@ -1012,7 +1088,7 @@ _RESPONSE_TECHNIQUE_PHASE = {
     "T1059": "执行", "T1218": "执行", "T1543": "持久化", "T1053": "持久化",
     "T1136": "持久化", "T1547": "持久化", "T1548": "权限提升", "T1098": "权限提升",
     "T1070": "防御规避", "T1562": "防御规避", "T1140": "防御规避",
-    "T1003": "凭据访问", "T1110": "身份突破", "T1558": "凭据访问",
+    "T1003": "凭据访问", "T1110": "身份突破", "T1552": "凭据访问", "T1558": "凭据访问",
     "T1021": "横向移动", "T1550": "横向移动", "T1071": "命令控制", "T1105": "命令控制",
     "T1505": "主机失陷", "T1041": "数据外传",
 }
@@ -1173,7 +1249,10 @@ def _select_windows_account_chain(index: DetectionEventIndex) -> List[LogEvent]:
 
 
 def _select_privilege_events(index: DetectionEventIndex) -> List[LogEvent]:
-    return index.tags_any("group-add", "sudo-denied", "sudo-shell", "root-login")
+    return index.tags_any(
+        "group-add", "sudo-denied", "sudo-shell", "root-login",
+        "suid-enumeration", "sudo-enumeration", "su-attempt",
+    )
 
 
 def _select_persistence_events(index: DetectionEventIndex) -> List[LogEvent]:
@@ -1181,11 +1260,14 @@ def _select_persistence_events(index: DetectionEventIndex) -> List[LogEvent]:
 
 
 def _select_defense_evasion_events(index: DetectionEventIndex) -> List[LogEvent]:
-    return index.tags_any("log-cleared", "audit-policy")
+    return index.tags_any("log-cleared", "audit-policy", "artifact-deletion", "defense-evasion")
 
 
 def _select_execution_events(index: DetectionEventIndex) -> List[LogEvent]:
-    return index.union(index.categories("PowerShell"), index.tags_any("lolbin"))
+    return index.union(
+        index.categories("PowerShell"),
+        index.tags_any("lolbin", "shell-upgrade", "command-execution", "tool-download", "ingress-tool-transfer"),
+    )
 
 
 def _select_lateral_events(index: DetectionEventIndex) -> List[LogEvent]:

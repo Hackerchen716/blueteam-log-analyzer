@@ -56,6 +56,15 @@ KILL_CHAIN_ORDER = (
 )
 _PHASE_INDEX = {phase: idx for idx, phase in enumerate(KILL_CHAIN_ORDER)}
 
+_SHELL_HISTORY_PHASE_SUBJECT = {
+    "侦察": "Shell 主机枚举轨迹",
+    "执行": "Shell 命令执行轨迹",
+    "权限提升": "Shell 提权轨迹",
+    "命令控制": "Shell 工具下载轨迹",
+    "凭据访问": "Shell 凭据访问轨迹",
+    "防御规避": "Shell 清痕轨迹",
+}
+
 
 def correlate_incidents(events: Sequence[LogEvent], alerts: Sequence[DetectionAlert]) -> List[Incident]:
     """Build incident-level cases from related alerts/events."""
@@ -240,7 +249,7 @@ def _build_incident(index: int, events: Sequence[LogEvent], alerts: Sequence[Det
         key=lambda phase: (_PHASE_INDEX.get(phase, len(_PHASE_INDEX)), phase),
     )
     confidence = _confidence(events, alerts, source_types, families)
-    title = _title(source_ips, accounts, assets, source_types, phases, max_level, alerts)
+    title = _title(source_ips, accounts, assets, workstations, source_types, phases, max_level, alerts)
     description = _description(source_ips, accounts, assets, operators, workstations, source_types, phases, alerts, events)
     timeline = _timeline(events)
     evidence = _evidence(events, alerts, source_ips, accounts, assets, operators, workstations, source_types, phases)
@@ -407,6 +416,11 @@ def _confidence(
         return "high"
     if len(source_types) >= 2 or len(alerts) >= 2 or len(events) >= 5:
         return "medium"
+    if "shell-history" in source_types and any(
+        alert.level.score >= ThreatLevel.HIGH.score and alert.confidence in {"medium", "high"}
+        for alert in alerts
+    ):
+        return "medium"
     return "low"
 
 
@@ -414,6 +428,7 @@ def _title(
     source_ips: Sequence[str],
     accounts: Sequence[str],
     assets: Sequence[str],
+    workstations: Sequence[str],
     source_types: Sequence[str],
     phases: Sequence[str],
     level: ThreatLevel,
@@ -422,10 +437,10 @@ def _title(
     if any(alert.rule_id == "WIN-CHAIN-001" for alert in alerts):
         account = _chain_account(alerts) or _first_human(accounts)
         return f"可疑本地管理员账号与远程登录: {account}" if account else "可疑本地管理员账号与远程登录"
-    subject = source_ips[0] if source_ips else (assets[0] if assets else "未知实体")
+    subject = _incident_subject(source_ips, accounts, assets, workstations, source_types, phases)
     if len(source_types) >= 2:
         return f"P0 多源关联案件: {subject}"
-    if phases:
+    if phases and not _is_shell_history_subject(subject, source_types):
         return f"{level.label}案件: {subject} / {phases[0]}"
     return f"{level.label}案件: {subject}"
 
@@ -441,7 +456,7 @@ def _description(
     alerts: Sequence[DetectionAlert],
     events: Sequence[LogEvent],
 ) -> str:
-    subject = source_ips[0] if source_ips else (workstations[0] if workstations else "未知来源")
+    subject = _incident_subject(source_ips, accounts, assets, workstations, source_types, phases)
     if any(alert.rule_id == "WIN-CHAIN-001" for alert in alerts):
         return (
             f"{subject} 关联到 Windows 账号创建、特权组加入和远程登录链路；"
@@ -451,6 +466,13 @@ def _description(
             f"资产: {', '.join(assets[:5]) or '?'}；"
             f"阶段: {', '.join(phases[:6]) or '未分类'}。"
         )
+    if _is_shell_history_subject(subject, source_types) and not (source_ips or accounts or assets or workstations):
+        return (
+            f"{subject} 关联到 {len(alerts)} 个告警、{len(events)} 条关键命令；"
+            f"阶段: {', '.join(phases[:6]) or '未分类'}；"
+            "日志源: Shell History；"
+            "建议补采对应主机、账号、进程树和同时间窗口审计日志。"
+        )
     return (
         f"{subject} 在 {len(source_types) or 1} 类日志源中关联到 "
         f"{len(alerts)} 个告警、{len(events)} 条关键事件；"
@@ -458,6 +480,36 @@ def _description(
         f"资产: {', '.join(assets[:5]) or '?'}；"
         f"账号: {', '.join(accounts[:5]) or '?'}。"
     )
+
+
+def _incident_subject(
+    source_ips: Sequence[str],
+    accounts: Sequence[str],
+    assets: Sequence[str],
+    workstations: Sequence[str],
+    source_types: Sequence[str],
+    phases: Sequence[str],
+) -> str:
+    if source_ips:
+        return source_ips[0]
+    if workstations:
+        return workstations[0]
+    if assets:
+        return assets[0]
+    if accounts:
+        return _first_human(accounts)
+    if "shell-history" in source_types:
+        for phase in phases:
+            if phase in _SHELL_HISTORY_PHASE_SUBJECT:
+                return _SHELL_HISTORY_PHASE_SUBJECT[phase]
+        return "Shell 命令轨迹"
+    if source_types:
+        return f"{source_types[0]} 日志线索"
+    return "未归属线索"
+
+
+def _is_shell_history_subject(subject: str, source_types: Sequence[str]) -> bool:
+    return "shell-history" in source_types and subject.startswith("Shell ")
 
 
 def _timeline(events: Sequence[LogEvent]) -> List[TimelineEntry]:
@@ -498,6 +550,8 @@ def _evidence(
         evidence.append(f"来源工作站: {', '.join(workstations[:5])}")
     if assets:
         evidence.append(f"资产: {', '.join(assets[:5])}")
+    if "shell-history" in source_types and not (source_ips or accounts or assets or workstations):
+        evidence.append("证据类型: Shell 命令历史")
     evidence.extend([
         f"日志源: {', '.join(source_types) or '?'}",
         f"攻击阶段: {', '.join(phases) or '?'}",

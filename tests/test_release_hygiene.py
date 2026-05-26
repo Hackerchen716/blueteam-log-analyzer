@@ -102,14 +102,22 @@ web_attacks:
         self.assertIn("--tail", completed.stdout)
         self.assertIn("--grep", completed.stdout)
         self.assertIn("--audit-json", completed.stdout)
+        self.assertIn("--geoip-cache", completed.stdout)
 
     def test_release_check_script_and_setup_version_are_safe(self):
         repo = Path(__file__).parents[1]
         setup_text = (repo / "setup.py").read_text(encoding="utf-8")
         cli_text = (repo / "bla_cli.py").read_text(encoding="utf-8")
+        release_check_text = (repo / "scripts" / "release_check.py").read_text(encoding="utf-8")
 
         self.assertNotIn("exec(", setup_text)
         self.assertNotIn("8.8.8.", cli_text)
+        self.assertIn("world-countries.geojson", release_check_text)
+        self.assertIn("shell_history.py", release_check_text)
+        self.assertIn("_run_v141_feature_smoke", release_check_text)
+        self.assertIn("攻击源地理分布", release_check_text)
+        self.assertIn("Shell 凭据访问轨迹", release_check_text)
+        self.assertIn("未知实体", release_check_text)
 
         completed = subprocess.run(
             [sys.executable, "scripts/release_check.py", "--help"],

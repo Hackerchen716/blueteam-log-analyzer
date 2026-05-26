@@ -8,11 +8,13 @@ import datetime
 import base64
 from html import escape
 from importlib import resources
-from typing import List
+from collections import Counter, defaultdict
+from typing import Any, Dict, List, Optional, Sequence
 
 from ..ioc import extract_iocs
 from ..models import AnalysisSummary, ParseResult, ThreatLevel
 from ..utils.helpers import format_timestamp_local, safe_print, sanitize_report_text
+from .geo_map import build_geo_map_section
 
 
 TIMELINE_LIMIT = 100
@@ -59,10 +61,348 @@ def _pct(part: int, total: int) -> float:
     return part * 100.0 / total
 
 
+def _format_count(value: int) -> str:
+    return f"{value:,}"
+
+
+def _compact_count(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M".replace(".0M", "M")
+    if value >= 10_000:
+        return f"{value / 1_000:.1f}k".replace(".0k", "k")
+    return str(value)
+
+
+def _highest_level(levels: Sequence[ThreatLevel]) -> ThreatLevel:
+    if not levels:
+        return ThreatLevel.INFO
+    return max(levels, key=lambda level: level.score)
+
+
+def _highest_confidence(values: Sequence[str]) -> str:
+    order = {"high": 3, "medium": 2, "low": 1}
+    return max((value or "low" for value in values), key=lambda value: order.get(value, 0), default="low")
+
+
+def _top_counter_text(counter: Counter, limit: int = 8) -> str:
+    if not counter:
+        return "?"
+    parts = [f"{item}({count})" for item, count in counter.most_common(limit)]
+    extra = len(counter) - limit
+    if extra > 0:
+        parts.append(f"+{extra}")
+    return ", ".join(parts)
+
+
+def _unique_ordered(values: Sequence[Any]) -> List[Any]:
+    seen = set()
+    result = []
+    for value in values:
+        if value in (None, "", "-", "null", "None"):
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _alert_display_items(alerts, event_by_id: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return alert cards optimized for human reading.
+
+    JSON/SARIF keep the raw alerts. HTML groups high-volume credential alerts
+    so one repeated campaign does not occupy hundreds of cards.
+    """
+    groupable = {"BRUTE-001", "SPRAY-001"}
+    grouped: Dict[tuple, List[Any]] = defaultdict(list)
+    first_index: Dict[tuple, int] = {}
+    entries: List[tuple[int, str, Any]] = []
+
+    for idx, alert in enumerate(alerts):
+        if alert.rule_id in groupable:
+            key = (alert.rule_id, alert.rule_name, alert.mitre_attack, alert.mitre_phase)
+            grouped[key].append(alert)
+            first_index.setdefault(key, idx)
+        else:
+            entries.append((idx, "single", alert))
+
+    for key, group in grouped.items():
+        if len(group) == 1:
+            entries.append((first_index[key], "single", group[0]))
+        else:
+            entries.append((first_index[key], "group", group))
+
+    entries.sort(key=lambda item: item[0])
+    display: List[Dict[str, Any]] = []
+    for _idx, kind, payload in entries:
+        if kind == "single":
+            alert = payload
+            display.append({
+                "rule_id": alert.rule_id,
+                "rule_name": alert.rule_name,
+                "description": alert.description,
+                "level": alert.level,
+                "mitre_attack": alert.mitre_attack,
+                "mitre_phase": alert.mitre_phase,
+                "affected_events": alert.affected_events,
+                "affected_count": len(alert.affected_events),
+                "evidence": alert.evidence,
+                "recommendation": alert.recommendation,
+                "timestamp": alert.timestamp,
+                "confidence": alert.confidence,
+            })
+            continue
+
+        group = payload
+        event_ids = []
+        seen = set()
+        source_ips = Counter()
+        accounts = Counter()
+        timestamps = []
+        for alert in group:
+            timestamps.append(alert.timestamp)
+            for event_id in alert.affected_events:
+                if event_id in seen:
+                    continue
+                seen.add(event_id)
+                event_ids.append(event_id)
+                event = event_by_id.get(event_id)
+                if not event:
+                    continue
+                if event.ip:
+                    source_ips[event.ip] += 1
+                if event.user:
+                    accounts[event.user] += 1
+                if event.timestamp:
+                    timestamps.append(event.timestamp)
+
+        first = group[0]
+        max_level = _highest_level([alert.level for alert in group])
+        confidence = _highest_confidence([alert.confidence for alert in group])
+        time_start = min(timestamps) if timestamps else first.timestamp
+        time_end = max(timestamps) if timestamps else first.timestamp
+        source_count = len(source_ips) or len(group)
+        account_count = len(accounts)
+        event_count = len(event_ids) or sum(len(alert.affected_events) for alert in group)
+        if first.rule_id == "SPRAY-001":
+            title = "密码喷洒攻击（合并）"
+            desc = (
+                f"检测到 {len(group)} 个来源的密码喷洒活动，"
+                f"涉及 {source_count} 个源 IP、{account_count} 个账号、{event_count} 条事件"
+            )
+            recommendation = "按密码喷洒活动整体处置：启用 MFA/异常登录检测，核查目标账号是否存在成功登录，并批量处置高频源 IP。"
+        else:
+            title = "暴力破解攻击（合并）"
+            desc = (
+                f"检测到 {len(group)} 个来源的暴力破解活动，"
+                f"涉及 {source_count} 个源 IP、{account_count} 个账号、{event_count} 条事件"
+            )
+            recommendation = "按暴力破解活动整体处置：封锁高频源 IP，检查是否有成功登录，启用账户锁定策略和 MFA。"
+        evidence = [
+            f"合并告警: {len(group)} 个",
+            f"来源IP数: {source_count}",
+            f"Top 来源IP: {_top_counter_text(source_ips)}",
+            f"目标账号数: {account_count}",
+            f"Top 账号: {_top_counter_text(accounts)}",
+            f"时间范围: {format_timestamp_local(time_start)} ~ {format_timestamp_local(time_end)}",
+        ]
+        display.append({
+            "rule_id": first.rule_id,
+            "rule_name": title,
+            "description": desc,
+            "level": max_level,
+            "mitre_attack": first.mitre_attack,
+            "mitre_phase": first.mitre_phase,
+            "affected_events": event_ids,
+            "affected_count": event_count,
+            "evidence": evidence,
+            "recommendation": recommendation,
+            "timestamp": time_end,
+            "confidence": confidence,
+        })
+    return display
+
+
+def _incident_group_key(incident):
+    source_types = tuple(sorted(incident.source_types))
+    attack_phases = tuple(incident.attack_phases)
+    assets = tuple(sorted(incident.assets))
+    if (
+        source_types == ("linux-auth",)
+        and attack_phases == ("身份突破",)
+        and assets
+    ):
+        return ("identity", source_types, attack_phases, assets)
+    return None
+
+
+def _incident_to_display(incident) -> Dict[str, Any]:
+    return {
+        "title": incident.title,
+        "description": incident.description,
+        "level": incident.level,
+        "confidence": incident.confidence,
+        "affected_alerts": incident.affected_alerts,
+        "affected_events": incident.affected_events,
+        "source_ips": incident.source_ips,
+        "accounts": incident.accounts,
+        "assets": incident.assets,
+        "source_types": incident.source_types,
+        "attack_phases": incident.attack_phases,
+        "evidence": incident.evidence,
+        "timeline": incident.timeline,
+        "recommended_actions": incident.recommended_actions,
+        "next_logs": incident.next_logs,
+    }
+
+
+def _incident_display_items(
+    incidents: Sequence[Any],
+    event_by_id: Dict[str, Any],
+    alert_by_id: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Return incident cards optimized for report reading.
+
+    Raw report.json keeps every correlated incident. The HTML report groups
+    repeated identity incidents that only differ by source IP, so operators see
+    the campaign first and can drill into events/timeline for detail.
+    """
+    grouped: Dict[tuple, List[Any]] = defaultdict(list)
+    first_index: Dict[tuple, int] = {}
+    entries: List[tuple[int, str, Any]] = []
+
+    for idx, incident in enumerate(incidents):
+        key = _incident_group_key(incident)
+        if key:
+            grouped[key].append(incident)
+            first_index.setdefault(key, idx)
+        else:
+            entries.append((idx, "single", incident))
+
+    for key, group in grouped.items():
+        if len(group) == 1:
+            entries.append((first_index[key], "single", group[0]))
+        else:
+            entries.append((first_index[key], "group", group))
+
+    entries.sort(key=lambda item: item[0])
+    display: List[Dict[str, Any]] = []
+    for _idx, kind, payload in entries:
+        if kind == "single":
+            display.append(_incident_to_display(payload))
+            continue
+
+        group = payload
+        event_ids: List[str] = []
+        alert_ids: List[str] = []
+        source_ips = Counter()
+        accounts = Counter()
+        assets = Counter()
+        source_types: List[str] = []
+        attack_phases: List[str] = []
+        timeline = []
+        recommended_actions: List[str] = []
+        next_logs: List[str] = []
+
+        for incident in group:
+            alert_ids.extend(incident.affected_alerts)
+            source_types.extend(incident.source_types)
+            attack_phases.extend(incident.attack_phases)
+            recommended_actions.extend(incident.recommended_actions)
+            next_logs.extend(incident.next_logs)
+            timeline.extend(incident.timeline)
+            for value in incident.source_ips:
+                source_ips[value] += 1
+            for value in incident.accounts:
+                accounts[value] += 1
+            for value in incident.assets:
+                assets[value] += 1
+            for event_id in incident.affected_events:
+                if event_id in event_ids:
+                    continue
+                event_ids.append(event_id)
+                event = event_by_id.get(event_id)
+                if not event:
+                    continue
+                event_ip = event.details.get("src_ip") or event.details.get("source_ip") or event.ip
+                event_account = event.details.get("account") or event.user
+                event_asset = event.details.get("asset") or event.host
+                if event_ip:
+                    source_ips[event_ip] += 1
+                if event_account:
+                    accounts[event_account] += 1
+                if event_asset:
+                    assets[event_asset] += 1
+
+        unique_alert_ids = _unique_ordered(alert_ids)
+        unique_source_types = _unique_ordered(source_types)
+        unique_attack_phases = _unique_ordered(attack_phases)
+        unique_assets = list(assets.keys())
+        event_count = len(event_ids)
+        source_count = len(source_ips)
+        account_count = len(accounts)
+        alert_rules = Counter(
+            alert_by_id[alert_id].rule_id
+            for alert_id in unique_alert_ids
+            if alert_id in alert_by_id
+        )
+        unique_timeline = []
+        seen_timeline = set()
+        for item in timeline:
+            key = (item.timestamp or "", item.event_id or "", item.message or "")
+            if key in seen_timeline:
+                continue
+            seen_timeline.add(key)
+            unique_timeline.append(item)
+        timeline = sorted(unique_timeline, key=lambda item: (item.timestamp or "", item.event_id or "", item.message or ""))
+        actions = [
+            "按同一身份突破活动批量处置：封锁高频源 IP，核查账号登录源、MFA 状态和登录后操作，必要时冻结账号并重置凭据。"
+        ]
+        actions.extend(recommended_actions)
+        first = group[0]
+        evidence = [
+            f"合并案件: {len(group)} 个",
+            f"来源IP数: {source_count}",
+            f"Top 来源IP: {_top_counter_text(source_ips)}",
+            f"目标账号数: {account_count}",
+            f"Top 账号: {_top_counter_text(accounts)}",
+            f"资产: {', '.join(unique_assets[:8]) or '?'}",
+            f"日志源: {', '.join(unique_source_types) or '?'}",
+            f"攻击阶段: {', '.join(unique_attack_phases) or '?'}",
+            f"关联告警: {len(unique_alert_ids)} 个",
+            f"关键事件: {event_count} 条",
+        ]
+        if alert_rules:
+            evidence.append(f"告警类型: {_top_counter_text(alert_rules)}")
+        display.append({
+            "title": "身份突破攻击活动（合并）",
+            "description": (
+                f"在 {', '.join(unique_source_types) or '日志'} 中合并 {len(group)} 个相似身份突破案件；"
+                f"涉及 {source_count} 个源 IP、{account_count} 个账号、"
+                f"{len(unique_assets)} 个资产、{event_count} 条关键事件。"
+            ),
+            "level": _highest_level([incident.level for incident in group]),
+            "confidence": _highest_confidence([incident.confidence for incident in group]),
+            "affected_alerts": unique_alert_ids,
+            "affected_events": event_ids,
+            "source_ips": list(source_ips.keys()),
+            "accounts": list(accounts.keys()),
+            "assets": unique_assets,
+            "source_types": unique_source_types,
+            "attack_phases": unique_attack_phases,
+            "evidence": evidence,
+            "timeline": timeline,
+            "recommended_actions": _unique_ordered(actions),
+            "next_logs": _unique_ordered(next_logs or first.next_logs),
+        })
+    return display
+
+
 def generate_html_report(
     parse_results: List[ParseResult],
     summary: AnalysisSummary,
     output_path: str,
+    geoip_cache_path: Optional[str] = None,
 ) -> None:
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -84,6 +424,8 @@ def generate_html_report(
     all_events = []
     for result in parse_results:
         all_events.extend(result.events)
+    event_by_id = {event.id: event for event in all_events}
+    alert_by_id = {alert.id: alert for alert in summary.alerts}
     # 报告的 IOC 摘要走告警过滤，避免业务流量污染封禁清单
     iocs = extract_iocs(all_events, alerts=summary.alerts)
     ioc_counts = {
@@ -135,7 +477,7 @@ def generate_html_report(
         level_legend_html += f"""
         <div class="legend-row">
           <span><i style="background:{color};"></i>{_h(label)}</span>
-          <strong>{count}</strong>
+          <strong>{_h(_format_count(count))}</strong>
         </div>"""
 
     stat_cards_html = ""
@@ -145,10 +487,12 @@ def generate_html_report(
         stat_cards_html += f"""
     <button class="stat-card stat-link{disabled_class}" type="button" data-level="{_h(level_value)}" onclick="jumpToEvents('{_h(level_value)}')" aria-label="查看{_h(label)}事件">
       <span class="stat-accent" style="background:{color};"></span>
-      <span class="stat-num" style="color:{color};">{count}</span>
+      <span class="stat-num" style="color:{color};">{_h(_format_count(count))}</span>
       <span class="stat-label">{_h(label)}事件</span>
       <span class="stat-action">{_h(action_label)}</span>
     </button>"""
+
+    geo_css, geo_section_html = build_geo_map_section(parse_results, geoip_cache_path)
 
     max_ip_count = max((count for _, count in top_ips), default=1)
     ip_bars_html = ""
@@ -158,40 +502,44 @@ def generate_html_report(
         <div class="bar-row">
           <span class="bar-label">{_h(ip)}</span>
           <div class="bar-track"><div class="bar-fill" style="width:{width:.1f}%;"></div></div>
-          <strong>{count}</strong>
+          <strong>{_h(_format_count(count))}</strong>
         </div>"""
     if not ip_bars_html:
         ip_bars_html = '<div class="empty-state">暂无 IP 数据</div>'
 
-    # 告警 HTML
+    # 告警 HTML。原始 JSON/SARIF 保持逐条告警；HTML 将高重复凭据类告警合并展示。
+    display_alerts = _alert_display_items(summary.alerts, event_by_id)
     alerts_html = ""
-    for i, alert in enumerate(summary.alerts, 1):
-        color = _level_color_hex(alert.level)
-        bg    = _level_bg_hex(alert.level)
-        evidence_items = "".join(f"<li>{_h(e)}</li>" for e in alert.evidence)
+    for i, alert in enumerate(display_alerts, 1):
+        color = _level_color_hex(alert["level"])
+        bg    = _level_bg_hex(alert["level"])
+        evidence_items = "".join(f"<li>{_h(e)}</li>" for e in alert["evidence"])
         alerts_html += f"""
-        <div class="alert-card" id="alert-{i:02d}" data-level="{_h(alert.level.value)}" style="border-left:4px solid {color}; background:{bg};">
+        <div class="alert-card" id="alert-{i:02d}" data-level="{_h(alert['level'].value)}" style="border-left:4px solid {color}; background:{bg};">
           <div class="alert-header">
-            <span class="badge" style="background:{color};">{_h(alert.level.label)}</span>
+            <span class="badge" style="background:{color};">{_h(alert['level'].label)}</span>
             <span class="alert-num">#{i:02d}</span>
-            <strong>{_h(alert.rule_name)}</strong>
-            <span class="mitre-tag">{_h(alert.mitre_attack)}</span>
-            <span class="phase-tag">{_h(alert.mitre_phase)}</span>
+            <strong>{_h(alert['rule_name'])}</strong>
+            <span class="mitre-tag">{_h(alert['mitre_attack'])}</span>
+            <span class="phase-tag">{_h(alert['mitre_phase'])}</span>
           </div>
-          <p class="alert-desc">{_h(alert.description)}</p>
+          <p class="alert-desc">{_h(alert['description'])}</p>
           <div class="alert-meta">
-            <span>置信度: {_h(alert.confidence)}</span>
-            <span>时间: {_h(format_timestamp_local(alert.timestamp))}</span>
-            <span>影响事件: {len(alert.affected_events)}</span>
+            <span>置信度: {_h(alert['confidence'])}</span>
+            <span>时间: {_h(format_timestamp_local(alert['timestamp']))}</span>
+            <span>影响事件: {alert['affected_count']}</span>
           </div>
           <details>
             <summary>证据详情</summary>
             <ul class="evidence-list">{evidence_items}</ul>
           </details>
-          <div class="recommendation"><strong>建议</strong><span>{_h(alert.recommendation)}</span></div>
+          <div class="recommendation"><strong>建议</strong><span>{_h(alert['recommendation'])}</span></div>
         </div>"""
     if not alerts_html:
         alerts_html = '<div class="empty-state">未发现明显威胁告警</div>'
+    alert_title = f"威胁告警 ({len(summary.alerts)})"
+    if len(display_alerts) != len(summary.alerts):
+        alert_title += f" · 合并展示 {len(display_alerts)} 组"
 
     # 时间线 HTML
     timeline_html = ""
@@ -245,20 +593,21 @@ def generate_html_report(
             chain_parts.append('<div class="chain-arrow">→</div>')
     chain_html = "".join(chain_parts)
 
-    # Incident/case HTML
+    # Incident/case HTML。原始 JSON 保持逐案明细；HTML 将重复身份类案件合并展示。
     from ..detection.correlation import KILL_CHAIN_ORDER as _INCIDENT_KILL_CHAIN
+    display_incidents = _incident_display_items(summary.incidents, event_by_id, alert_by_id)
     incidents_html = ""
-    for i, incident in enumerate(summary.incidents, 1):
-        color = _level_color_hex(incident.level)
-        evidence_items = "".join(f"<li>{_h(item)}</li>" for item in incident.evidence[:8])
-        action_items = "".join(f"<li>{_h(item)}</li>" for item in incident.recommended_actions)
-        next_logs = "".join(f"<code>{_h(item)}</code>" for item in incident.next_logs)
+    for i, incident in enumerate(display_incidents, 1):
+        color = _level_color_hex(incident["level"])
+        evidence_items = "".join(f"<li>{_h(item)}</li>" for item in incident["evidence"][:10])
+        action_items = "".join(f"<li>{_h(item)}</li>" for item in incident["recommended_actions"])
+        next_logs = "".join(f"<code>{_h(item)}</code>" for item in incident["next_logs"])
         mini_timeline = "".join(
             f"<li><span>{_h(format_timestamp_local(item.timestamp))}</span>{_h(item.message)}</li>"
-            for item in incident.timeline[:6]
+            for item in incident["timeline"][:6]
         )
         # incident 级 mini kill chain：每个阶段一格，命中亮色，未命中灰色
-        hit_phases = set(incident.attack_phases)
+        hit_phases = set(incident["attack_phases"])
         chain_chips = []
         visible_phases = [p for p in _INCIDENT_KILL_CHAIN if p != "其他"]
         for idx, phase in enumerate(visible_phases):
@@ -273,15 +622,15 @@ def generate_html_report(
         incidents_html += f"""
         <div class="incident-card" style="border-left-color:{color};">
           <div class="incident-head">
-            <span class="badge" style="background:{color};">{_h(incident.level.label)}</span>
-            <strong>#{i:02d} {_h(incident.title)}</strong>
-            <span class="phase-tag">置信度 {_h(incident.confidence)}</span>
+            <span class="badge" style="background:{color};">{_h(incident['level'].label)}</span>
+            <strong>#{i:02d} {_h(incident['title'])}</strong>
+            <span class="phase-tag">置信度 {_h(incident['confidence'])}</span>
           </div>
-          <p>{_h(incident.description)}</p>
+          <p>{_h(incident['description'])}</p>
           <div class="incident-killchain">{kill_chain_html}</div>
           <div class="incident-meta">
-            <span>日志源: {_h(', '.join(incident.source_types[:8]) or '?')}</span>
-            <span>事件: {len(incident.affected_events)}</span>
+            <span>日志源: {_h(', '.join(incident['source_types'][:8]) or '?')}</span>
+            <span>事件: {len(incident['affected_events'])}</span>
           </div>
           <div class="incident-grid">
             <div><h3>关键证据</h3><ul>{evidence_items}</ul></div>
@@ -292,6 +641,9 @@ def generate_html_report(
         </div>"""
     if not incidents_html:
         incidents_html = '<div class="empty-state">暂无跨源关联案件</div>'
+    incident_title = f"应急案件视图 ({len(summary.incidents)})"
+    if len(display_incidents) != len(summary.incidents):
+        incident_title += f" · 合并展示 {len(display_incidents)} 组"
 
     # 文件列表 HTML
     files_html = ""
@@ -499,8 +851,8 @@ def generate_html_report(
   .donut {{ width:170px; height:170px; border-radius:50%; background:{donut_bg}; position:relative; }}
   .donut::after {{ content:""; position:absolute; inset:42px; border-radius:50%; background:#fff; box-shadow:inset 0 0 0 1px var(--border); }}
   .donut-label {{ position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:1; }}
-  .donut-label strong {{ font-size:28px; }}
-  .donut-label span {{ color:var(--muted); font-size:12px; }}
+  .donut-label strong {{ font-size:24px; letter-spacing:0; line-height:1; }}
+  .donut-label span {{ color:var(--muted); font-size:12px; margin-top:5px; }}
   .legend-row {{ display:flex; justify-content:space-between; gap:14px; padding:7px 0; border-bottom:1px solid #edf1f6; }}
   .legend-row span {{ display:flex; align-items:center; gap:8px; color:var(--muted); }}
   .legend-row i {{ width:9px; height:9px; border-radius:2px; display:inline-block; }}
@@ -526,6 +878,7 @@ def generate_html_report(
   .tl-dot {{ width:10px; height:10px; border-radius:50%; margin-top:6px; flex-shrink:0; }}
   .tl-content {{ flex:1; display:flex; flex-wrap:wrap; gap:6px; align-items:baseline; }}
   .tl-msg {{ color:var(--text); }}
+{geo_css}
   @media (max-width: 860px) {{
     .container {{ padding:20px; }}
     .header, .grid-2 {{ display:block; }}
@@ -563,6 +916,8 @@ def generate_html_report(
   <div class="grid-4">{stat_cards_html}
   </div>
 
+  {geo_section_html}
+
   <!-- ATT&CK 攻击链 -->
   <h2>ATT&CK 攻击链</h2>
   <div class="card">
@@ -574,7 +929,7 @@ def generate_html_report(
     <div class="card">
       <h3>事件级别分布</h3>
       <div class="chart-wrap">
-        <div class="donut"><div class="donut-label"><strong>{total_events}</strong><span>事件</span></div></div>
+        <div class="donut" title="共 {_h(_format_count(total_events))} 条事件"><div class="donut-label"><strong>{_h(_compact_count(total_events))}</strong><span>事件</span></div></div>
         <div>{level_legend_html}</div>
       </div>
     </div>
@@ -585,11 +940,11 @@ def generate_html_report(
   </div>
 
   <!-- 告警 -->
-  <h2>应急案件视图 ({len(summary.incidents)})</h2>
+  <h2>{_h(incident_title)}</h2>
   <div>{incidents_html}</div>
 
   <!-- 告警 -->
-  <h2 id="alertsSection">威胁告警 ({len(summary.alerts)})</h2>
+  <h2 id="alertsSection">{_h(alert_title)}</h2>
   <div class="filter-bar">
     <input type="text" id="alertSearch" placeholder="搜索告警..." oninput="filterAlerts()">
     <button class="filter-btn active" type="button" data-alert-filter="all" onclick="setFilter('all', this)">全部</button>
@@ -650,7 +1005,12 @@ let currentFilter = 'all';
 function setFilter(level, btn) {{
   currentFilter = level;
   document.querySelectorAll('[data-alert-filter]').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
+  if (btn) {{
+    btn.classList.add('active');
+  }} else {{
+    const target = document.querySelector(`[data-alert-filter="${{level}}"]`);
+    if (target) target.classList.add('active');
+  }}
   filterAlerts();
 }}
 function filterAlerts() {{
@@ -685,8 +1045,10 @@ function filterTimeline() {{
   if (empty) empty.style.display = visible ? 'none' : '';
 }}
 function jumpToEvents(level) {{
+  setFilter(level);
   setTimelineFilter(level);
-  const section = document.getElementById('timelineSection');
+  const hasAlert = document.querySelector(`.alert-card[data-level="${{level}}"]:not(.is-hidden)`);
+  const section = hasAlert ? document.getElementById('alertsSection') : document.getElementById('timelineSection');
   if (section) section.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
 }}
 </script>

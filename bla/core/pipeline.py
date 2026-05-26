@@ -27,6 +27,8 @@ from ..utils.helpers import reset_counter, set_syslog_year
 
 PrintFn = Callable[..., None]
 
+COLLECTABLE_HIDDEN_FILES = {".bash_history", ".zsh_history"}
+
 
 class AnalysisError(RuntimeError):
     """Raised when the pipeline cannot complete a user-facing analysis."""
@@ -40,6 +42,7 @@ class AnalysisOutputs:
     ioc: Optional[str] = None
     sarif: Optional[str] = None
     bundle_dir: Optional[str] = None
+    geoip_cache_path: Optional[str] = None
 
 
 @dataclass
@@ -90,7 +93,7 @@ def _collect_directory_files(path: str, files: List[str]) -> None:
             and _is_within_real_root(os.path.join(root, dirname), root_real)
         ]
         for fname in fnames:
-            if fname.startswith("."):
+            if fname.startswith(".") and fname not in COLLECTABLE_HIDDEN_FILES:
                 continue
             candidate = os.path.join(root, fname)
             if os.path.isfile(candidate) and _is_within_real_root(candidate, root_real):
@@ -217,7 +220,7 @@ def write_reports(
     manifest_context: Optional[Dict[str, Any]] = None,
 ) -> None:
     if outputs.html:
-        generate_html_report(parse_results, summary, outputs.html)
+        generate_html_report(parse_results, summary, outputs.html, geoip_cache_path=outputs.geoip_cache_path)
     if outputs.json:
         generate_json_report(parse_results, summary, outputs.json)
     if outputs.csv:
@@ -227,7 +230,13 @@ def write_reports(
     if outputs.sarif:
         generate_sarif_report(parse_results, summary, outputs.sarif)
     if outputs.bundle_dir:
-        generate_report_bundle(parse_results, summary, outputs.bundle_dir, manifest_context=manifest_context)
+        generate_report_bundle(
+            parse_results,
+            summary,
+            outputs.bundle_dir,
+            manifest_context=manifest_context,
+            geoip_cache_path=outputs.geoip_cache_path,
+        )
 
 
 def _configure_runtime(options: AnalysisOptions) -> None:

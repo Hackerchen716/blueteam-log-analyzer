@@ -87,6 +87,7 @@ def _build_manifest_context(args: argparse.Namespace, run_result) -> dict:
             "config": args.config,
             "rules": args.rules or [],
             "allowlist": args.allowlist,
+            "geoip_cache": os.path.basename(args.geoip_cache) if args.geoip_cache else None,
             "exit_on": args.exit_on,
             "syslog_year": args.syslog_year,
             "rdp_only": args.rdp,
@@ -207,6 +208,8 @@ def _cmd_remote_log(argv: List[str]) -> None:
     parser.add_argument("--analyze", action="store_true", help="兼容显式分析语义；remote-log 默认进入本地分析流程")
     parser.add_argument("--audit-json", metavar="FILE", help="写出远程采集审计记录 JSON")
     parser.add_argument("--out", metavar="DIR", help="本地标准报告目录（含 manifest.json）")
+    parser.add_argument("--geoip-cache", metavar="FILE",
+                        help="加载本地 GeoIP JSON 缓存，仅用于 HTML 攻击源地理分布；不会联网查询")
     parser.add_argument("--html", metavar="FILE", help="本地 HTML 报告")
     parser.add_argument("--json", metavar="FILE", help="本地 JSON 报告")
     parser.add_argument("--csv", metavar="FILE", help="本地 CSV 事件列表")
@@ -261,6 +264,7 @@ def _cmd_remote_log(argv: List[str]) -> None:
         remote_args.extend(["--grep", pattern])
     _append_optional_arg(remote_args, "--audit-json", args.audit_json)
     _append_optional_arg(remote_args, "--out", args.out)
+    _append_optional_arg(remote_args, "--geoip-cache", args.geoip_cache)
     _append_optional_arg(remote_args, "--html", args.html)
     _append_optional_arg(remote_args, "--json", args.json)
     _append_optional_arg(remote_args, "--csv", args.csv)
@@ -618,6 +622,11 @@ def main():
         help="生成标准报告目录（index.html/report.json/events.csv/iocs.txt/report.sarif/manifest.json）",
     )
     parser.add_argument(
+        "--geoip-cache",
+        metavar="FILE",
+        help="加载本地 GeoIP JSON 缓存，仅用于 HTML 攻击源地理分布；不会联网查询",
+    )
+    parser.add_argument(
         "--config",
         metavar="FILE",
         help="加载自定义阈值 JSON（覆盖暴力破解 / DDoS 等内置阈值）",
@@ -784,6 +793,7 @@ def main():
                 ioc=args.ioc,
                 sarif=args.sarif,
                 bundle_dir=args.out,
+                geoip_cache_path=args.geoip_cache,
             ),
             manifest_context=_build_manifest_context(args, run_result),
         )

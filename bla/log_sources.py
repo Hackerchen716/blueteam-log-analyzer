@@ -89,6 +89,12 @@ LOG_SOURCE_PRIORITIES: Tuple[LogSourcePriority, ...] = (
         "首轮 7 天；核心主机 30 天",
     ),
     LogSourcePriority(
+        "P0", "主机与终端", "主机证据", "Shell history (.bash_history / .zsh_history)", "极高", 4,
+        "账号、主机、命令、命令序号、时间戳（如有）、当前工作目录（如有）",
+        "还原主机枚举、远程工具下载、TTY 升级、SUID/sudo 提权、凭据读取和清痕动作",
+        "疑似交互式入侵主机优先保全；与 auth、Web、EDR 时间线对齐",
+    ),
+    LogSourcePriority(
         "P0", "流量与解析", "日志源", "DNS 解析日志", "极高", 4,
         "时间、客户端 IP、查询域名、类型、响应、RCODE、解析服务器、域名分类",
         "发现 C2、DGA、DNS 隧道、恶意域名访问和内网感染主机",

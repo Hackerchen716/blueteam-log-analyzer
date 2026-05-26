@@ -48,6 +48,12 @@ bla logs/
 bla logs/ --out report/
 ```
 
+如果你已经有本地 GeoIP JSON 缓存，可以让 HTML 报告展示攻击源地理分布；BLA 不会联网查询 IP，缓存不可读或无法定位时会退回日志内地理字段，仍无结果则自动隐藏地图：
+
+```bash
+bla logs/ --out report/ --geoip-cache geo-cache.json
+```
+
 分析完成后打开 `report/index.html`。报告目录会同时生成：
 
 | 文件 | 用途 |
@@ -65,20 +71,22 @@ bla logs/ --out report/
 bla explain inc-001 --report report/report.json
 ```
 
-## v1.4.0
+## v1.4.1
 
-以前一些场景里，顶部 ATT&CK 攻击链、Incident 攻击拓扑和告警详情可能使用不同的阶段口径，导致同一批事件在不同视图里看起来数量或阶段不一致。这个版本把阶段语义、事件计数和报告展示统一到同一套逻辑上。
+v1.4.1 聚焦真实日志研判和报告交付：同类爆破/喷洒不再刷屏，重复身份突破案件合并成活动视图；HTML 报告在有本地地理数据时展示攻击源国家/地区热力图，没有可定位公网源 IP 时不显示地图；新增 Shell History 解析后，主机命令轨迹也能进入 Incident、攻击链和交付报告。
 
-| 方向 | v1.4.0 变化 |
+| 方向 | v1.4.1 变化 |
 | --- | --- |
-| 攻击链一致性 | ATT&CK 阶段拓扑、Incident 攻击拓扑、告警阶段统一按事件语义归类 |
-| 事件计数 | 攻击链按唯一事件计数，告警只补充阶段和技术信息，避免 alert + event 双重计数 |
-| P0 多源链路 | WAF、应用、EDR、DNS、代理、防火墙等日志可稳定串出入口、失陷、外联和外传 |
-| 阶段语义 | Webshell 归入主机失陷，sudo shell 归入权限提升，暴力破解/密码喷洒归入身份突破，敏感文件探测归入侦察 |
-| 报告展示 | 终端和 HTML kill chain 阶段列表同步扩展，减少报告视图之间的口径差 |
-| 回归测试 | 新增阶段归类、告警阶段、P0 golden incident 和报告展示一致性测试 |
+| 攻击源地图 | HTML 报告可通过日志自带地理字段或 `--geoip-cache` 本地缓存渲染国家/地区热力图，全程离线 |
+| 显示规则 | 内网、回环、保留地址和无法匹配地理位置的 IP 不进地图；没有定位结果时整块隐藏 |
+| 告警合并 | 暴力破解、密码喷洒这类高重复告警在 HTML 展示层合并，JSON/SARIF 仍保留原始明细 |
+| 案件合并 | 仅源 IP 不同的身份突破案件合并成活动视图，突出 Top 来源 IP、账号和影响资产 |
+| Shell History | 解析 `.bash_history`、`.zsh_history` 和常见 history 文件，识别工具下载、TTY 升级、SUID/sudo 提权、凭据文件读取和清痕命令 |
+| 案件语义 | Shell 单源案件使用 `Shell 凭据访问轨迹`、`Shell 清痕轨迹` 等可研判主体，避免报告出现 `未知实体`、`未知来源` |
+| 报告跳转 | 顶部严重/高危/中危卡片可直接跳到对应告警或时间线，并自动套用过滤 |
+| 离线交付 | 地图边界作为包内静态资产随 HTML 生成链路使用，不依赖 CDN 或在线地图服务 |
 
-更多变更见 [v1.4.0 发布说明](https://github.com/Hackerchen716/blueteam-log-analyzer/blob/main/docs/releases/v1.4.0.md)，历史版本见 [docs/releases](https://github.com/Hackerchen716/blueteam-log-analyzer/tree/main/docs/releases)
+更多变更见 [v1.4.1 发布说明](docs/releases/v1.4.1.md)，历史版本见 [docs/releases](docs/releases)
 
 ## 多源攻击链示例
 
@@ -94,12 +102,13 @@ bla explain inc-001 --report report/report.json
 
 | 能力 | 说明 |
 | --- | --- |
-| 多源解析 | Windows XML/EVTX、Linux auth.log/secure、Apache/Nginx access log、HVV/重保 P0 CSV/JSONL/JSON/key=value、通用文本日志 |
+| 多源解析 | Windows XML/EVTX、Linux auth.log/secure、Apache/Nginx access log、Bash/Zsh shell history、HVV/重保 P0 CSV/JSONL/JSON/key=value、通用文本日志 |
 | 检测规则 | 覆盖暴力破解、密码喷洒、Web 攻击、横向移动、权限提升、持久化、防御规避、凭据访问、可疑执行、C2 外联、数据外传等场景 |
 | 国内画像 | `--profile cn-hvv` 增强 Shiro、Fastjson、Struts2、ThinkPHP、WebLogic、Spring、Webshell、敏感路径探测等常见痕迹 |
 | Incident 关联 | 按 IP、账号、主机、资产、URL、session、trace 等线索聚合事件和告警，输出可处置案件视图 |
 | 攻击链还原 | 按 ATT&CK / 应急 kill chain 顺序展示阶段、技术编号、日志源和关键事件 |
 | IOC 提取 | 提取 IP、域名、URL、Hash、账号、路径、进程、命令，并过滤静态资源和低价值噪音 |
+| 攻击源地理分布 | 可选加载本地 GeoIP 缓存或日志自带地理字段，在 HTML 报告中展示可定位公网源 IP 分布 |
 | 报告交付 | 一次生成 HTML、JSON、CSV、IOC、SARIF、manifest，兼顾人工研判和系统集成 |
 | 离线与自动化 | 本地离线运行，支持 `--exit-on`、`benchmark`、Remote Workspace、规则校验和 CI 流水线 |
 
@@ -109,6 +118,7 @@ bla explain inc-001 --report report/report.json
 | --- | --- | --- |
 | Windows 事件日志 | `.xml`、`.evtx` | 登录、RDP、账号变更、服务安装、计划任务、日志清除、Sysmon 进程与网络行为 |
 | Linux 认证日志 | `auth.log`、`secure` | SSH 爆破、成功登录、sudo、root 登录、账号创建 |
+| Shell 历史 | `.bash_history`、`.zsh_history`、`*history` | 主机枚举、工具下载、TTY 升级、SUID/sudo 提权、凭据文件读取、清痕命令；目录扫描会保留 Bash/Zsh history 证据文件 |
 | Web 访问日志 | Apache/Nginx Combined | SQLi、XSS、LFI/RFI、RCE、扫描器、敏感文件探测、异常流量 |
 | HVV/重保 P0 日志 | CSV、JSONL、JSON object、JSON 数组、key=value | WAF、VPN、堡垒机、DNS、代理/NAT、防火墙、EDR、应用日志 |
 | 通用文本日志 | 任意文本 | 关键字提取、轻量告警和 IOC 辅助提取 |
@@ -129,11 +139,30 @@ pip install -U "blueteam-log-analyzer[evtx]"
 bla /var/log/ --out report/ --exit-on none
 ```
 
+带本地 GeoIP 缓存生成攻击源地图：
+
+```bash
+bla /var/log/ --out report/ --geoip-cache geo-cache.json --exit-on none
+```
+
+缓存可以是按 IP 索引的 JSON 对象，例如：
+
+```json
+{
+  "8.8.8.8": {
+    "country": "United States",
+    "regionName": "California",
+    "city": "Mountain View"
+  }
+}
+```
+
 自动识别不准时可以指定解析器：
 
 ```bash
 bla access.log --type web-access --out report/
 bla Security.xml --type windows-xml --out report/
+bla .bash_history --type shell-history --out report/
 bla hvv_chain.jsonl --type p0-security --profile cn-hvv --out report/
 ```
 
@@ -235,15 +264,15 @@ bla logs/ --allowlist docs/allowlist-example.json --out report/
 | 侦察 | 扫描器、敏感文件探测、目录枚举 | T1595, T1083 |
 | 初始访问 | Web 漏洞利用、Log4Shell/JNDI、国内常见 Web 漏洞痕迹 | T1190 |
 | 身份突破 | SSH/RDP/Kerberos 暴力破解、密码喷洒、爆破后成功登录 | T1110.001, T1110.003 |
-| 执行 | 高危 PowerShell、命令注入、LOLBins | T1059, T1218 |
+| 执行 | 高危 PowerShell、命令注入、LOLBins、Shell TTY 升级、远程工具下载 | T1059, T1218, T1105 |
 | 持久化 | 服务安装、计划任务、账号创建 | T1543.003, T1053.005, T1136 |
 | 权限提升 | sudo shell、特权组变更、root 直接登录 | T1548.003, T1098.001 |
 | 主机失陷 | Webshell、EDR/XDR 高危终端告警、恶意进程痕迹 | T1505.003 |
 | 横向移动 | RDP 跳转、显式凭据、Pass-the-Hash 指示器 | T1021.001, T1550.002 |
 | 命令控制 | DNS 隧道、高风险代理访问、C2 外联 | T1071, T1071.004, T1105 |
 | 数据外传 | 大流量外联、敏感数据外传迹象 | T1041 |
-| 凭据访问 | Mimikatz、LSASS 访问、凭据转储 | T1003.001 |
-| 防御规避 | 日志清除、审计策略修改、安全能力关闭 | T1070.001, T1562.002 |
+| 凭据访问 | Mimikatz、LSASS 访问、凭据转储、Linux 敏感凭据文件读取 | T1003.001, T1003.008 |
+| 防御规避 | 日志清除、审计策略修改、安全能力关闭、Shell history 清除和痕迹删除 | T1070.001, T1070.003, T1070.004, T1562.002 |
 
 ## 报告截图
 

@@ -25,6 +25,7 @@ from .p0_security import (
     parse_p0_security_lines,
 )
 from .registry import ParserContext, ParserRegistry, ParserSpec, normalize_aliases
+from .shell_history import parse_shell_history, parse_shell_history_file
 from .stats import compute_stats
 from .web_access import parse_web_access, parse_web_access_file
 from .windows_evtx import parse_windows_evtx, parse_windows_xml, parse_windows_xml_file
@@ -126,6 +127,14 @@ def _ensure_default_parsers() -> None:
             description="HVV/重保 structured security logs",
         ),
         ParserSpec(
+            name="shell-history",
+            aliases=normalize_aliases(("bash-history", "bash", "zsh", "history", "shell")),
+            can_parse=_can_parse_shell_history,
+            parse_file=lambda ctx: parse_shell_history_file(ctx.file_path or "", ctx.source_name),
+            parse_content=lambda ctx: parse_shell_history(ctx.content or "", ctx.source_name),
+            description="Bash/Zsh shell history command traces",
+        ),
+        ParserSpec(
             name="generic",
             aliases=normalize_aliases(("text", "fallback")),
             can_parse=lambda _ctx: True,
@@ -159,6 +168,15 @@ def _can_parse_p0_security(context: ParserContext) -> bool:
     return looks_like_p0_security_log(context.file_path or context.source_name, context.sample_text)
 
 
+def _can_parse_shell_history(context: ParserContext) -> bool:
+    name = context.name_lower
+    if any(item in name for item in ("bash_history", ".bash_history", "zsh_history", ".zsh_history", "shell_history")):
+        return True
+    if name.endswith("history") or name.endswith(".history"):
+        return _looks_like_shell_history(context.sample_text)
+    return False
+
+
 def _parse_p0_content(context: ParserContext) -> ParseResult:
     content = context.content or ""
     stripped = content.lstrip()
@@ -186,6 +204,21 @@ def _looks_like_web_log(sample: str) -> bool:
         r'^\s*\S+\s+\S+\s+\S+\s+\[[^\]]+\]\s+"(GET|POST|PUT|DELETE|HEAD|OPTIONS)\s+/',
         sample, re.I | re.M
     ))
+
+
+def _looks_like_shell_history(sample: str) -> bool:
+    hits = 0
+    for raw in sample.splitlines()[:40]:
+        line = raw.strip()
+        if not line:
+            continue
+        if re.match(r"^:\s*\d{9,}:\d+;", line):
+            hits += 1
+        elif re.search(r"\b(?:sudo\s+-l|whoami|id|wget\s+https?://|curl\s+https?://|cat\s+/etc/(?:passwd|shadow)|find\s+/|history\s+-c)\b", line, re.I):
+            hits += 1
+        if hits >= 2:
+            return True
+    return False
 
 
 def _parse_generic(content: str, source_file: str) -> ParseResult:

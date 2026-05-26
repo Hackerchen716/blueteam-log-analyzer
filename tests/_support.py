@@ -56,6 +56,7 @@ from bla.parsers.p0_security import (
     parse_p0_security_json_file,
     parse_p0_security_lines,
 )
+from bla.parsers.shell_history import parse_shell_history
 from bla.parsers.web_access import parse_web_access
 from bla.parsers.windows_evtx import _parse_xml_event, parse_windows_xml, parse_windows_xml_file
 from bla.remote import RemoteWorkspace, SSHClient

