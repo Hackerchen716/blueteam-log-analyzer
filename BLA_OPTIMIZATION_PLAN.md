@@ -34,6 +34,8 @@
 - `git diff --check` 通过。
 - GitHub Release 触发的 Publish workflow 已成功发布到 PyPI。
 - 首次 push Tests workflow 在 Windows pytest 阶段失败，原因是测试 fixture 使用了 Windows 文件系统不允许的 ESC/BEL 路径名；已改为平台安全的恶意路径测试，并重新通过本地定点回归和 `release_check.py --build`。
+- 修复后的 GitHub Tests workflow `26638972410` 已通过，覆盖 Ubuntu/macOS/Windows 与 Python 3.9-3.12。
+- PyPI 干净虚拟环境安装验证通过：`blueteam-log-analyzer==1.4.3` 可安装，`bla --version` 输出 `BLA 1.4.3`，`validate-rules --strict-metadata`、`ssh --help`、`remote-log --help` 和样例分析均通过。
 
 ### 修改结果
 - 已将版本号提升到 `1.4.3`。
@@ -43,8 +45,8 @@
 - 已将终端清洗相关测试里的恶意文件名改为 Windows 可创建的路径片段，仍保留 secret 脱敏断言；非 Windows 平台继续覆盖 ESC/BEL 控制字符路径。
 
 ### 剩余问题
-- 等待修复后的 push Tests workflow 重新跑完。
-- 仍需做 PyPI 干净环境安装验证。
+- `v1.4.3` 已发布；本轮未发现 P0/P1 已知问题。
+- 历史中保留一次已修复的 Windows Tests 失败 run `26638772645`，后续 run `26638972410` 已通过。
 
 ## 2026-05-29 - P0 Proxy Vendor Request URL Fields
 
