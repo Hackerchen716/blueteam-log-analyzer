@@ -625,6 +625,36 @@ class OutputRegressionTests(unittest.TestCase):
             self.assertEqual(len(manifest["outputs"]), 5)
             self.assertEqual(manifest["summary"]["alert_count"], len(summary.alerts))
 
+    def test_report_bundle_sanitizes_terminal_output_paths(self):
+        """报告保存提示不得把恶意输出路径中的控制字符或 secret 打到终端。"""
+        result = ParseResult("empty.log", "Fixture", [], ParseStats(total=0))
+        summary = AnalysisSummary(
+            risk_score=0,
+            risk_level=ThreatLevel.INFO,
+            alerts=[],
+            timeline=[],
+            attack_chain=[],
+            recommendations=[],
+            total_events=0,
+            files_analyzed=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "\x1b]52;c;SGVsbG8=\x07token=super-secret"
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                paths = generate_report_bundle([result], summary, str(out_dir))
+            terminal_text = buf.getvalue()
+            html_exists = Path(paths["html"]).exists()
+
+        self.assertTrue(html_exists)
+        self.assertNotIn("\x1b", terminal_text)
+        self.assertNotIn("\x1b]52", terminal_text)
+        self.assertNotIn("\x07", terminal_text)
+        self.assertNotIn("SGVsbG8", terminal_text)
+        self.assertNotIn("super-secret", terminal_text)
+        self.assertIn("token=<redacted>", terminal_text)
+
     def test_json_report_contains_incident_case_view(self):
         """JSON 报告必须包含 incident，便于 explain/API/二次处理。"""
         base = Path(__file__).parent / "fixtures" / "p0"
@@ -693,6 +723,51 @@ class OutputRegressionTests(unittest.TestCase):
         self.assertEqual(data["events"][0]["message"], "password=<redacted>")
         self.assertEqual(len(data["timeline"]), 200)
         self.assertTrue(data["truncation"]["timeline"]["truncated"])
+
+    def test_json_report_can_limit_or_omit_events_and_raw_lines(self):
+        events = [
+            LogEvent(
+                id=f"evt-{idx}",
+                timestamp="2024-03-15T10:00:00",
+                level=ThreatLevel.INFO,
+                category="测试",
+                source="fixture",
+                source_file="events.log",
+                message=f"event {idx}",
+                raw_line="abcdefghi",
+            )
+            for idx in range(3)
+        ]
+        result = ParseResult("events.log", "Fixture", events, ParseStats(total=3, info=3))
+        summary = AnalysisSummary(
+            risk_score=0,
+            risk_level=ThreatLevel.INFO,
+            alerts=[],
+            timeline=[],
+            attack_chain=[],
+            recommendations=[],
+            total_events=3,
+            files_analyzed=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            limited_path = Path(tmp) / "limited.json"
+            generate_json_report([result], summary, str(limited_path), events_limit=2, raw_line_limit=5)
+            limited = _json.loads(limited_path.read_text(encoding="utf-8"))
+
+            omitted_path = Path(tmp) / "omitted.json"
+            generate_json_report([result], summary, str(omitted_path), include_events=False)
+            omitted = _json.loads(omitted_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(limited["events"]), 2)
+        self.assertEqual(limited["events"][0]["raw_line"], "abcde")
+        self.assertTrue(limited["events"][0]["raw_line_truncated"])
+        self.assertEqual(limited["events"][0]["raw_line_length"], 9)
+        self.assertEqual(limited["truncation"]["events"]["total"], 3)
+        self.assertEqual(limited["truncation"]["events"]["returned"], 2)
+        self.assertTrue(limited["truncation"]["events"]["truncated"])
+        self.assertFalse(omitted["truncation"]["events"]["included"])
+        self.assertEqual(omitted["events"], [])
 
     def test_html_report_renders_incident_killchain_chips(self):
         """HTML 报告 incident 卡片必须画出 mini kill chain，命中阶段 chip 高亮。"""

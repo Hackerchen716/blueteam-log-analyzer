@@ -77,4 +77,4 @@ def generate_csv_report(
                 "raw_line_length": str(len(raw_line)),
             })
 
-    safe_print(f"  [✓] CSV 报告已保存: {output_path}  ({len(all_events)} 条事件)")
+    safe_print(f"  [✓] CSV 报告已保存: {sanitize_report_text(output_path)}  ({len(all_events)} 条事件)")

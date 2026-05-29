@@ -1,4 +1,5 @@
 """工具函数"""
+import argparse
 import datetime
 import ipaddress
 import os
@@ -20,6 +21,10 @@ _OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)", re.S)
 _CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ESC_RE = re.compile(r"\x1b[ -/]*[@-~]")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+_ESCAPED_OSC_RE = re.compile(r"\\x1b\].*?(?:\\x07|\\x1b\\\\)", re.I | re.S)
+_ESCAPED_CSI_RE = re.compile(r"\\x1b\[[0-?]*[ -/]*[@-~]", re.I)
+_ESCAPED_ESC_RE = re.compile(r"\\x1b[ -/]*[@-~]", re.I)
+_ESCAPED_CONTROL_RE = re.compile(r"\\x(?:0[0-8bcef]|1[0-9a-f]|7f|8[0-9a-f]|9[0-9a-f])", re.I)
 _SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?i)\b("
     r"cookie|set-cookie|x-api-key|api[_-]?key|token|access[_-]?token|"
@@ -30,6 +35,13 @@ _AUTHORIZATION_RE = re.compile(
     r"(?i)\b(authorization)\b\s*[:=]\s*(?:Bearer\s+)?([^\s;&,\"]+|\"[^\"]*\"|'[^']*')"
 )
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
+
+
+class SafeArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser variant that sanitizes attacker-controlled error text."""
+
+    def error(self, message):
+        super().error(sanitize_report_text(message))
 
 def gen_id(prefix: str = "evt") -> str:
     global _counter
@@ -126,6 +138,10 @@ def truncate(s: str, n: int = 120) -> str:
 def strip_terminal_control(value: object) -> str:
     """Remove terminal control sequences from attacker-controlled text."""
     text = str(value or "")
+    text = _ESCAPED_OSC_RE.sub("", text)
+    text = _ESCAPED_CSI_RE.sub("", text)
+    text = _ESCAPED_ESC_RE.sub("", text)
+    text = _ESCAPED_CONTROL_RE.sub("", text)
     text = _OSC_RE.sub("", text)
     text = _CSI_RE.sub("", text)
     text = _ESC_RE.sub("", text)
@@ -173,6 +189,18 @@ def safe_print(*values, sep: str = " ", end: str = "\n", file=None, flush: bool 
     safe_write(sep.join(str(v) for v in values) + end, stream)
     if flush:
         stream.flush()
+
+
+def format_sanitized_traceback(exc: BaseException) -> str:
+    """Return a traceback with terminal controls stripped and secrets masked."""
+    import traceback
+
+    return sanitize_report_text("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+
+
+def print_sanitized_traceback(exc: BaseException, file=None) -> None:
+    """Print a sanitized traceback to stderr by default."""
+    safe_write(format_sanitized_traceback(exc), file or sys.stderr)
 
 
 class SafeStream:

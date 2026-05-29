@@ -36,13 +36,10 @@ jobs:
         run: python bla_cli.py validate-rules --strict-metadata
 
       - name: Install test dependencies
-        run: python -m pip install --upgrade pytest
+        run: python -m pip install -e ".[dev]"
 
-      - name: Run pytest regressions
-        run: python -m pytest -q
-
-      - name: Run regression tests
-        run: python -m unittest discover -s tests -v
+      - name: Run pytest regressions with coverage
+        run: python -m pytest --cov=bla --cov=bla_cli --cov-report=term-missing
 
       - name: Smoke test Remote Workspace CLI
         run: python bla_cli.py ssh --help

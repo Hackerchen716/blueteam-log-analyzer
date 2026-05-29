@@ -25,10 +25,11 @@ from bla.config import (
     load_thresholds,
     load_thresholds_from_env,
     set_thresholds,
+    validate_thresholds,
 )
 from bla.core import AnalysisError, AnalysisOptions, collect_files, run_analysis
 from bla.core.pipeline import parse_files
-from bla.detection import DetectorRegistry, DetectorSpec, list_detector_names, run_detection
+from bla.detection import DetectionEventIndex, DetectorRegistry, DetectorSpec, list_detector_names, run_detection
 from bla.detection.engine import _dedup_alerts
 from bla.ioc import extract_iocs, format_ioc_report
 from bla.log_sources import LOG_SOURCE_PRIORITIES, format_log_source_priorities

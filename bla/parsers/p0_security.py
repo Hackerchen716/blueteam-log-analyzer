@@ -358,14 +358,22 @@ def _event_from_record(record: Dict[str, Any], raw_line: str, source_file: str) 
 
 def _build_waf_event(fields: Dict[str, str], raw_line: str, source_file: str) -> Optional[LogEvent]:
     text = _join_values(fields, (
-        "url", "uri", "path", "request", "query", "payload", "body",
-        "rule", "rulename", "ruleid", "attacktype", "threat", "message",
-        "useragent", "referer",
+        "url", "uri", "path", "request", "request_uri", "requesturi",
+        "request_url", "requesturl", "full_url", "fullurl", "query",
+        "payload", "body", "rule", "rule_name", "rulename", "ruleid",
+        "attacktype", "attack_type", "attackname", "attack_name", "threat",
+        "signature", "signature_name", "signaturename", "message",
+        "useragent", "user_agent", "referer",
     ))
     rule_name, level, tags, mitre = _classify_web_text(text)
     action = _field(fields, "action", "disposition", "policyaction")
     blocked = _is_block_action(action)
-    attack_label = _field(fields, "attacktype", "threat", "signature", "rulename", "rule")
+    attack_label = _field(
+        fields,
+        "attacktype", "attack_type", "attackname", "attack_name", "threat",
+        "signature", "signature_name", "signaturename", "rulename",
+        "rule_name", "rule",
+    )
     if not rule_name and attack_label:
         rule_name = truncate(attack_label, 60)
         level = ThreatLevel.HIGH
@@ -384,7 +392,7 @@ def _build_waf_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
         tags = list(dict.fromkeys(tags + ["blocked"]))
 
     method = _field(fields, "method", "requestmethod")
-    path = _field(fields, "uri", "url", "path", "requesturi", "request")
+    path = _field(fields, "uri", "url", "path", "request_uri", "requesturi", "request_url", "requesturl", "full_url", "fullurl", "request")
     src_ip = _src_ip(fields)
     status = _field(fields, "status", "statuscode", "responsecode")
     message = f"WAF {action or '告警'}: {rule_name}"
@@ -413,8 +421,17 @@ def _build_waf_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
 
 
 def _build_vpn_event(fields: Dict[str, str], raw_line: str, source_file: str) -> Optional[LogEvent]:
-    result = _field(fields, "result", "status", "outcome", "action", "event")
-    message_text = _join_values(fields, ("message", "reason", "eventname", "eventtype"))
+    result = _field(
+        fields,
+        "result", "status", "outcome", "auth_result", "authresult",
+        "login_result", "loginresult", "auth_status", "authstatus",
+        "login_status", "loginstatus", "action", "event",
+    )
+    message_text = _join_values(fields, (
+        "message", "reason", "auth_reason", "authreason",
+        "failure_reason", "failurereason", "eventname", "eventtype",
+        "event_action", "eventaction", "operation", "activity",
+    ))
     failed = _is_failed(result + " " + message_text)
     success = _is_success(result + " " + message_text)
     if not failed and not success and not re.search(r'login|auth|mfa|认证|登录', message_text, re.I):
@@ -438,7 +455,7 @@ def _build_vpn_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
         rule_name = "VPN 认证事件"
     user = _user(fields)
     ip = _src_ip(fields)
-    reason = _field(fields, "reason", "message", "error")
+    reason = _field(fields, "reason", "auth_reason", "failure_reason", "message", "error")
     msg = f"VPN {status_label}: 用户={user or '?'} 来源={ip or '?'}"
     if auth_observed and result:
         msg += f" 状态={truncate(result, 40)}"
@@ -464,13 +481,29 @@ def _build_vpn_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
 
 
 def _build_bastion_event(fields: Dict[str, str], raw_line: str, source_file: str) -> Optional[LogEvent]:
-    action = _field(fields, "action", "event", "eventtype", "operation")
+    action = _field(
+        fields,
+        "action", "action_type", "actiontype", "event", "eventtype",
+        "event_action", "eventaction", "operation", "operation_type",
+        "operationtype", "activity",
+    )
     command = _field(fields, "command", "cmd", "commandline", "input")
     result = _field(fields, "result", "status", "outcome")
     text = " ".join([action, command, result, _field(fields, "message")])
     user = _user(fields)
     src_ip = _src_ip(fields)
-    target = _field(fields, "target", "targethost", "dsthost", "server", "asset", "dstip", "destip")
+    target = _field(
+        fields,
+        "target", "target_host", "targethost", "target_asset",
+        "targetasset", "asset_name", "assetname", "dst_host", "dsthost",
+        "server", "asset", "dst_ip", "dstip", "dest_ip", "destip",
+    )
+    file_path = _field(
+        fields,
+        "file", "filename", "file_name", "path", "file_path", "filepath",
+        "src_file", "srcfile", "dst_file", "dstfile", "source_file",
+        "sourcefile", "target_file", "targetfile",
+    )
 
     if _is_failed(text) and re.search(r'login|auth|ssh|rdp|登录|认证', text, re.I):
         return _make_event(
@@ -481,6 +514,22 @@ def _build_bastion_event(fields: Dict[str, str], raw_line: str, source_file: str
             details=_details(fields, kind="bastion"),
             tags=["failed-login", "authentication", "bastion"],
             mitre_attack="T1110.001", rule_name="堡垒机登录失败",
+        )
+
+    if not command and _is_bastion_file_transfer(" ".join([text, file_path])):
+        msg = f"堡垒机文件传输: 用户={user or '?'} 目标={target or '?'}"
+        if file_path:
+            msg += f" 文件={truncate(file_path, 120)}"
+        if action:
+            msg += f" 动作={truncate(action, 40)}"
+        return _make_event(
+            prefix="p0", timestamp=_timestamp(fields), level=ThreatLevel.MEDIUM,
+            category="堡垒机", source="Bastion", source_file=source_file,
+            message=msg, raw_line=raw_line, ip=src_ip, user=user, host=target,
+            process=_field(fields, "process", "program"),
+            details=_details(fields, kind="bastion"),
+            tags=["bastion-command", "file-transfer", "bastion"],
+            mitre_attack="T1105", rule_name="堡垒机文件传输",
         )
 
     if command:
@@ -519,18 +568,25 @@ def _build_bastion_event(fields: Dict[str, str], raw_line: str, source_file: str
 
 
 def _build_dns_event(fields: Dict[str, str], raw_line: str, source_file: str) -> Optional[LogEvent]:
-    query = _field(fields, "query", "queryname", "domain", "fqdn", "qname", "hostname")
+    query = _field(fields, "query", "queryname", "dns_query", "dnsquery", "question", "rrname", "domain", "fqdn", "qname", "hostname")
     if not query:
         return None
     query_l = query.lower().strip(".")
-    category = _field(fields, "category", "threat", "classification", "securitycategory")
-    rcode = _field(fields, "rcode", "responsecode", "result")
+    category = _field(
+        fields,
+        "category", "threat", "classification", "security_category",
+        "securitycategory", "threat_category", "threatcategory",
+        "domain_category", "domaincategory", "query_category", "querycategory",
+        "dns_category", "dnscategory", "verdict", "disposition", "policy",
+        "policy_action", "policyaction", "rule", "signature",
+    )
+    rcode = _field(fields, "rcode", "response_code", "responsecode", "result", "status")
     suspicious = _dns_suspicion(query_l, category, rcode)
     if not suspicious:
         return None
     rule_name, level, tags, mitre = suspicious
     src_ip = _src_ip(fields)
-    answer = _field(fields, "answer", "answers", "response", "resolvedip")
+    answer = _field(fields, "answer", "answers", "response", "resolved_ip", "resolvedip", "response_ip", "responseip")
     msg = f"DNS 可疑查询: {query_l}"
     if answer:
         msg += f" -> {truncate(answer, 80)}"
@@ -545,11 +601,18 @@ def _build_dns_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
 
 
 def _build_proxy_event(fields: Dict[str, str], raw_line: str, source_file: str) -> Optional[LogEvent]:
-    url = _field(fields, "url", "uri", "request", "fullurl")
-    domain = _field(fields, "domain", "host", "dsthost", "desthost")
-    text = _join_values(fields, ("url", "uri", "domain", "category", "threat", "action", "message", "useragent"))
+    url = _field(fields, "url", "uri", "request_url", "requesturl", "request_uri", "requesturi", "full_url", "fullurl", "request")
+    domain = _field(fields, "domain", "host", "dsthost", "desthost", "dst_domain", "dest_domain", "destination_host")
+    text = _join_values(fields, (
+        "url", "uri", "request_url", "requesturl", "request_uri",
+        "requesturi", "full_url", "fullurl", "domain", "category",
+        "url_category", "threat_category", "risk_category",
+        "security_category", "classification", "threat", "verdict",
+        "disposition", "policy", "policy_action", "rule", "signature",
+        "action", "message", "useragent",
+    ))
     action = _field(fields, "action", "result", "outcome")
-    bytes_out = _int_field(fields, "bytesout", "sentbytes", "uploadbytes", "requestbytes", "bytes")
+    bytes_out = _bytes_out(fields, extra_names=_PROXY_BYTES_OUT_NAMES, generic_names=("bytes",))
     src_ip = _src_ip(fields)
     category = "代理/上网行为"
 
@@ -591,11 +654,16 @@ def _build_proxy_event(fields: Dict[str, str], raw_line: str, source_file: str) 
 
 
 def _build_firewall_event(fields: Dict[str, str], raw_line: str, source_file: str) -> Optional[LogEvent]:
-    action = _field(fields, "action", "result", "disposition")
+    action = _field(
+        fields,
+        "action", "result", "disposition", "policy_action", "policyaction",
+        "event_action", "eventaction", "rule_action", "ruleaction",
+        "session_action", "sessionaction",
+    )
     src_ip = _src_ip(fields)
     dst_ip = _dst_ip(fields)
     dst_port = _int_field(fields, "dstport", "destport", "destinationport", "dport", "port")
-    bytes_out = _int_field(fields, "bytesout", "sentbytes", "outbytes", "bytes")
+    bytes_out = _bytes_out(fields, generic_names=("bytes",))
     proto = _field(fields, "protocol", "proto")
 
     if _is_block_action(action) and dst_port in _SENSITIVE_PORTS:
@@ -632,14 +700,25 @@ def _build_firewall_event(fields: Dict[str, str], raw_line: str, source_file: st
 
 
 def _build_edr_event(fields: Dict[str, str], raw_line: str, source_file: str) -> Optional[LogEvent]:
-    title = _field(fields, "alert", "alertname", "threat", "threatname", "eventname", "signature", "rule")
-    severity = _field(fields, "severity", "level", "risk", "priority")
-    text = _join_values(fields, ("alert", "threat", "eventname", "message", "process", "commandline", "file", "path"))
+    title = _field(
+        fields,
+        "alert", "alert_name", "alertname", "detection", "detection_name",
+        "detectionname", "threat", "threat_name", "threatname", "event_name",
+        "eventname", "signature", "rule", "rule_name", "rulename",
+    )
+    severity = _field(fields, "severity", "level", "risk", "risk_level", "risklevel", "priority")
+    text = _join_values(fields, (
+        "alert", "alert_name", "detection", "detection_name", "threat",
+        "threat_name", "event_name", "message", "description", "process",
+        "process_name", "process_path", "image", "image_path", "commandline",
+        "command_line", "cmdline", "file", "file_path", "path", "signature",
+        "rule", "rule_name", "technique", "technique_id", "mitre", "mitre_id",
+    ))
     if not title and not severity and not _MALWARE_RE.search(text):
         return None
     level = _severity_to_level(severity, default=ThreatLevel.MEDIUM)
     tags = ["edr"]
-    mitre = _field(fields, "mitre", "technique", "mitreid") or None
+    mitre = _field(fields, "mitre", "technique", "technique_id", "techniqueid", "mitre_id", "mitreid") or None
     if _MALWARE_RE.search(text):
         tags.append("malware-indicator")
         if level.score < ThreatLevel.HIGH.score:
@@ -654,8 +733,8 @@ def _build_edr_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
     if re.search(r'powershell|certutil|mshta|regsvr32|rundll32|bitsadmin', text, re.I):
         tags.append("lolbin")
         mitre = mitre or "T1218"
-    process = _field(fields, "process", "processname", "image", "filename")
-    cmd = _field(fields, "commandline", "cmd", "command")
+    process = _field(fields, "process", "process_name", "processname", "process_path", "processpath", "image", "image_path", "imagepath", "filename")
+    cmd = _field(fields, "commandline", "command_line", "cmdline", "cmd", "command", "process_command_line", "processcommandline")
     msg = f"EDR 告警: {title or truncate(text, 80)}"
     if process:
         msg += f" 进程={truncate(process, 80)}"
@@ -673,10 +752,28 @@ def _build_edr_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
 
 
 def _build_app_event(fields: Dict[str, str], raw_line: str, source_file: str) -> Optional[LogEvent]:
-    text = _join_values(fields, ("message", "msg", "exception", "stacktrace", "url", "uri", "path", "action"))
-    result = _field(fields, "result", "status", "outcome")
+    text = _join_values(fields, (
+        "message", "msg", "exception", "stacktrace", "url", "uri", "path",
+        "action", "event", "event_type", "eventtype", "event_name", "eventname",
+        "operation", "activity", "auth_result", "authresult", "login_result",
+        "loginresult", "auth_status", "authstatus", "login_status",
+        "loginstatus", "reason", "auth_reason", "authreason",
+        "failure_reason", "failurereason",
+    ))
+    result = _field(
+        fields,
+        "result", "status", "outcome", "auth_result", "authresult",
+        "login_result", "loginresult", "auth_status", "authstatus",
+        "login_status", "loginstatus",
+    )
     user = _user(fields)
     ip = _src_ip(fields)
+    app_host = _field(
+        fields,
+        "host", "hostname", "app", "app_name", "appname", "service",
+        "service_name", "servicename", "application", "application_name",
+        "applicationname",
+    )
     if re.search(r'login|auth|认证|登录', text + " " + result, re.I):
         if _is_failed(text + " " + result):
             return _make_event(
@@ -684,7 +781,7 @@ def _build_app_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
                 category="应用认证", source="Application", source_file=source_file,
                 message=f"应用登录失败: 用户={user or '?'} 来源={ip or '?'}",
                 raw_line=raw_line, ip=ip, user=user,
-                host=_field(fields, "host", "hostname", "app", "service"),
+                host=app_host,
                 details=_details(fields, kind="application"),
                 tags=["failed-login", "authentication", "application"],
                 mitre_attack="T1110.001", rule_name="应用登录失败",
@@ -695,7 +792,7 @@ def _build_app_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
                 category="应用认证", source="Application", source_file=source_file,
                 message=f"应用登录成功: 用户={user or '?'} 来源={ip or '?'}",
                 raw_line=raw_line, ip=ip, user=user,
-                host=_field(fields, "host", "hostname", "app", "service"),
+                host=app_host,
                 details=_details(fields, kind="application"),
                 tags=["successful-login", "authentication", "application"],
                 mitre_attack="T1078", rule_name="应用登录成功",
@@ -711,7 +808,7 @@ def _build_app_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
             category="应用安全", source="Application", source_file=source_file,
             message=f"{rule_name}: {truncate(text, 160)}",
             raw_line=raw_line, ip=ip, user=user,
-            host=_field(fields, "host", "hostname", "app", "service"),
+            host=app_host,
             details=_details(fields, kind="application"),
             tags=list(dict.fromkeys(tags + ["application", "web-attack"])),
             mitre_attack=mitre or "T1190", rule_name=rule_name,
@@ -725,7 +822,7 @@ def _build_app_event(fields: Dict[str, str], raw_line: str, source_file: str) ->
             category="应用异常", source="Application", source_file=source_file,
             message=f"应用异常: {truncate(text, 160)}",
             raw_line=raw_line, ip=ip, user=user,
-            host=_field(fields, "host", "hostname", "app", "service"),
+            host=app_host,
             details=_details(fields, kind="application"),
             tags=["application-error"], rule_name="应用异常",
         )
@@ -839,7 +936,8 @@ def _field(fields: Dict[str, str], *names: str) -> str:
 def _src_ip(fields: Dict[str, str]) -> str:
     value = _field(
         fields, "src_ip", "source_ip", "client_ip", "remote_addr", "real_ip",
-        "xff", "x_forwarded_for", "src", "sip", "srcip", "sourceaddress",
+        "xff", "x_forwarded_for", "src", "src_addr", "source_addr",
+        "client_addr", "sip", "srcip", "sourceaddress",
         "ip", "client", "remoteip",
     )
     return _first_ip(value)
@@ -883,10 +981,15 @@ def _details(fields: Dict[str, str], kind: str) -> Dict[str, str]:
         "account": _user(fields),
         "action": _field(fields, "action", "disposition", "policy_action", "policyaction", "event", "operation"),
         "status": _field(fields, "status", "status_code", "statuscode", "response_code", "responsecode", "result", "outcome"),
-        "url": _field(fields, "url", "uri", "path", "request_uri", "requesturi", "request", "full_url", "fullurl"),
+        "url": _field(fields, "url", "uri", "path", "request_url", "requesturl", "request_uri", "requesturi", "request", "full_url", "fullurl"),
         "command": _field(fields, "command", "cmd", "command_line", "commandline", "input"),
         "process": _field(fields, "process", "process_name", "processname", "image", "filename", "program"),
-        "bytes_out": str(_int_field(fields, "bytes_out", "bytesout", "sent_bytes", "sentbytes", "upload_bytes", "uploadbytes", "out_bytes", "outbytes")),
+        "bytes_out": str(_bytes_out(
+            fields,
+            extra_names=_PROXY_BYTES_OUT_NAMES if kind == "proxy" else (),
+            generic_names=("bytes",),
+        )),
+        "direction": _direction(fields),
         "session_id": _field(fields, "session_id", "sessionid", "sid", "session"),
         "trace_id": _field(fields, "trace_id", "traceid", "request_id", "requestid"),
     }
@@ -978,12 +1081,86 @@ def _is_allow_action(text: str) -> bool:
     return bool(re.search(r'allow|accept|permit|pass|forward|success|允许|放行|通过', text or "", re.I))
 
 
+def _is_bastion_file_transfer(text: str) -> bool:
+    return bool(re.search(
+        r'\b(?:file[_ -]?(?:upload|download|transfer)|upload|download|scp|sftp)\b|文件|传输|上传|下载',
+        text or "",
+        re.I,
+    ))
+
+
 def _int_field(fields: Dict[str, str], *names: str) -> int:
     value = _field(fields, *names)
     if not value:
         return 0
     m = re.search(r'\d+', value.replace(",", ""))
     return int(m.group(0)) if m else 0
+
+
+_COMMON_BYTES_OUT_NAMES = (
+    "bytes_out", "bytesout",
+    "sent_bytes", "sentbytes", "bytes_sent", "bytessent",
+    "upload_bytes", "uploadbytes", "bytes_uploaded", "bytesuploaded",
+    "out_bytes", "outbytes", "tx_bytes", "txbytes",
+    "request_bytes", "requestbytes",
+)
+_PROXY_BYTES_OUT_NAMES = (
+    "cs_bytes", "csbytes",
+    "client_bytes", "clientbytes",
+    "client_to_server_bytes", "clienttoserverbytes",
+    "c2s_bytes", "c2sbytes",
+    "request_body_bytes", "requestbodybytes",
+    "req_body_bytes", "reqbodybytes",
+)
+_DIRECTIONAL_BYTES_OUT_NAMES = (
+    "orig_bytes", "origbytes",
+    "origin_bytes", "originbytes",
+    "originator_bytes", "originatorbytes",
+)
+
+
+def _bytes_out(
+    fields: Dict[str, str],
+    extra_names: Tuple[str, ...] = (),
+    generic_names: Tuple[str, ...] = (),
+) -> int:
+    direction = _direction(fields)
+    if direction and _is_inbound_direction(direction):
+        return 0
+    explicit = _int_field(
+        fields,
+        *(_COMMON_BYTES_OUT_NAMES + extra_names),
+    )
+    if explicit:
+        return explicit
+    if direction and _is_outbound_direction(direction):
+        return _int_field(fields, *(_DIRECTIONAL_BYTES_OUT_NAMES + generic_names))
+    return 0
+
+
+def _direction(fields: Dict[str, str]) -> str:
+    return _field(
+        fields,
+        "direction", "dir", "flow_direction", "flowdirection",
+        "traffic_direction", "trafficdirection",
+        "session_direction", "sessiondirection",
+    )
+
+
+def _is_outbound_direction(value: str) -> bool:
+    return bool(re.search(
+        r'\b(?:out|outbound|egress|upload|client[_ -]?to[_ -]?server|c2s)\b|出站|出向|外联|上行|上传|流出',
+        value or "",
+        re.I,
+    ))
+
+
+def _is_inbound_direction(value: str) -> bool:
+    return bool(re.search(
+        r'\b(?:in|inbound|ingress|download|server[_ -]?to[_ -]?client|s2c)\b|入站|入向|下行|下载|流入',
+        value or "",
+        re.I,
+    ))
 
 
 def _domain_from_url(url: str) -> str:

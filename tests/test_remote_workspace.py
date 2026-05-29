@@ -1,4 +1,5 @@
 from _support import *
+import shlex
 
 class RemoteWorkspaceRegressionTests(unittest.TestCase):
     def test_remote_workspace_bla_fetches_file_and_analyzes_locally(self):
@@ -64,6 +65,126 @@ class RemoteWorkspaceRegressionTests(unittest.TestCase):
             code = workspace.execute_line(f"bla access.log --out {tmp}/case --exit-on high --no-color")
 
         self.assertEqual(code, 1)
+
+    def test_remote_workspace_bla_accepts_low_exit_and_json_limits(self):
+        class FakeSSH:
+            target = "web01"
+
+            def fetch_file(self, remote_path, local_path, cwd, **kwargs):
+                Path(local_path).write_text(
+                    "9.9.9.9 - - [15/Mar/2024:10:01:00 +0800] "
+                    "\"GET /download.php?file=../../etc/passwd HTTP/1.1\" 200 10 \"-\" \"curl/8\"\n"
+                    "9.9.9.9 - - [15/Mar/2024:10:01:01 +0800] "
+                    "\"GET /.env HTTP/1.1\" 404 10 \"-\" \"curl/8\"\n",
+                    encoding="utf-8",
+                )
+
+        fake = FakeSSH()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout", io.StringIO()):
+            workspace = RemoteWorkspace(fake, initial_cwd="/var/log/nginx", print_fn=lambda *a, **k: print(*a, **k))
+            code = workspace.execute_line(
+                f"bla access.log --json {tmp}/report.json --exit-on low "
+                "--json-events-limit 1 --raw-line-limit 12 --no-color"
+            )
+            data = _json.loads((Path(tmp) / "report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 1)
+        self.assertEqual(len(data["events"]), 1)
+        self.assertEqual(data["truncation"]["events"]["returned"], 1)
+        self.assertTrue(data["events"][0]["raw_line_truncated"])
+        self.assertGreater(data["events"][0]["raw_line_length"], 12)
+        self.assertLessEqual(len(data["events"][0]["raw_line"]), 12)
+
+    def test_remote_workspace_report_write_error_redacts_terminal_output(self):
+        class FakeSSH:
+            target = "web01"
+
+            def fetch_file(self, remote_path, local_path, cwd, **kwargs):
+                Path(local_path).write_text(
+                    "9.9.9.9 - - [15/Mar/2024:10:01:00 +0800] "
+                    "\"GET /download.php?file=../../etc/passwd HTTP/1.1\" 200 10 \"-\" \"curl/8\"\n",
+                    encoding="utf-8",
+                )
+
+        fake = FakeSSH()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            bad_output = Path(tmp) / "\x1b]52;c;SGVsbG8=\x07token=super-secret"
+            bad_output.mkdir()
+            workspace = RemoteWorkspace(fake, initial_cwd="/var/log/nginx", print_fn=lambda *a, **k: print(*a, **k))
+            code = workspace.execute_line(
+                "bla access.log --json "
+                f"{shlex.quote(str(bad_output))} --exit-on none --no-color --max-alerts 0"
+            )
+
+        terminal_text = stdout.getvalue() + stderr.getvalue()
+        self.assertEqual(code, 1)
+        self.assertNotIn("\x1b", terminal_text)
+        self.assertNotIn("SGVsbG8", terminal_text)
+        self.assertNotIn("super-secret", terminal_text)
+        self.assertIn("token=<redacted>", terminal_text)
+        self.assertIn("报告写入失败", terminal_text)
+
+    def test_remote_workspace_argparse_error_redacts_terminal_output(self):
+        class FakeSSH:
+            target = "web01"
+
+        bad_value = "\x1b]52;c;SGVsbG8=\x07-token=super-secret"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            workspace = RemoteWorkspace(FakeSSH(), initial_cwd="/var/log", print_fn=lambda *a, **k: print(*a, **k))
+            code = workspace.execute_line(
+                "bla auth.log --exit-on "
+                f"{shlex.quote(bad_value)}"
+            )
+
+        terminal_text = stdout.getvalue() + stderr.getvalue()
+        self.assertEqual(code, 2)
+        self.assertNotIn("\x1b", terminal_text)
+        self.assertNotIn("SGVsbG8", terminal_text)
+        self.assertNotIn("super-secret", terminal_text)
+        self.assertIn("token=<redacted>", terminal_text)
+        self.assertIn("invalid choice", terminal_text)
+
+    def test_remote_workspace_ls_argument_error_redacts_terminal_output(self):
+        class FakeSSH:
+            target = "web01"
+
+        bad_value = "--\x1b]52;c;SGVsbG8=\x07-token=super-secret"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            workspace = RemoteWorkspace(FakeSSH(), initial_cwd="/var/log", print_fn=lambda *a, **k: print(*a, **k))
+            code = workspace.execute_line(f"ls {shlex.quote(bad_value)}")
+
+        terminal_text = stdout.getvalue() + stderr.getvalue()
+        self.assertEqual(code, 2)
+        self.assertNotIn("\x1b", terminal_text)
+        self.assertNotIn("SGVsbG8", terminal_text)
+        self.assertNotIn("super-secret", terminal_text)
+        self.assertIn("token=<redacted>", terminal_text)
+        self.assertIn("不支持的 ls 参数", terminal_text)
+
+    def test_remote_workspace_pwd_redacts_terminal_output(self):
+        class FakeSSH:
+            target = "web01"
+
+        bad_cwd = "/var/log/\x1b]52;c;SGVsbG8=\x07-token=super-secret"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            workspace = RemoteWorkspace(FakeSSH(), initial_cwd=bad_cwd, print_fn=lambda *a, **k: print(*a, **k))
+            code = workspace.execute_line("pwd")
+
+        terminal_text = stdout.getvalue() + stderr.getvalue()
+        self.assertEqual(code, 0)
+        self.assertNotIn("\x1b", terminal_text)
+        self.assertNotIn("SGVsbG8", terminal_text)
+        self.assertNotIn("super-secret", terminal_text)
+        self.assertIn("token=<redacted>", terminal_text)
+        self.assertIn("/var/log/", terminal_text)
 
     def test_remote_workspace_bla_accepts_rdp_filter(self):
         class FakeSSH:
@@ -214,6 +335,42 @@ class RemoteWorkspaceRegressionTests(unittest.TestCase):
         self.assertEqual(manifest["remote_collection"][0]["grep_patterns"], ["Failed"])
         self.assertEqual(audit["schema"], "bla-remote-collection-audit-v1")
         self.assertEqual(audit["collection"][0]["remote_label"], "web01:/var/log/auth.log")
+
+    def test_remote_workspace_audit_json_sanitizes_local_name(self):
+        class FakeSSH:
+            target = "web01"
+
+            def capture_command(self, command, local_path, cwd, **kwargs):
+                Path(local_path).write_text(
+                    "Mar 15 10:01:00 web01 sshd[123]: "
+                    "Failed password for root from 9.9.9.9 port 22 ssh2\n",
+                    encoding="utf-8",
+                )
+
+        remote_path = "/var/log/\x1b]52;c;SGVsbG8=\x07token=super-secret.log"
+        grep_value = "token=super-secret"
+        fake = FakeSSH()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout", io.StringIO()):
+            workspace = RemoteWorkspace(fake, initial_cwd="/var/log", print_fn=lambda *a, **k: print(*a, **k))
+            code = workspace.execute_line(
+                "bla "
+                f"{shlex.quote(remote_path)} --tail 10 --grep {shlex.quote(grep_value)} "
+                f"--out {tmp}/case --audit-json {tmp}/audit.json --exit-on none --no-color --max-alerts 0"
+            )
+            audit = _json.loads((Path(tmp) / "audit.json").read_text(encoding="utf-8"))
+            manifest = _json.loads((Path(tmp) / "case" / "manifest.json").read_text(encoding="utf-8"))
+
+        audit_text = _json.dumps(audit, ensure_ascii=False)
+        manifest_text = _json.dumps(manifest, ensure_ascii=False)
+        self.assertEqual(code, 0)
+        for text in (audit_text, manifest_text):
+            self.assertNotIn("\x1b", text)
+            self.assertNotIn("SGVsbG8", text)
+            self.assertNotIn("super-secret", text)
+            self.assertIn("token=<redacted>", text)
+        self.assertEqual(audit["collection"][0]["local_name"], "token=<redacted>")
+        self.assertEqual(audit["collection"][0]["grep_patterns"], ["token=<redacted>"])
+        self.assertEqual(manifest["remote_collection"][0]["local_name"], "token=<redacted>")
 
     def test_ssh_client_rejects_target_option_injection_and_inserts_separator(self):
         with self.assertRaises(ValueError):

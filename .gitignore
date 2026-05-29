@@ -52,6 +52,9 @@ htmlcov/
 .pytest_cache/
 .ruff_cache/
 
+# Local filing bundles
+soft-copyright-materials/
+
 # Logs
 *.log
 !sample_logs/*.log

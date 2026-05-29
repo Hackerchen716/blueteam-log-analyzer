@@ -5,7 +5,6 @@ keeps parsing, detection, correlation, and report generation on the local host.
 """
 from __future__ import annotations
 
-import argparse
 import datetime
 import hashlib
 import json
@@ -22,14 +21,16 @@ from ..core import AnalysisError, AnalysisOptions, AnalysisOutputs, run_analysis
 from ..models import ThreatLevel
 from ..output import print_terminal_report
 from ..parsers import list_parser_names
-from ..utils.helpers import strip_terminal_control
+from ..utils.helpers import SafeArgumentParser, sanitize_report_text
 
 PrintFn = Callable[..., None]
 
 _EXIT_THRESHOLDS = {
+    "none": None,
     "critical": ThreatLevel.CRITICAL.score,
     "high": ThreatLevel.HIGH.score,
     "medium": ThreatLevel.MEDIUM.score,
+    "low": ThreatLevel.LOW.score,
 }
 DEFAULT_REMOTE_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_REMOTE_COMMAND_TIMEOUT = 120
@@ -216,7 +217,7 @@ class RemoteWorkspace:
         try:
             parts = _split_workspace_line(line)
         except ValueError as e:
-            self.print(f"解析命令失败: {e}", file=sys.stderr)
+            self.print(f"解析命令失败: {_display_text(e)}", file=sys.stderr)
             return 2
         if not parts:
             return 0
@@ -228,7 +229,7 @@ class RemoteWorkspace:
             self._print_help()
             return 0
         if command == "pwd":
-            self.print(self.cwd)
+            self.print(_display_text(self.cwd))
             return 0
         if command == "cd":
             return self._cmd_cd(args)
@@ -273,7 +274,7 @@ class RemoteWorkspace:
         for item in args:
             if item.startswith("-"):
                 if item not in {"-l", "-a", "-h", "-la", "-al", "-lh", "-lah", "-alh"}:
-                    self.print(f"不支持的 ls 参数: {item}", file=sys.stderr)
+                    self.print(f"不支持的 ls 参数: {_display_text(item)}", file=sys.stderr)
                     return 2
                 flags.append(item)
             else:
@@ -311,7 +312,7 @@ class RemoteWorkspace:
         return self._print_result(result)
 
     def _cmd_bla(self, args: Sequence[str]) -> int:
-        parser = argparse.ArgumentParser(prog="bla", add_help=True)
+        parser = SafeArgumentParser(prog="bla", add_help=True)
         parser.add_argument("paths", nargs="+", help="远程日志文件路径")
         parser.add_argument("--tail", type=int, help="仅采集每个远程文件最后 N 行后分析")
         parser.add_argument("--grep", action="append", metavar="TEXT", help="仅保留包含关键词的行，可重复指定")
@@ -324,9 +325,15 @@ class RemoteWorkspace:
         parser.add_argument("--csv", metavar="FILE", help="本地 CSV 事件列表")
         parser.add_argument("--ioc", metavar="FILE", help="本地 IOC 清单")
         parser.add_argument("--sarif", metavar="FILE", help="本地 SARIF 报告")
+        parser.add_argument("--json-events-limit", type=int, metavar="N",
+                            help="限制 report.json 中 events 数组最多写入 N 条；默认不限制")
+        parser.add_argument("--no-json-events", action="store_true",
+                            help="report.json 不写入全量 events")
+        parser.add_argument("--raw-line-limit", type=int, metavar="N",
+                            help="限制 report.json 每条事件 raw_line 最大字符数；默认不限制")
         parser.add_argument("--profile", choices=("default", "cn-hvv"), default="default")
         parser.add_argument("--type", choices=["auto"] + list_parser_names(), default="auto")
-        parser.add_argument("--exit-on", choices=("none", "critical", "high", "medium"), default="critical")
+        parser.add_argument("--exit-on", choices=tuple(_EXIT_THRESHOLDS.keys()), default="critical")
         parser.add_argument("--rules", action="append", metavar="DIR")
         parser.add_argument("--allowlist", metavar="FILE")
         parser.add_argument("--config", metavar="FILE")
@@ -341,6 +348,15 @@ class RemoteWorkspace:
             return int(e.code or 0)
         if parsed.max_alerts < 0:
             self.print("--max-alerts 必须大于等于 0", file=sys.stderr)
+            return 2
+        if parsed.json_events_limit is not None and parsed.json_events_limit < 0:
+            self.print("--json-events-limit 必须大于等于 0", file=sys.stderr)
+            return 2
+        if parsed.raw_line_limit is not None and parsed.raw_line_limit < 0:
+            self.print("--raw-line-limit 必须大于等于 0", file=sys.stderr)
+            return 2
+        if parsed.no_json_events and parsed.json_events_limit is not None:
+            self.print("--no-json-events 不能和 --json-events-limit 同时使用", file=sys.stderr)
             return 2
         if parsed.tail is not None and not (1 <= parsed.tail <= 100000):
             self.print("--tail 必须在 1 到 100000 之间", file=sys.stderr)
@@ -365,7 +381,7 @@ class RemoteWorkspace:
                         grep_patterns=parsed.grep or [],
                     )
                 except RuntimeError as e:
-                    self.print(f"读取远程输入失败: {remote_item}: {e}", file=sys.stderr)
+                    self.print(f"读取远程输入失败: {_display_text(remote_item)}: {_display_text(e)}", file=sys.stderr)
                     return 1
                 local_paths.append(local_path)
                 labels[Path(local_path).name] = label
@@ -423,6 +439,9 @@ class RemoteWorkspace:
                         sarif=parsed.sarif,
                         bundle_dir=parsed.out,
                         geoip_cache_path=parsed.geoip_cache,
+                        include_json_events=not parsed.no_json_events,
+                        json_events_limit=parsed.json_events_limit,
+                        json_raw_line_limit=parsed.raw_line_limit,
                     ),
                     manifest_context=_remote_manifest_context(
                         parsed,
@@ -449,7 +468,7 @@ class RemoteWorkspace:
                         run_result.suppressed_events,
                     )
             except OSError as e:
-                self.print(f"报告写入失败: {e}", file=sys.stderr)
+                self.print(f"报告写入失败: {_display_text(e)}", file=sys.stderr)
                 return 1
             return _exit_code_for_alerts(run_result.summary.alerts, parsed.exit_on)
 
@@ -589,7 +608,7 @@ def _q(value: str) -> str:
 
 
 def _display_text(value: object) -> str:
-    return strip_terminal_control(value)
+    return sanitize_report_text(value)
 
 
 def _is_safe_ssh_target(value: str) -> bool:
@@ -622,6 +641,9 @@ def _remote_manifest_context(
             "rdp_only": parsed.rdp,
             "max_alerts": parsed.max_alerts,
             "full_evidence": bool(parsed.full_evidence),
+            "json_events_limit": parsed.json_events_limit,
+            "json_events_included": not parsed.no_json_events,
+            "json_raw_line_limit": parsed.raw_line_limit,
         },
         "remote": {
             "target": target,
@@ -639,7 +661,7 @@ def _remote_input_manifest_record(path: str, labels: dict[str, str]) -> dict:
     name = Path(path).name
     record = {
         "remote_label": labels.get(name, name),
-        "local_name": name,
+        "local_name": _display_text(name),
         "size_bytes": 0,
         "sha256": "",
     }
@@ -717,7 +739,7 @@ def _remote_collection_record(
         "cwd": _display_text(cwd),
         "remote_path": _display_text(remote_path),
         "remote_label": _display_text(label),
-        "local_name": Path(local_path).name,
+        "local_name": _display_text(Path(local_path).name),
         "method": method,
         "tail_lines": tail_lines,
         "grep_patterns": [_display_text(item) for item in grep_patterns],
@@ -758,7 +780,17 @@ def _write_remote_collection_audit(
         "suppressed_events": suppressed_events,
     }
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(audit, f, ensure_ascii=False, indent=2)
+        json.dump(_sanitize_audit_value(audit), f, ensure_ascii=False, indent=2)
+
+
+def _sanitize_audit_value(value):
+    if isinstance(value, str):
+        return _display_text(value)
+    if isinstance(value, list):
+        return [_sanitize_audit_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_audit_value(item) for key, item in value.items()}
+    return value
 
 
 def _split_workspace_line(line: str) -> List[str]:

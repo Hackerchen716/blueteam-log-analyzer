@@ -65,27 +65,34 @@ bla logs/ --out report/ --geoip-cache geo-cache.json
 | `report.sarif` | SARIF 2.1.0，适合 GitHub Code Scanning 等平台 |
 | `manifest.json` | 交付清单和文件哈希 |
 
+大日志场景可以限制 JSON 事件明细体积：
+
+```bash
+bla logs/ --out report/ --json-events-limit 50000 --raw-line-limit 500
+bla logs/ --out report/ --no-json-events
+```
+
 需要解释某个案件或告警时：
 
 ```bash
 bla explain inc-001 --report report/report.json
 ```
 
-## v1.4.2
+## v1.4.3
 
-v1.4.2 聚焦输出安全和真实日志稳定性：IOC 导出会清洗终端控制字符并脱敏常见 secret；通用 fallback 解析改为逐行读取文件；Shell History 会从 history 文件路径中提取账号/资产上下文；Geo 地图在保留离线渲染的同时，说明被排除和缺少地理数据的源 IP。
+v1.4.3 聚焦真实 P0/HVV 日志兼容、输出安全和大日志交付控制：CLI 主入口拆入包内模块并保留兼容 shim；JSON 报告可限制事件和 raw line 体积；Shell History 增加数据外传命令检测；P0 parser 兼容更多 WAF、DNS、Proxy/SWG、Firewall、VPN、EDR、堡垒机和应用审计厂商字段。
 
-| 方向 | v1.4.2 变化 |
+| 方向 | v1.4.3 变化 |
 | --- | --- |
-| IOC 导出 | `iocs.txt` 去除终端控制序列，并脱敏 token、Bearer、password、cookie 等常见敏感字段 |
-| 终端安全 | 终端报告、CLI 和远程采集工作区展示不可信文本时，会清洗控制字符并脱敏常见 secret |
-| 大文件稳定性 | 通用 fallback 解析器从文件路径逐行读取，不再为了 fallback 一次性读完整文件 |
-| Shell History | 保留 zsh 扩展时间戳，并从 `/home/user/.zsh_history`、`server:/home/user/.bash_history` 等路径提取账号/资产 |
-| 案件语义 | Shell 单源案件可生成 `alice 的 Shell 凭据访问轨迹` 这类带上下文的标题和证据 |
-| 攻击源地图 | 地图脚注展示已排除的内网/回环/保留源 IP，以及缺少地理数据的公网源 IP |
-| Release Gate | `scripts/release_check.py` 新增 v1.4.2 冒烟场景，覆盖 IOC 脱敏、Geo 计数和 Shell 上下文 |
+| CLI 架构 | `bla_cli.py` 保留为兼容入口，实际主入口迁移到 `bla/cli/main.py`，打包入口改为包内模块 |
+| 大日志 JSON | 新增 `--json-events-limit`、`--no-json-events` 和 `--raw-line-limit`，控制 `report.json` 事件明细体积 |
+| 输出安全 | 报告路径、异常、规则校验 issue、SARIF/CSV/JSON/manifest 等展示文本统一走报告清洗逻辑 |
+| Shell History | 识别 `scp`、`rsync`、`curl --upload-file`、`nc < file` 等疑似外传命令，并生成 `EXFIL-001` |
+| P0/HVV 兼容 | 扩展真实设备字段别名，覆盖 WAF 请求/攻击名、DNS 分类、Proxy/SWG URL 与分类、Firewall 动作、VPN/应用认证、堡垒机文件操作、EDR 检测名 |
+| 外传方向 | `bytes`、`cs-bytes`、`request_body_bytes`、`orig_bytes` 等外发字段按方向归一，避免入站/响应字节误报 |
+| Release Gate | `scripts/release_check.py` 新增 v1.4.3 冒烟场景，覆盖 JSON 限量、Shell 外传和 P0 厂商字段链路 |
 
-更多变更见 [v1.4.2 发布说明](docs/releases/v1.4.2.md)，历史版本见 [docs/releases](docs/releases)
+更多变更见 [v1.4.3 发布说明](docs/releases/v1.4.3.md)，历史版本见 [docs/releases](docs/releases)
 
 ## 多源攻击链示例
 

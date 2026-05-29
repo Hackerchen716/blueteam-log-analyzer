@@ -43,6 +43,9 @@ class AnalysisOutputs:
     sarif: Optional[str] = None
     bundle_dir: Optional[str] = None
     geoip_cache_path: Optional[str] = None
+    include_json_events: bool = True
+    json_events_limit: Optional[int] = None
+    json_raw_line_limit: Optional[int] = None
 
 
 @dataclass
@@ -224,7 +227,14 @@ def write_reports(
     if outputs.html:
         generate_html_report(parse_results, summary, outputs.html, geoip_cache_path=outputs.geoip_cache_path)
     if outputs.json:
-        generate_json_report(parse_results, summary, outputs.json)
+        generate_json_report(
+            parse_results,
+            summary,
+            outputs.json,
+            include_events=outputs.include_json_events,
+            events_limit=outputs.json_events_limit,
+            raw_line_limit=outputs.json_raw_line_limit,
+        )
     if outputs.csv:
         generate_csv_report(parse_results, summary, outputs.csv)
     if outputs.ioc:
@@ -238,6 +248,9 @@ def write_reports(
             outputs.bundle_dir,
             manifest_context=manifest_context,
             geoip_cache_path=outputs.geoip_cache_path,
+            include_json_events=outputs.include_json_events,
+            json_events_limit=outputs.json_events_limit,
+            json_raw_line_limit=outputs.json_raw_line_limit,
         )
 
 
@@ -245,7 +258,7 @@ def _configure_runtime(options: AnalysisOptions) -> None:
     if options.syslog_year is not None:
         set_syslog_year(options.syslog_year)
 
-    thresholds = load_thresholds_from_env(DEFAULT_THRESHOLDS)
+    thresholds = load_thresholds_from_env(DEFAULT_THRESHOLDS, validate=options.config_path is None)
     if options.config_path:
         thresholds = load_thresholds(options.config_path, base=thresholds)
     set_thresholds(thresholds)

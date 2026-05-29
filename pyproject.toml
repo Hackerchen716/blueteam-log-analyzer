@@ -47,7 +47,7 @@ dev = [
 ]
 
 [project.scripts]
-bla = "bla_cli:main"
+bla = "bla.cli.main:main"
 
 [tool.setuptools]
 py-modules = ["bla_cli"]

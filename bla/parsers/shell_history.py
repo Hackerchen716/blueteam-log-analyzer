@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import re
+import shlex
 import time
 from typing import Dict, Iterable, List, Optional
 
@@ -24,6 +25,17 @@ _NOISE_RE = re.compile(
 )
 
 _DOWNLOAD_RE = re.compile(r"\b(?:wget|curl|fetch|git\s+clone)\b.*(?:https?://|ftp://)", re.I)
+_UPLOAD_RE = re.compile(r"\b(?:curl|wget)\b.*(?:--upload-file|-T\s+|-F\s+[^=\s]+=@)", re.I)
+_NETCAT_EXFIL_RE = re.compile(
+    r"\b(?:nc|ncat|netcat)\b\s+\S+\s+\d{1,5}\b[^|;&\n]*<\s*(?:/|~|\./|\../)[^\s;&|]+",
+    re.I,
+)
+_PIPE_EXFIL_RE = re.compile(r"\b(?:tar|gzip|zip|7z)\b.+\|\s*(?:curl|nc|ncat|netcat)\b", re.I)
+_REMOTE_DEST_RE = re.compile(r"^(?:[^@\s:]+@)?[^:\s]+:[/\\].+")
+_LOCAL_SOURCE_RE = re.compile(
+    r"^(?:/|~|\./|\../|[A-Za-z]:[\\/]|[^@\s:]+\.(?:sql|sqlite|db|dump|bak|zip|tar|tgz|gz|7z|rar|csv|xlsx?|json|env|pem|key))",
+    re.I,
+)
 _EXPLOIT_TOOL_RE = re.compile(r"linpeas|linux-exploit-suggester|les\.sh|pspy|dirtycow|exploit|enum4linux", re.I)
 _SHELL_UPGRADE_RE = re.compile(
     r"pty\.spawn|/bin/(?:ba)?sh\s+-i|os\.execl\([^)]*(?:/bin/)?sh|(?:^|\s)(?:nc|ncat|socat)\b.*(?:-e|exec)",
@@ -214,6 +226,13 @@ def _command_to_event(
         mitre = "T1548.003"
         rule_name = "提权命令痕迹"
         action = "privilege-command"
+    elif _is_data_exfiltration_command(command):
+        level = ThreatLevel.HIGH
+        category = "数据外传"
+        tags += ["data-exfiltration", "shell-exfiltration"]
+        mitre = "T1041"
+        rule_name = "Shell 数据外传命令"
+        action = "data-exfiltration"
     elif _DOWNLOAD_RE.search(command):
         level = ThreatLevel.HIGH if _EXPLOIT_TOOL_RE.search(command) else ThreatLevel.MEDIUM
         category = "工具下载"
@@ -276,3 +295,34 @@ def _command_name(command: str) -> Optional[str]:
         return command.strip().split()[0]
     except IndexError:
         return None
+
+
+def _is_data_exfiltration_command(command: str) -> bool:
+    if _UPLOAD_RE.search(command) or _NETCAT_EXFIL_RE.search(command) or _PIPE_EXFIL_RE.search(command):
+        return True
+    return _is_remote_copy_upload(command)
+
+
+def _is_remote_copy_upload(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    if not tokens:
+        return False
+    tool = tokens[0].rsplit("/", 1)[-1].lower()
+    if tool not in {"scp", "rsync"}:
+        return False
+    args = [item for item in tokens[1:] if item and not item.startswith("-")]
+    if len(args) < 2:
+        return False
+    destination = args[-1]
+    if not _is_remote_destination(destination):
+        return False
+    return any(_LOCAL_SOURCE_RE.match(item) and not _is_remote_destination(item) for item in args[:-1])
+
+
+def _is_remote_destination(value: str) -> bool:
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        return False
+    return bool(_REMOTE_DEST_RE.match(value))

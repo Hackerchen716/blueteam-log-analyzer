@@ -64,7 +64,7 @@ def generate_manifest(
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(_sanitize_manifest_value(manifest), f, ensure_ascii=False, indent=2)
 
-    safe_print(f"  [✓] 交付清单已保存: {output_path}")
+    safe_print(f"  [✓] 交付清单已保存: {sanitize_report_text(output_path)}")
 
 
 def _input_records(parse_results: Iterable[ParseResult]) -> List[Dict[str, Any]]:

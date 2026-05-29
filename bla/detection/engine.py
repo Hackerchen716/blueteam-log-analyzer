@@ -545,6 +545,22 @@ def detect_suspicious_execution(events: List[LogEvent]) -> List[DetectionAlert]:
     return alerts
 
 
+def detect_data_exfiltration(events: List[LogEvent]) -> List[DetectionAlert]:
+    shell_exfil = [e for e in events if "shell-exfiltration" in e.tags or "data-exfiltration" in e.tags]
+    if not shell_exfil:
+        return []
+    return [DetectionAlert(
+        id="a"+gen_id("xf"), rule_id="EXFIL-001", rule_name="Shell 数据外传命令",
+        description=f"命令历史中检测到 {len(shell_exfil)} 条疑似本地文件外传命令",
+        level=ThreatLevel.HIGH, category="数据外传",
+        mitre_attack="T1041", mitre_phase="数据外传",
+        affected_events=[e.id for e in shell_exfil],
+        evidence=[f"{e.details.get('sequence', '?')}: {e.details.get('command') or e.message}" for e in shell_exfil[:5]],
+        recommendation="核查外传命令执行账号、源主机、目标地址和传输对象，结合代理/DNS/防火墙/DLP 确认数据范围。",
+        timestamp=max(e.timestamp for e in shell_exfil), confidence="high",
+    )]
+
+
 def detect_lateral_movement(events: List[LogEvent]) -> List[DetectionAlert]:
     alerts = []
     rdp = [e for e in events if "rdp" in e.tags and "lateral-movement" in e.tags]
@@ -1208,6 +1224,8 @@ def _gen_recommendations(alerts: List[DetectionAlert]) -> List[str]:
         add("【高危】部署 WAF，修复已识别的 Web 漏洞，检查是否有数据泄露")
     if any(a.rule_id.startswith("P0-C2") for a in alerts):
         add("【高危】核查 DNS/代理/防火墙外联链路，定位源主机进程并封禁恶意域名或 IP")
+    if any(a.rule_id.startswith("EXFIL") for a in alerts):
+        add("【高危】核查疑似外传命令对应账号、文件、目标地址和代理/防火墙记录，评估敏感数据影响范围")
     if any(a.rule_id.startswith("P0-EXFIL") for a in alerts):
         add("【高危】核查疑似外传流量对应账号、文件和业务系统，评估敏感数据影响范围")
     if any(a.rule_id.startswith("P0-BASTION") for a in alerts):
@@ -1270,6 +1288,10 @@ def _select_execution_events(index: DetectionEventIndex) -> List[LogEvent]:
     )
 
 
+def _select_exfiltration_events(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.tags_any("shell-exfiltration", "data-exfiltration")
+
+
 def _select_lateral_events(index: DetectionEventIndex) -> List[LogEvent]:
     return index.tags_any("rdp", "lateral-movement", "explicit-creds")
 
@@ -1278,6 +1300,17 @@ def _select_recon_events(index: DetectionEventIndex) -> List[LogEvent]:
     return index.union(
         index.categories("流量异常"),
         index.tags_any("scanning", "scanner", "recon", "ddos"),
+    )
+
+
+def _select_credential_events(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.tags_any(
+        "credential-access",
+        "linux-credential-file",
+        "credential-dump",
+        "lsass-dump",
+        "lsass",
+        "malware-indicator",
     )
 
 
@@ -1307,8 +1340,9 @@ def _ensure_default_detectors() -> None:
         DetectorSpec("privilege-escalation", detect_privilege_escalation, selector=_select_privilege_events),
         DetectorSpec("persistence", detect_persistence, selector=_select_persistence_events),
         DetectorSpec("defense-evasion", detect_defense_evasion, selector=_select_defense_evasion_events),
-        DetectorSpec("credential-access", detect_credential_access),
+        DetectorSpec("credential-access", detect_credential_access, selector=_select_credential_events),
         DetectorSpec("suspicious-execution", detect_suspicious_execution, selector=_select_execution_events),
+        DetectorSpec("data-exfiltration", detect_data_exfiltration, selector=_select_exfiltration_events),
         DetectorSpec("lateral-movement", detect_lateral_movement, selector=_select_lateral_events),
         DetectorSpec("web-attacks", detect_web_attacks, selector=lambda index: index.tags_any("web-attack")),
         DetectorSpec("reconnaissance", detect_reconnaissance, selector=_select_recon_events),

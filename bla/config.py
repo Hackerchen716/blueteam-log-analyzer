@@ -69,7 +69,7 @@ def load_thresholds(path: str, base: Thresholds = DEFAULT_THRESHOLDS) -> Thresho
     return _merge(base, raw)
 
 
-def load_thresholds_from_env(base: Thresholds = DEFAULT_THRESHOLDS) -> Thresholds:
+def load_thresholds_from_env(base: Thresholds = DEFAULT_THRESHOLDS, validate: bool = True) -> Thresholds:
     """读取 ``BLA_THRESHOLD_*`` 环境变量覆盖默认值。
 
     例：``BLA_THRESHOLD_BRUTE_FORCE_HIGH=10`` 把 brute_force_high 改成 10。
@@ -83,10 +83,10 @@ def load_thresholds_from_env(base: Thresholds = DEFAULT_THRESHOLDS) -> Threshold
         attr = key[len(prefix):].lower()
         if attr in field_names:
             overrides[attr] = value
-    return _merge(base, overrides)
+    return _merge(base, overrides, validate=validate)
 
 
-def _merge(base: Thresholds, overrides: Dict[str, Any]) -> Thresholds:
+def _merge(base: Thresholds, overrides: Dict[str, Any], validate: bool = True) -> Thresholds:
     """把字符串/数字 overrides 合并到 base，自动按字段类型 cast。"""
     field_types = {f.name: f.type for f in fields(Thresholds)}
     cleaned: Dict[str, Any] = {}
@@ -103,10 +103,33 @@ def _merge(base: Thresholds, overrides: Dict[str, Any]) -> Thresholds:
                 cleaned[key] = val
         except (TypeError, ValueError) as e:
             raise ValueError(f"阈值字段 {key}={val!r} 无法转换为 {ftype}: {e}") from e
-    return replace(base, **cleaned)
+    merged = replace(base, **cleaned)
+    return validate_thresholds(merged) if validate else merged
+
+
+def validate_thresholds(thresholds: Thresholds) -> Thresholds:
+    """校验阈值之间的业务关系，避免配置合法但检测语义异常。"""
+    errors = []
+    if thresholds.brute_force_min <= 0:
+        errors.append("brute_force_min 必须大于 0")
+    if thresholds.brute_force_high < thresholds.brute_force_min:
+        errors.append("brute_force_high 必须大于等于 brute_force_min")
+    if thresholds.brute_force_critical < thresholds.brute_force_high:
+        errors.append("brute_force_critical 必须大于等于 brute_force_high")
+    if thresholds.spray_min_unique_users <= 0:
+        errors.append("spray_min_unique_users 必须大于 0")
+    if thresholds.spray_max_avg_per_user <= 0:
+        errors.append("spray_max_avg_per_user 必须大于 0")
+    if thresholds.timeline_max_items <= 0:
+        errors.append("timeline_max_items 必须大于 0")
+    if thresholds.generic_parse_line_limit <= 0:
+        errors.append("generic_parse_line_limit 必须大于 0")
+    if errors:
+        raise ValueError("阈值配置不合法: " + "; ".join(errors))
+    return thresholds
 
 
 def set_thresholds(new_thresholds: Thresholds) -> None:
     """运行时替换全局阈值（测试与 CLI 用）。"""
     global THRESHOLDS
-    THRESHOLDS = new_thresholds
+    THRESHOLDS = validate_thresholds(new_thresholds)

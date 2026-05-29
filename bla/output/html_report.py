@@ -1058,5 +1058,6 @@ function jumpToEvents(level) {{
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
 
-    safe_print(f"  [✓] HTML 报告已保存: {output_path}")
-    safe_print(f"      请用浏览器打开该文件: {output_path}")
+    display_path = sanitize_report_text(output_path)
+    safe_print(f"  [✓] HTML 报告已保存: {display_path}")
+    safe_print(f"      请用浏览器打开该文件: {display_path}")

@@ -5,7 +5,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from ..models import AnalysisSummary, ParseResult
-from ..utils.helpers import safe_print
+from ..utils.helpers import safe_print, sanitize_report_text
 from .csv_report import generate_csv_report
 from .html_report import generate_html_report
 from .ioc_report import generate_ioc_report
@@ -20,6 +20,9 @@ def generate_report_bundle(
     output_dir: str,
     manifest_context: Optional[Dict[str, Any]] = None,
     geoip_cache_path: Optional[str] = None,
+    include_json_events: bool = True,
+    json_events_limit: Optional[int] = None,
+    json_raw_line_limit: Optional[int] = None,
 ) -> Dict[str, str]:
     """生成一套标准交付报告文件，并返回各产物路径。"""
     os.makedirs(output_dir, exist_ok=True)
@@ -32,9 +35,16 @@ def generate_report_bundle(
         "manifest": os.path.join(output_dir, "manifest.json"),
     }
 
-    safe_print(f"  [✓] 报告目录: {output_dir}")
+    safe_print(f"  [✓] 报告目录: {sanitize_report_text(output_dir)}")
     generate_html_report(parse_results, summary, paths["html"], geoip_cache_path=geoip_cache_path)
-    generate_json_report(parse_results, summary, paths["json"])
+    generate_json_report(
+        parse_results,
+        summary,
+        paths["json"],
+        include_events=include_json_events,
+        events_limit=json_events_limit,
+        raw_line_limit=json_raw_line_limit,
+    )
     generate_csv_report(parse_results, summary, paths["csv"])
     generate_ioc_report(parse_results, summary, paths["ioc"])
     generate_sarif_report(parse_results, summary, paths["sarif"])
