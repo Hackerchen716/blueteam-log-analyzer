@@ -66,6 +66,9 @@ from bla.rules import reset_rule_cache, set_rule_dirs, validate_web_attack_rules
 from bla.rules.loader import _parse_simple_yaml
 from bla.utils.helpers import gen_id, is_private_ip, normalize_timestamp, reset_counter, set_syslog_year
 
+BAD_TERMINAL_SEGMENT = "\x1b]52;c;SGVsbG8=\x07token=super-secret"
+BAD_FILESYSTEM_SEGMENT = "token=super-secret" if os.name == "nt" else BAD_TERMINAL_SEGMENT
+
 __all__ = [
     name for name in globals()
     if name == "__version__" or not name.startswith("__")

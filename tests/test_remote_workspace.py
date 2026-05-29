@@ -110,7 +110,7 @@ class RemoteWorkspaceRegressionTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
-            bad_output = Path(tmp) / "\x1b]52;c;SGVsbG8=\x07token=super-secret"
+            bad_output = Path(tmp) / BAD_FILESYSTEM_SEGMENT
             bad_output.mkdir()
             workspace = RemoteWorkspace(fake, initial_cwd="/var/log/nginx", print_fn=lambda *a, **k: print(*a, **k))
             code = workspace.execute_line(
@@ -347,7 +347,7 @@ class RemoteWorkspaceRegressionTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-        remote_path = "/var/log/\x1b]52;c;SGVsbG8=\x07token=super-secret.log"
+        remote_path = f"/var/log/{BAD_FILESYSTEM_SEGMENT}.log"
         grep_value = "token=super-secret"
         fake = FakeSSH()
         with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout", io.StringIO()):

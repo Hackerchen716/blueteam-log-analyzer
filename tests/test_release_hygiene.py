@@ -131,7 +131,7 @@ web_attacks:
     def test_cli_report_write_failure_redacts_terminal_output(self):
         repo = Path(__file__).parents[1]
         with tempfile.TemporaryDirectory() as tmp:
-            bad_output = Path(tmp) / "\x1b]52;c;SGVsbG8=\x07token=super-secret"
+            bad_output = Path(tmp) / BAD_FILESYSTEM_SEGMENT
             bad_output.mkdir()
             completed = subprocess.run(
                 [
@@ -165,7 +165,7 @@ web_attacks:
     def test_validate_rules_output_redacts_untrusted_rule_metadata(self):
         repo = Path(__file__).parents[1]
         with tempfile.TemporaryDirectory() as tmp:
-            rules_dir = Path(tmp) / "\x1b]52;c;SGVsbG8=\x07token=super-secret"
+            rules_dir = Path(tmp) / BAD_FILESYSTEM_SEGMENT
             rules_dir.mkdir()
             (rules_dir / "rules.yaml").write_text(
                 """

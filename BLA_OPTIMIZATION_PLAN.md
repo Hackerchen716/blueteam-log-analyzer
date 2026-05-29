@@ -32,16 +32,19 @@
 - 发布门禁已覆盖 compileall、pytest、unittest、`validate-rules --strict-metadata`、`ssh --help`、`remote-log --help`、1 MB benchmark、1 MB memory benchmark、样例报告 smoke、v1.4.1/v1.4.2/v1.4.3 smoke、wheel/sdist build 和 `twine check`。
 - `python3 bla_cli.py --version` 输出 `BLA 1.4.3`。
 - `git diff --check` 通过。
+- GitHub Release 触发的 Publish workflow 已成功发布到 PyPI。
+- 首次 push Tests workflow 在 Windows pytest 阶段失败，原因是测试 fixture 使用了 Windows 文件系统不允许的 ESC/BEL 路径名；已改为平台安全的恶意路径测试，并重新通过本地定点回归和 `release_check.py --build`。
 
 ### 修改结果
 - 已将版本号提升到 `1.4.3`。
 - 已新增 `docs/releases/v1.4.3.md`，README 当前版本摘要改为 v1.4.3。
 - 已将 `scripts/release_check.py` 增加 v1.4.3 冒烟场景，覆盖 JSON 事件限量、raw_line 限长、Shell 外传、Proxy/SWG `request_url`、Firewall `policy_action`、VPN `auth_result` 等链路。
 - 已将 `soft-copyright-materials/` 加入 `.gitignore`，避免本地软著材料进入 BLA 发布提交或包产物。
+- 已将终端清洗相关测试里的恶意文件名改为 Windows 可创建的路径片段，仍保留 secret 脱敏断言；非 Windows 平台继续覆盖 ESC/BEL 控制字符路径。
 
 ### 剩余问题
-- 本地发布验证已通过，下一步是提交、打 `v1.4.3` tag、推送并创建 GitHub Release。
-- PyPI 发布依赖 GitHub Release 触发的 `publish.yml` 和 PyPI Trusted Publishing，发布后需等待 Actions 并做干净环境安装验证。
+- 等待修复后的 push Tests workflow 重新跑完。
+- 仍需做 PyPI 干净环境安装验证。
 
 ## 2026-05-29 - P0 Proxy Vendor Request URL Fields
 

@@ -640,7 +640,7 @@ class OutputRegressionTests(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp:
-            out_dir = Path(tmp) / "\x1b]52;c;SGVsbG8=\x07token=super-secret"
+            out_dir = Path(tmp) / BAD_FILESYSTEM_SEGMENT
             buf = io.StringIO()
             with mock.patch("sys.stdout", buf):
                 paths = generate_report_bundle([result], summary, str(out_dir))
