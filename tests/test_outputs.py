@@ -840,6 +840,7 @@ class OutputRegressionTests(unittest.TestCase):
             out_dir = root / "report"
             input_path.write_text(content, encoding="utf-8")
             expected_hash = __import__("hashlib").sha256(input_path.read_bytes()).hexdigest()
+            expected_size = input_path.stat().st_size
 
             run_analysis(
                 AnalysisOptions(
@@ -851,7 +852,7 @@ class OutputRegressionTests(unittest.TestCase):
 
         self.assertEqual(manifest["inputs"][0]["name"], "access.log")
         self.assertEqual(manifest["inputs"][0]["sha256"], expected_hash)
-        self.assertEqual(manifest["inputs"][0]["size_bytes"], len(content.encode()))
+        self.assertEqual(manifest["inputs"][0]["size_bytes"], expected_size)
         manifest_text = _json.dumps(manifest, ensure_ascii=False)
         self.assertNotIn(str(root), manifest_text)
         self.assertNotIn("absolute_path", manifest["inputs"][0])
