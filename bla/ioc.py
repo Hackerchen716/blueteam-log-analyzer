@@ -74,7 +74,7 @@ def extract_iocs(
         if command:
             found["commands"].add(command)
 
-    return {key: sorted(values) for key, values in found.items()}
+    return {key: _sanitize_ioc_values(values) for key, values in found.items()}
 
 
 def format_ioc_report(iocs: Dict[str, List[str]]) -> str:
@@ -98,6 +98,15 @@ def format_ioc_report(iocs: Dict[str, List[str]]) -> str:
             lines.append("(none)")
         lines.append("")
     return "\n".join(lines)
+
+
+def _sanitize_ioc_values(values: Iterable[str]) -> List[str]:
+    safe_values = set()
+    for value in values:
+        safe = sanitize_report_text(value)
+        if safe:
+            safe_values.add(safe)
+    return sorted(safe_values)
 
 
 def _extract_from_text(text: str, found: Dict[str, Set[str]]) -> None:

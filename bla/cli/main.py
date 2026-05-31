@@ -21,7 +21,6 @@ import json
 import tempfile
 import time
 import tracemalloc
-import hashlib
 from pathlib import Path
 from typing import List, Optional
 
@@ -46,6 +45,7 @@ from bla.core import (
     AnalysisError,
     AnalysisOptions,
     AnalysisOutputs,
+    build_local_manifest_context,
     collect_files,
     parse_files,
     run_analysis,
@@ -115,52 +115,40 @@ def _validate_json_output_arguments(args: argparse.Namespace, parser: argparse.A
 
 
 def _build_manifest_context(args: argparse.Namespace, run_result) -> dict:
-    return {
-        "inputs": [_input_manifest_record(path) for path in run_result.files],
-        "options": {
-            "profile": args.profile,
-            "parser": args.type,
-            "jobs": args.jobs,
-            "config": args.config,
-            "rules": args.rules or [],
-            "allowlist": args.allowlist,
-            "geoip_cache": os.path.basename(args.geoip_cache) if args.geoip_cache else None,
-            "exit_on": args.exit_on,
-            "syslog_year": args.syslog_year,
-            "rdp_only": args.rdp,
-            "max_alerts": args.max_alerts,
-            "full_evidence": bool(args.full_evidence),
-            "json_events_limit": args.json_events_limit,
-            "json_events_included": not args.no_json_events,
-            "json_raw_line_limit": args.raw_line_limit,
-        },
-        "parse_errors": run_result.parse_errors,
-        "suppressed_events": run_result.suppressed_events,
+    context = build_local_manifest_context(
+        run_result.files,
+        run_result.parse_results,
+        run_result.parse_errors,
+        run_result.suppressed_events,
+    )
+    context["options"] = {
+        "profile": args.profile,
+        "parser": args.type,
+        "jobs": args.jobs,
+        "config": _manifest_path_label(args.config),
+        "rules": _manifest_path_labels(args.rules or []),
+        "allowlist": _manifest_path_label(args.allowlist),
+        "geoip_cache": _manifest_path_label(args.geoip_cache),
+        "exit_on": args.exit_on,
+        "syslog_year": args.syslog_year,
+        "rdp_only": args.rdp,
+        "max_alerts": args.max_alerts,
+        "full_evidence": bool(args.full_evidence),
+        "json_events_limit": args.json_events_limit,
+        "json_events_included": not args.no_json_events,
+        "json_raw_line_limit": args.raw_line_limit,
     }
+    return context
 
 
-def _input_manifest_record(path: str) -> dict:
-    record = {
-        "source": "local",
-        "path": os.path.basename(path),
-        "name": os.path.basename(path),
-        "size_bytes": 0,
-        "sha256": "",
-    }
-    try:
-        record["size_bytes"] = os.path.getsize(path)
-        record["sha256"] = _sha256_file(path)
-    except OSError:
-        pass
-    return record
+def _manifest_path_label(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    return sanitize_report_text(os.path.basename(path))
 
 
-def _sha256_file(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _manifest_path_labels(paths: List[str]) -> List[str]:
+    return [label for path in paths if (label := _manifest_path_label(path))]
 
 
 def _dispatch_subcommand(argv: List[str]) -> bool:
@@ -838,23 +826,20 @@ def main():
     )
 
     try:
-        write_reports(
-            parse_results,
-            summary,
-            AnalysisOutputs(
-                html=args.html,
-                json=args.json,
-                csv=args.csv,
-                ioc=args.ioc,
-                sarif=args.sarif,
-                bundle_dir=args.out,
-                geoip_cache_path=args.geoip_cache,
-                include_json_events=not args.no_json_events,
-                json_events_limit=args.json_events_limit,
-                json_raw_line_limit=args.raw_line_limit,
-            ),
-            manifest_context=_build_manifest_context(args, run_result),
+        outputs = AnalysisOutputs(
+            html=args.html,
+            json=args.json,
+            csv=args.csv,
+            ioc=args.ioc,
+            sarif=args.sarif,
+            bundle_dir=args.out,
+            geoip_cache_path=args.geoip_cache,
+            include_json_events=not args.no_json_events,
+            json_events_limit=args.json_events_limit,
+            json_raw_line_limit=args.raw_line_limit,
         )
+        manifest_context = _build_manifest_context(args, run_result) if args.out else None
+        write_reports(parse_results, summary, outputs, manifest_context=manifest_context)
     except OSError as e:
         print(f"\n❌ 报告写入失败: {sanitize_report_text(e)}", file=sys.stderr)
         sys.exit(1)

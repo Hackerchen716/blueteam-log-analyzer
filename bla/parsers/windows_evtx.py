@@ -60,6 +60,45 @@ _WINDOWS_BUILTIN_CREATED_ACCOUNTS = {
     "wdagutilityaccount",
 }
 
+_WINDOWS_SERVICE_ACCOUNTS = {
+    "localsystem",
+    "system",
+    "localservice",
+    "networkservice",
+}
+
+_WINDOWS_MAINTENANCE_SERVICE_NAMES = {
+    "bits",
+    "trustedinstaller",
+    "usosvc",
+    "waasmedicsvc",
+    "windefend",
+    "wuauserv",
+}
+
+_WINDOWS_MAINTENANCE_SERVICE_EXES = {
+    "msmpeng.exe",
+    "securityhealthservice.exe",
+    "svchost.exe",
+    "trustedinstaller.exe",
+}
+
+_WINDOWS_MAINTENANCE_TASK_PREFIXES = (
+    "\\microsoft\\windows\\updateorchestrator\\",
+    "\\microsoft\\windows\\windows defender\\",
+    "\\microsoft\\windows\\windowsupdate\\",
+    "\\microsoft\\windows\\waasmedic\\",
+)
+
+_WINDOWS_MAINTENANCE_TASK_EXES = {
+    "mousocoreworker.exe",
+    "mpcmdrun.exe",
+    "musnotification.exe",
+    "musnotificationux.exe",
+    "usoclient.exe",
+    "wuauclt.exe",
+}
+
 
 class MissingOptionalDependency(RuntimeError):
     """Raised when a parser cannot run because an optional dependency is absent."""
@@ -78,6 +117,23 @@ def _pick_first(details: Dict[str, str], *keys: str) -> str:
     return ""
 
 
+def _windows_basename(path: str) -> str:
+    return path.replace("/", "\\").rsplit("\\", 1)[-1] if path else ""
+
+
+def _command_executable(command: str) -> str:
+    command = (command or "").strip()
+    if not command:
+        return ""
+    quoted = re.match(r'^"([^"]+)"', command)
+    token = quoted.group(1) if quoted else command.split()[0]
+    return _windows_basename(token.strip("\"'"))
+
+
+def _truthy_win_value(value: str) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes"}
+
+
 def _norm_win_name(value: str) -> str:
     value = (value or "").strip().strip("\\/")
     if "\\" in value:
@@ -85,6 +141,28 @@ def _norm_win_name(value: str) -> str:
     if "/" in value:
         value = value.rsplit("/", 1)[-1]
     return value.lower()
+
+
+def _norm_win_path_text(value: str) -> str:
+    text = (value or "").strip().strip("\"'").replace("/", "\\").lower()
+    text = text.replace("%systemroot%", "c:\\windows")
+    text = text.replace("%windir%", "c:\\windows")
+    return text
+
+
+def _is_windows_service_account(value: str) -> bool:
+    return _norm_win_name(value) in _WINDOWS_SERVICE_ACCOUNTS
+
+
+def _is_windows_system32_command(command: str) -> bool:
+    text = _norm_win_path_text(command)
+    return (
+        "\\windows\\system32\\" in text
+        or text.startswith("system32\\")
+        or text.startswith("c:\\windows\\servicing\\")
+        or text.startswith("%systemroot%\\system32\\")
+        or text.startswith("%windir%\\system32\\")
+    )
 
 
 def _account_label(details: Dict[str, str], domain_key: str, user_key: str) -> str:
@@ -246,14 +324,123 @@ def _augment_4688_details(eid: int, details: Dict[str, str]) -> None:
 
     parent = _pick_first(details, "ParentProcessName", "CreatorProcessName")
     child_path = _pick_first(details, "NewProcessName", "ProcessName")
-    child = ""
-    if child_path:
-        child = child_path.replace("/", "\\").rsplit("\\", 1)[-1]
 
     details["parent_process"] = parent
-    details["child_process"] = child
+    details["child_process"] = _windows_basename(child_path)
     details["child_path"] = child_path
     details["command_line"] = _pick_first(details, "CommandLine")
+
+
+def _augment_sysmon_details(eid: int, details: Dict[str, str]) -> None:
+    if eid == 1:
+        image = _pick_first(details, "Image")
+        details["parent_process"] = _pick_first(details, "ParentImage")
+        details["child_process"] = _windows_basename(image)
+        details["child_path"] = image
+        details["command_line"] = _pick_first(details, "CommandLine")
+    elif eid == 3:
+        details["source_ip"] = _pick_first(details, "SourceIp")
+        details["source_port"] = _pick_first(details, "SourcePort")
+        details["destination_ip"] = _pick_first(details, "DestinationIp")
+        details["destination_port"] = _pick_first(details, "DestinationPort")
+        details["destination_host"] = _pick_first(details, "DestinationHostname")
+        details["network_protocol"] = _pick_first(details, "Protocol")
+        details["initiated"] = _pick_first(details, "Initiated")
+    elif eid == 10:
+        source_image = _pick_first(details, "SourceImage")
+        target_image = _pick_first(details, "TargetImage")
+        details["source_process"] = _windows_basename(source_image)
+        details["target_process"] = _windows_basename(target_image)
+        details["granted_access"] = _pick_first(details, "GrantedAccess")
+    elif eid == 22:
+        details["dns_query"] = _pick_first(details, "QueryName")
+        details["query_status"] = _pick_first(details, "QueryStatus")
+    elif eid in (19, 20, 21):
+        details["wmi_operation"] = _pick_first(details, "Operation")
+        details["wmi_filter"] = _pick_first(details, "Filter", "Name")
+        details["wmi_consumer"] = _pick_first(details, "Consumer", "Name")
+        details["wmi_query"] = _pick_first(details, "Query")
+        details["wmi_event_namespace"] = _pick_first(details, "EventNamespace")
+        command = _pick_first(details, "Destination", "CommandLineTemplate", "ExecutablePath")
+        details["persistence_mechanism"] = "wmi-event-subscription"
+        details["persistence_command"] = command
+        details["command_line"] = command
+        details["child_process"] = _command_executable(command)
+
+
+def _task_xml_value(task_content: str, tag: str) -> str:
+    match = re.search(
+        rf"<(?:[A-Za-z0-9_.-]+:)?{tag}\b[^>]*>(.*?)</(?:[A-Za-z0-9_.-]+:)?{tag}>",
+        task_content or "",
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return ""
+    return re.sub(r"<[^>]+>", "", match.group(1)).strip()
+
+
+def _augment_persistence_details(eid: int, details: Dict[str, str]) -> None:
+    if eid == 7045:
+        command = _pick_first(details, "ImagePath", "ServiceFileName")
+        details["service_name"] = _pick_first(details, "ServiceName")
+        details["service_image_path"] = command
+        details["service_account"] = _pick_first(details, "ServiceAccount", "AccountName")
+        details["persistence_mechanism"] = "service"
+        details["persistence_command"] = command
+        details["command_line"] = command
+        details["child_process"] = _command_executable(command)
+        _classify_persistence_baseline(details, "service")
+    elif eid in (4698, 4702):
+        task_content = _pick_first(details, "TaskContent", "TaskContentNew")
+        command = _task_xml_value(task_content, "Command")
+        arguments = _task_xml_value(task_content, "Arguments")
+        command_line = " ".join(part for part in (command, arguments) if part).strip()
+        details["task_name"] = _pick_first(details, "TaskName")
+        details["task_content"] = task_content
+        details["task_command"] = command
+        details["task_arguments"] = arguments
+        details["persistence_mechanism"] = "scheduled-task"
+        details["persistence_command"] = command_line or task_content
+        details["command_line"] = command_line or task_content
+        details["child_process"] = _command_executable(command or task_content)
+        _classify_persistence_baseline(details, "scheduled-task")
+
+
+def _mark_persistence_baseline(details: Dict[str, str], baseline: str, reason: str) -> None:
+    details["persistence_baseline"] = baseline
+    details["persistence_baseline_reason"] = reason
+    details["persistence_alert_confidence"] = "low"
+    details["evidence_strength"] = "low"
+    details["false_positive_hint"] = (
+        "Windows maintenance baseline candidate; keep the event, but verify change window, "
+        "signature, and parent process before escalation."
+    )
+
+
+def _classify_persistence_baseline(details: Dict[str, str], mechanism: str) -> None:
+    command = details.get("persistence_command", "")
+    child = _norm_win_name(details.get("child_process", ""))
+    if not command or not child or not _is_windows_system32_command(command):
+        return
+    if mechanism == "service":
+        service = _norm_win_name(details.get("service_name", ""))
+        account = details.get("service_account", "")
+        if (
+            service in _WINDOWS_MAINTENANCE_SERVICE_NAMES
+            and child in _WINDOWS_MAINTENANCE_SERVICE_EXES
+            and _is_windows_service_account(account)
+        ):
+            _mark_persistence_baseline(details, "windows-maintenance-service", service)
+        return
+    if mechanism == "scheduled-task":
+        task_name = _norm_win_path_text(details.get("task_name", ""))
+        subject = _pick_first(details, "SubjectUserName", "UserName")
+        if (
+            child in _WINDOWS_MAINTENANCE_TASK_EXES
+            and _is_windows_service_account(subject)
+            and any(task_name.startswith(prefix) for prefix in _WINDOWS_MAINTENANCE_TASK_PREFIXES)
+        ):
+            _mark_persistence_baseline(details, "windows-maintenance-task", details.get("task_name", ""))
 
 
 def _classify_group_change_details(details: Dict[str, str]) -> None:
@@ -442,7 +629,7 @@ _WIN_RULES: Dict[int, dict] = {
                mitre=None,         rule="Sysmon 进程创建",
                msg=lambda d: f"[Sysmon] 进程: {d.get('Image','?')} 参数: {truncate(d.get('CommandLine',''),80)}"),
     3:    dict(level=ThreatLevel.INFO,     cat="Sysmon",  tags=["sysmon","network"],
-               mitre="T1071",      rule="Sysmon 网络连接",
+               mitre=None,         rule="Sysmon 网络连接",
                msg=lambda d: f"[Sysmon] 网络: {d.get('Image','?')} -> {d.get('DestinationIp','?')}:{d.get('DestinationPort','?')}"),
     7:    dict(level=ThreatLevel.MEDIUM,   cat="Sysmon",  tags=["sysmon","image-load","dll-injection"],
                mitre="T1055",      rule="Sysmon 镜像加载",
@@ -450,8 +637,8 @@ _WIN_RULES: Dict[int, dict] = {
     8:    dict(level=ThreatLevel.HIGH,     cat="Sysmon",  tags=["sysmon","remote-thread","injection"],
                mitre="T1055",      rule="Sysmon 远程线程",
                msg=lambda d: f"[Sysmon] 远程线程: {d.get('SourceImage','?')} -> {d.get('TargetImage','?')}"),
-    10:   dict(level=ThreatLevel.HIGH,     cat="Sysmon",  tags=["sysmon","process-access","lsass"],
-               mitre="T1003.001",  rule="Sysmon 进程访问",
+    10:   dict(level=ThreatLevel.MEDIUM,   cat="Sysmon",  tags=["sysmon","process-access"],
+               mitre=None,         rule="Sysmon 进程访问",
                msg=lambda d: f"[Sysmon] 进程访问: {d.get('SourceImage','?')} -> {d.get('TargetImage','?')}"),
     11:   dict(level=ThreatLevel.INFO,     cat="Sysmon",  tags=["sysmon","file-creation"],
                mitre=None,         rule="Sysmon 文件创建",
@@ -465,8 +652,17 @@ _WIN_RULES: Dict[int, dict] = {
     15:   dict(level=ThreatLevel.MEDIUM,   cat="Sysmon",  tags=["sysmon","ads","defense-evasion"],
                mitre="T1564.004",  rule="Sysmon ADS 创建",
                msg=lambda d: f"[Sysmon] ADS创建: {d.get('TargetFilename','?')}"),
+    19:   dict(level=ThreatLevel.MEDIUM,   cat="Sysmon",  tags=["sysmon","wmi","wmi-subscription"],
+               mitre="T1546.003",  rule="Sysmon WMI 事件过滤器",
+               msg=lambda d: f"[Sysmon] WMI过滤器: {d.get('Name','?')} 操作={d.get('Operation','?')}"),
+    20:   dict(level=ThreatLevel.MEDIUM,   cat="Sysmon",  tags=["sysmon","wmi","wmi-subscription"],
+               mitre="T1546.003",  rule="Sysmon WMI 事件消费者",
+               msg=lambda d: f"[Sysmon] WMI消费者: {d.get('Name','?')} 目标={truncate(d.get('Destination',''),80)} 操作={d.get('Operation','?')}"),
+    21:   dict(level=ThreatLevel.MEDIUM,   cat="Sysmon",  tags=["sysmon","wmi","wmi-subscription"],
+               mitre="T1546.003",  rule="Sysmon WMI 绑定",
+               msg=lambda d: f"[Sysmon] WMI绑定: {truncate(d.get('Filter',''),50)} -> {truncate(d.get('Consumer',''),50)} 操作={d.get('Operation','?')}"),
     22:   dict(level=ThreatLevel.INFO,     cat="Sysmon",  tags=["sysmon","dns"],
-               mitre="T1071.004",  rule="Sysmon DNS 查询",
+               mitre=None,         rule="Sysmon DNS 查询",
                msg=lambda d: f"[Sysmon] DNS: {d.get('Image','?')} 查询 {d.get('QueryName','?')}"),
     25:   dict(level=ThreatLevel.HIGH,     cat="Sysmon",  tags=["sysmon","process-tampering"],
                mitre="T1055",      rule="Sysmon 进程篡改",
@@ -483,6 +679,25 @@ _DANGEROUS_CMDS = re.compile(
     re.IGNORECASE
 )
 
+_CREDENTIAL_DUMP_CMDS = re.compile(
+    r'mimikatz|invoke-mimikatz|lsadump|sekurlsa|kerberos::ptt|privilege::debug|'
+    r'procdump(?:\.exe)?[^\r\n]*lsass|'
+    r'rundll32(?:\.exe)?[^\r\n]*comsvcs(?:\.dll)?[^\r\n]*(?:minidump|lsass)|'
+    r'reg(?:\.exe)?\s+save\s+hklm\\+(?:sam|security|system)\b|'
+    r'ntdsutil(?:\.exe)?[^\r\n]*(?:ntds\.dit|ifm|create\s+full)',
+    re.IGNORECASE
+)
+
+_LSASS_DUMP_CMD_HINT = re.compile(r'lsass|procdump(?:\.exe)?|comsvcs(?:\.dll)?', re.IGNORECASE)
+_REGISTRY_HIVE_DUMP_CMD = re.compile(r'reg(?:\.exe)?\s+save\s+hklm\\+', re.IGNORECASE)
+_NTDS_DUMP_CMD = re.compile(r'ntdsutil(?:\.exe)?', re.IGNORECASE)
+
+_SYSMON_CALLBACK_DOMAIN = re.compile(r'dnslog|ceye|burpcollaborator|interactsh', re.IGNORECASE)
+_SYSMON_CALLBACK_PROTOCOL = re.compile(r'jndi:(?:ldap|rmi)|(?:ldap|rmi)://', re.IGNORECASE)
+_SYSMON_SUSPICIOUS_DOMAIN = re.compile(r'\b(?:c2|beacon|malware|evil|botnet|dga|tunnel|callback)\b', re.IGNORECASE)
+_POWERSHELL_CMD = re.compile(r'powershell(?:\.exe)?|pwsh(?:\.exe)?', re.IGNORECASE)
+_XMLNS_ATTR_RE = re.compile(r"\s+xmlns(?::[A-Za-z_][\w.-]*)?=(?:\"[^\"]*\"|'[^']*')")
+
 _LOLBINS = re.compile(
     r'mshta\.exe|wscript\.exe|cscript\.exe|'
     r'regsvr32.*scrobj|rundll32.*javascript|'
@@ -491,6 +706,146 @@ _LOLBINS = re.compile(
     r'pcalua.*-a|syncappvpublishingserver',
     re.IGNORECASE
 )
+
+_WMI_PROCESS_NAMES = {"wmic.exe", "wmiprvse.exe", "winrs.exe", "winrshost.exe"}
+_WMI_SUBSCRIPTION_CMD = re.compile(
+    r'\\root\\subscription|__eventfilter|commandlineeventconsumer|filtertoconsumerbinding',
+    re.IGNORECASE,
+)
+_WMI_CREATE_CMD = re.compile(r'\bcreate\b', re.IGNORECASE)
+_DNS_TOOL_CMD = re.compile(r'\b(?:nslookup|resolve-dnsname|dig)(?:\.exe)?\b', re.IGNORECASE)
+_DNS_EXFIL_PROCESS_NAMES = {
+    "cmd.exe", "nslookup.exe", "powershell.exe", "pwsh.exe",
+    "wscript.exe", "cscript.exe", "nxc.exe",
+}
+_AUDITPOL_TAMPER_CMD = re.compile(
+    r'\bauditpol(?:\.exe)?\b(?=.*(?:/clear\b|/remove\b|/success\s*:\s*disable|'
+    r'/failure\s*:\s*disable|/value\s*:\s*disable|/logon\s*:\s*none|/sd\s*:))',
+    re.IGNORECASE,
+)
+_UAC_BYPASS_REGISTRY_TARGET = re.compile(
+    r'\\(?:software\\classes|s-\d-[^\\]+_classes)\\'
+    r'(?:ms-settings|mscfile|exefile|folder|directory|launcher\.systemsettings)\\.*'
+    r'(?:shell\\open\\command|shell\\runas\\command|delegateexecute|isolatedcommand)|'
+    r'\\policies\\system\\localaccounttokenfilterpolicy',
+    re.IGNORECASE,
+)
+
+
+def _append_tags(tags: list, *new_tags: str) -> None:
+    for tag in new_tags:
+        if tag not in tags:
+            tags.append(tag)
+
+
+def _credential_dump_method(command: str) -> Tuple[str, str]:
+    if _REGISTRY_HIVE_DUMP_CMD.search(command):
+        return "registry-hive-save", "T1003.002"
+    if _NTDS_DUMP_CMD.search(command):
+        return "ntds-dit-dump", "T1003.003"
+    if _LSASS_DUMP_CMD_HINT.search(command):
+        return "lsass-memory-dump", "T1003.001"
+    return "credential-dump", "T1003"
+
+
+def _looks_like_lsass_minidump_script(script: str) -> bool:
+    text = (script or "").lower()
+    return "lsass" in text and "minidumpwritedump" in text
+
+
+def _sysmon_c2_reason(details: Dict[str, str]) -> str:
+    indicators = " ".join(
+        value for value in (
+            details.get("dns_query", ""),
+            details.get("QueryName", ""),
+            details.get("destination_host", ""),
+            details.get("DestinationHostname", ""),
+        )
+        if value
+    )
+    if not indicators:
+        return ""
+    if _SYSMON_CALLBACK_DOMAIN.search(indicators) or _SYSMON_CALLBACK_PROTOCOL.search(indicators):
+        return "callback-domain"
+    if _SYSMON_SUSPICIOUS_DOMAIN.search(indicators):
+        return "suspicious-domain"
+    return ""
+
+
+def _looks_like_encoded_dns_token(token: str, min_length: int = 24) -> bool:
+    token = (token or "").strip().strip(".").strip("=")
+    if len(token) < min_length:
+        return False
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', token):
+        return False
+    if len(set(token.lower())) < 6:
+        return False
+    has_upper = any(ch.isupper() for ch in token)
+    has_lower = any(ch.islower() for ch in token)
+    has_digit = any(ch.isdigit() for ch in token)
+    if has_upper and has_lower:
+        return True
+    return has_digit and (has_upper or has_lower) and len(token) >= 40
+
+
+def _dns_exfil_reason_for_query(details: Dict[str, str]) -> str:
+    query = (
+        details.get("dns_query")
+        or details.get("QueryName")
+        or details.get("destination_host")
+        or details.get("DestinationHostname")
+        or ""
+    ).strip().strip(".")
+    if not query:
+        return ""
+    process = _norm_win_name(details.get("Image") or details.get("process") or "")
+    if process and process not in _DNS_EXFIL_PROCESS_NAMES:
+        return ""
+    labels = [part for part in query.split(".") if part]
+    for label in labels[:-1]:
+        if _looks_like_encoded_dns_token(label, min_length=40):
+            return "encoded-dns-label"
+    return ""
+
+
+def _dns_exfil_reason_for_command(command: str) -> str:
+    if not command or not _DNS_TOOL_CMD.search(command):
+        return ""
+    tokens = re.split(r'[\s"\'<>|&]+', command)
+    for token in tokens:
+        token = token.strip().strip(",;:()[]{}")
+        if _looks_like_encoded_dns_token(token, min_length=16):
+            return "encoded-dns-query-command"
+    return ""
+
+
+def _classify_persistence_command(details: Dict[str, str], tags: list, level: ThreatLevel) -> ThreatLevel:
+    command = details.get("persistence_command", "")
+    if not command:
+        return level
+    if _DANGEROUS_CMDS.search(command):
+        if level.score < ThreatLevel.CRITICAL.score:
+            level = ThreatLevel.CRITICAL
+        _append_tags(tags, "suspicious-persistence", "command-execution")
+        if _POWERSHELL_CMD.search(command):
+            _append_tags(tags, "powershell")
+        details["persistence_command_risk"] = "dangerous-command"
+        details["persistence_alert_confidence"] = "high"
+        details["evidence_strength"] = "high"
+        details.pop("persistence_baseline", None)
+        details.pop("persistence_baseline_reason", None)
+        details.pop("false_positive_hint", None)
+    elif _LOLBINS.search(command):
+        if level.score < ThreatLevel.HIGH.score:
+            level = ThreatLevel.HIGH
+        _append_tags(tags, "suspicious-persistence", "lolbin")
+        details["persistence_command_risk"] = "lolbin"
+        details["persistence_alert_confidence"] = "medium"
+        details["evidence_strength"] = "medium"
+        details.pop("persistence_baseline", None)
+        details.pop("persistence_baseline_reason", None)
+        details.pop("false_positive_hint", None)
+    return level
 
 
 def _classify_event(eid: int, details: Dict[str, str], channel: str) -> Tuple[ThreatLevel, str, str, list, Optional[str], Optional[str]]:
@@ -558,19 +913,113 @@ def _classify_event(eid: int, details: Dict[str, str], channel: str) -> Tuple[Th
             mitre = "T1110.001"
 
     if eid in (4688, 1):
-        cmd = details.get("CommandLine", "") + details.get("NewProcessName", "") + details.get("Image", "")
-        if _DANGEROUS_CMDS.search(cmd):
+        cmd = " ".join(
+            value for value in (
+                details.get("CommandLine", ""),
+                details.get("NewProcessName", ""),
+                details.get("Image", ""),
+            )
+            if value
+        )
+        child = _norm_win_name(details.get("child_process") or details.get("Image") or details.get("NewProcessName", ""))
+        wmi_subscription_command = bool(_WMI_SUBSCRIPTION_CMD.search(cmd))
+        if child in _WMI_PROCESS_NAMES or wmi_subscription_command:
+            _append_tags(tags, "wmi")
+            details.setdefault("execution_context", "wmi")
+        if wmi_subscription_command and _WMI_CREATE_CMD.search(cmd):
+            if level.score < ThreatLevel.HIGH.score:
+                level = ThreatLevel.HIGH
+            _append_tags(tags, "wmi-persistence", "persistence")
+            details["persistence_mechanism"] = "wmi-event-subscription"
+            details["persistence_command"] = cmd
+            details["persistence_alert_confidence"] = "high"
+            details["evidence_strength"] = "high"
+            mitre = "T1546.003"
+        auditpol_reason = "audit-policy-tampering" if _AUDITPOL_TAMPER_CMD.search(cmd) else ""
+        if auditpol_reason:
+            if level.score < ThreatLevel.CRITICAL.score:
+                level = ThreatLevel.CRITICAL
+            _append_tags(tags, "audit-policy", "defense-evasion", "auditpol-tampering")
+            details["defense_evasion_method"] = auditpol_reason
+            details["evidence_strength"] = "high"
+            mitre = "T1562.002"
+            rule_name = "审计策略命令篡改"
+        dns_exfil_reason = _dns_exfil_reason_for_command(cmd)
+        if dns_exfil_reason:
+            if level.score < ThreatLevel.HIGH.score:
+                level = ThreatLevel.HIGH
+            _append_tags(tags, "dns-exfiltration", "dns-tunnel", "data-exfiltration")
+            details["exfiltration_channel"] = "dns"
+            details["exfiltration_indicator_type"] = dns_exfil_reason
+            details["evidence_strength"] = "medium"
+            mitre = "T1048.003"
+            rule_name = "DNS 数据外传命令"
+        if _CREDENTIAL_DUMP_CMDS.search(cmd):
+            method, mitre = _credential_dump_method(cmd)
             level = ThreatLevel.CRITICAL
-            tags.append("malware-indicator")
+            _append_tags(tags, "credential-access", "credential-dump", "malware-indicator")
+            if method == "lsass-memory-dump":
+                _append_tags(tags, "lsass-dump")
+            details["credential_dump_method"] = method
+            details["evidence_strength"] = "high"
+        elif _DANGEROUS_CMDS.search(cmd):
+            level = ThreatLevel.CRITICAL
+            _append_tags(tags, "malware-indicator")
             mitre = "T1059"
         elif _LOLBINS.search(cmd):
             level = ThreatLevel.HIGH
-            tags.append("lolbin")
+            _append_tags(tags, "lolbin")
             mitre = "T1218"
+
+    if eid in (3, 22):
+        dns_exfil_reason = _dns_exfil_reason_for_query(details)
+        if dns_exfil_reason:
+            if level.score < ThreatLevel.HIGH.score:
+                level = ThreatLevel.HIGH
+            _append_tags(tags, "dns-exfiltration", "dns-tunnel", "data-exfiltration")
+            details["exfiltration_channel"] = "dns"
+            details["exfiltration_indicator_type"] = dns_exfil_reason
+            details["evidence_strength"] = "medium"
+            mitre = "T1048.003"
+            rule_name = "DNS 数据外传"
+        c2_reason = _sysmon_c2_reason(details)
+        if c2_reason:
+            level = ThreatLevel.HIGH
+            _append_tags(tags, "c2", "malicious-domain")
+            if c2_reason == "callback-domain":
+                _append_tags(tags, "callback-domain")
+            details["c2_indicator_type"] = c2_reason
+            details["evidence_strength"] = "medium"
+            if not dns_exfil_reason:
+                mitre = "T1071.004" if eid == 22 else "T1071"
+
+    if eid in (19, 20, 21):
+        operation = (details.get("wmi_operation") or details.get("Operation") or "").strip().lower()
+        if operation == "created":
+            if level.score < ThreatLevel.HIGH.score:
+                level = ThreatLevel.HIGH
+            _append_tags(tags, "wmi-persistence", "persistence")
+            details["persistence_alert_confidence"] = "high"
+            details["evidence_strength"] = "high"
+        elif operation == "deleted":
+            details["persistence_alert_confidence"] = "low"
+            details["evidence_strength"] = "medium"
+        else:
+            details["persistence_alert_confidence"] = "medium"
+            details["evidence_strength"] = "medium"
+
+    if eid in (7045, 4698, 4702, 19, 20, 21):
+        level = _classify_persistence_command(details, tags, level)
 
     if eid == 4104:
         script = details.get("ScriptBlockText", "")
-        if _DANGEROUS_CMDS.search(script):
+        if _looks_like_lsass_minidump_script(script):
+            level = ThreatLevel.CRITICAL
+            _append_tags(tags, "credential-access", "credential-dump", "lsass-dump", "malware-indicator")
+            details["credential_dump_method"] = "lsass-memory-dump"
+            details["evidence_strength"] = "high"
+            mitre = "T1003.001"
+        elif _DANGEROUS_CMDS.search(script):
             level = ThreatLevel.CRITICAL
             tags.append("malware-indicator")
         elif re.search(r'invoke-|iex\s*\(|base64|webclient|downloadstring', script, re.I):
@@ -580,7 +1029,22 @@ def _classify_event(eid: int, details: Dict[str, str], channel: str) -> Tuple[Th
         target = details.get("TargetImage", "").lower()
         if "lsass" in target:
             level = ThreatLevel.CRITICAL
-            tags.append("lsass-dump")
+            _append_tags(tags, "lsass", "lsass-dump", "credential-access")
+            details["credential_dump_method"] = "lsass-memory-dump"
+            details["evidence_strength"] = "high"
+            mitre = "T1003.001"
+
+    if eid in (12, 13, 14):
+        target = _norm_win_path_text(details.get("TargetObject", ""))
+        if _UAC_BYPASS_REGISTRY_TARGET.search(target):
+            if level.score < ThreatLevel.HIGH.score:
+                level = ThreatLevel.HIGH
+            tags = [tag for tag in tags if tag != "persistence"]
+            _append_tags(tags, "uac-bypass", "privilege-escalation", "defense-evasion")
+            details["privilege_escalation_method"] = "uac-bypass-registry"
+            details["evidence_strength"] = "high"
+            mitre = "T1548.002"
+            rule_name = "UAC 绕过注册表修改"
 
     return level, rule["cat"], msg, tags, mitre, rule_name
 
@@ -604,6 +1068,64 @@ def _parse_xml_event_with_error(xml_text: str, source_file: str) -> Tuple[Option
         return None, e
 
 
+def build_windows_event_from_fields(
+    eid: int,
+    eid_str: str,
+    ts_raw: str,
+    computer: str,
+    channel: str,
+    details: Dict[str, str],
+    source_file: str,
+    raw_line: str,
+) -> LogEvent:
+    """Build a LogEvent from normalized Windows EventLog fields."""
+    _augment_auth_details(eid, details)
+    _augment_ntlm_details(eid, details)
+    _augment_account_management_details(eid, details)
+    _augment_explicit_credential_details(eid, details)
+    _augment_4688_details(eid, details)
+    _augment_sysmon_details(eid, details)
+    _augment_persistence_details(eid, details)
+
+    if eid in (4720, 4722, 4723, 4724, 4725, 4726, 4728, 4729, 4732, 4738, 4756):
+        user = details.get("subject_user") or details.get("target_user") or ""
+    elif eid == 4776:
+        user = details.get("account_name") or details.get("TargetUserName") or ""
+    else:
+        user = details.get("account_name") or details.get("TargetUserName") or details.get("SubjectUserName") or ""
+    ip = details.get("source_ip") or details.get("IpAddress") or details.get("SourceAddress") or ""
+    if eid == 3:
+        if _truthy_win_value(details.get("initiated", "")):
+            ip = details.get("destination_ip") or ip
+        else:
+            ip = details.get("source_ip") or details.get("destination_ip") or ip
+    process = details.get("NewProcessName") or details.get("ProcessName") or details.get("Image") or ""
+
+    level, cat, msg, tags, mitre, rule_name = _classify_event(eid, details, channel)
+    source_channel = channel or "Windows"
+
+    return LogEvent(
+        id=gen_id("win"),
+        timestamp=normalize_timestamp(ts_raw),
+        level=level,
+        category=cat,
+        source=f"{source_channel} (EID:{eid_str})",
+        source_file=source_file,
+        message=msg,
+        raw_line=raw_line[:300],
+        event_id=eid_str,
+        user=user or None,
+        host=computer or None,
+        ip=ip or None,
+        process=process or None,
+        details=details,
+        tags=tags,
+        mitre_attack=mitre,
+        rule_id=f"WIN-{eid_str}",
+        rule_name=rule_name,
+    )
+
+
 def _parse_xml_event(xml_text: str, source_file: str) -> Optional[LogEvent]:
     """解析单个 <Event> XML 块。
 
@@ -611,7 +1133,7 @@ def _parse_xml_event(xml_text: str, source_file: str) -> Optional[LogEvent]:
     ``ParseStats.parse_errors``，避免静默丢事件。
     """
 
-    xml_clean = re.sub(r'\s+xmlns[^"]*"[^"]*"', '', xml_text)
+    xml_clean = _XMLNS_ATTR_RE.sub("", xml_text)
     root = ET.fromstring(xml_clean)
 
     sys_el = root.find("System")
@@ -641,42 +1163,15 @@ def _parse_xml_event(xml_text: str, source_file: str) -> Optional[LogEvent]:
             if name:
                 details[name] = val.strip()
 
-    _augment_auth_details(eid, details)
-    _augment_ntlm_details(eid, details)
-    _augment_account_management_details(eid, details)
-    _augment_explicit_credential_details(eid, details)
-    _augment_4688_details(eid, details)
-
-    if eid in (4720, 4722, 4723, 4724, 4725, 4726, 4728, 4729, 4732, 4738, 4756):
-        user = details.get("subject_user") or details.get("target_user") or ""
-    elif eid == 4776:
-        user = details.get("account_name") or details.get("TargetUserName") or ""
-    else:
-        user = details.get("account_name") or details.get("TargetUserName") or details.get("SubjectUserName") or ""
-    ip      = details.get("source_ip") or details.get("IpAddress") or details.get("SourceAddress") or ""
-    process = details.get("NewProcessName") or details.get("ProcessName") or details.get("Image") or ""
-
-    level, cat, msg, tags, mitre, rule_name = _classify_event(eid, details, channel)
-
-    return LogEvent(
-        id          = gen_id("win"),
-        timestamp   = normalize_timestamp(ts_raw),
-        level       = level,
-        category    = cat,
-        source      = f"{channel} (EID:{eid_str})",
-        source_file = source_file,
-        message     = msg,
-        raw_line    = xml_text[:300],
-        event_id    = eid_str,
-        user        = user or None,
-        host        = computer or None,
-        ip          = ip or None,
-        process     = process or None,
-        details     = details,
-        tags        = tags,
-        mitre_attack= mitre,
-        rule_id     = f"WIN-{eid_str}",
-        rule_name   = rule_name,
+    return build_windows_event_from_fields(
+        eid=eid,
+        eid_str=eid_str,
+        ts_raw=ts_raw,
+        computer=computer,
+        channel=channel,
+        details=details,
+        source_file=source_file,
+        raw_line=xml_text,
     )
 
 

@@ -27,6 +27,42 @@ python3 bla_cli.py --help
 
 BLA 仅依赖 Python 3.9+ 标准库。下面的命令在 macOS/Linux Shell 中执行；Windows 用户可用 PowerShell 下载后将路径替换为本地文件路径。
 
+## 2026-05-29 增量复验
+
+本次复验使用临时目录 `/tmp/bla-hvv-real-data-rAgDex`，样本只保存在本机临时目录，不进入仓库。
+
+| 样本 | 行数 | 原始大小 | 压缩包 SHA256 |
+|------|-----:|---------:|---------------|
+| `auth.log` | 86,839 | 9,334,022 bytes | `b963369529d0ccda482d373d08fef44eda0f212dd6d8f93906d11f02f830e429` |
+| `access.log.2017-05-15` | 2,928 | 660,951 bytes | `1e2fb015999883ebf36b3059e78e85d282f6d60eb7e3d21066f0ffe8d51587dd` |
+
+复验命令：
+
+```bash
+curl -L --fail --max-time 60 -o /tmp/bla-hvv-real-data-rAgDex/auth.log.gz \
+  https://www.secrepo.com/auth.log/auth.log.gz
+curl -L --fail --max-time 60 -o /tmp/bla-hvv-real-data-rAgDex/access.log.gz \
+  https://www.secrepo.com/self.logs/access.log.2017-05-15.gz
+gzip -t /tmp/bla-hvv-real-data-rAgDex/auth.log.gz
+gzip -t /tmp/bla-hvv-real-data-rAgDex/access.log.gz
+gunzip -c /tmp/bla-hvv-real-data-rAgDex/auth.log.gz > /tmp/bla-hvv-real-data-rAgDex/auth.log
+gunzip -c /tmp/bla-hvv-real-data-rAgDex/access.log.gz > /tmp/bla-hvv-real-data-rAgDex/access.log
+```
+
+当前结果：
+
+| 样本 | 解析类型 | 解析事件 | 告警 | Incident | 风险 | 主要结论 |
+|------|----------|---------:|-----:|---------:|------|----------|
+| `auth.log` | Linux Auth Log | 14,825 | 447 | 30 | `100/critical` | 保留有来源 IP 的 SSH 暴力破解和认证失败过多事件，过滤 OpenSSH preauth 重复行 |
+| `access.log` | Web Access Log | 142 | 5 | 2 | `100/critical` | 保留敏感文件探测、安全扫描器、自动化扫描告警，过滤无攻击特征的正常 2xx/3xx 访问 |
+
+本次真实 Web 样本暴露出一个误报点：旧启发式会把浏览器 User-Agent 中的正常分号，以及普通业务参数 `id=123`，误判成命令注入/可疑参数。现已将命令执行判断收紧为命令参数、命令分隔符后跟命令词，或参数值明确为命令词；修复后同一 access.log 从 1,427 个事件降到 246 个事件，移除了 1,257 条泛化 `可疑参数/命令特征` 误报，同时 `/vuln.php?cmd=id` 仍会被识别为命令注入。
+
+随后逐条复核发现两个噪声点并继续收敛：
+
+- `auth.log` 中 12,250 条 `input_userauth_request: invalid user ... [preauth]` 是 `Invalid user ... from IP` 的无来源重复行，已过滤；2,575 条 `Too many authentication failures` 现在识别为 `认证失败次数过多` lockout 事件。
+- `access.log` 中 104 条普通 `301` / `304` 正常访问不再进入事件视图；`wp-login.php`、`wp-admin`、`python-requests`、`Wget` 命中仍完整保留。最终 Web 事件数为 142，告警数仍为 5。
+
 ## 实测一：Linux auth.log
 
 ### 下载样本

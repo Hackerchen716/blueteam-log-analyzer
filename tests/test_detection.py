@@ -82,6 +82,246 @@ class DetectionRegressionTests(unittest.TestCase):
         self.assertEqual(result.stats.total, 1)
         self.assertEqual(rdp.summary.total_events, 1)
 
+    def test_benign_sysmon_network_dns_do_not_create_c2_alert(self):
+        xml = (
+            "<Event><System><EventID>3</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Image\">C:\\Windows\\System32\\svchost.exe</Data>"
+            "<Data Name=\"SourceIp\">10.0.0.5</Data>"
+            "<Data Name=\"DestinationIp\">203.0.113.9</Data>"
+            "<Data Name=\"DestinationHostname\">updates.example.test</Data>"
+            "<Data Name=\"DestinationPort\">443</Data>"
+            "<Data Name=\"Initiated\">true</Data></EventData></Event>"
+            "<Event><System><EventID>22</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.500Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Image\">C:\\Windows\\System32\\lsass.exe</Data>"
+            "<Data Name=\"QueryName\">_ldap._tcp.Default-First-Site-Name._sites.dc._msdcs.example.local</Data>"
+            "<Data Name=\"QueryStatus\">0</Data></EventData></Event>"
+            "<Event><System><EventID>22</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:25.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Image\">C:\\Windows\\System32\\svchost.exe</Data>"
+            "<Data Name=\"QueryName\">updates.example.test</Data>"
+            "<Data Name=\"QueryStatus\">0</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Sysmon.xml")
+        summary = run_detection(result.events)
+
+        self.assertTrue(all(event.mitre_attack is None for event in result.events))
+        self.assertFalse(any(alert.rule_id == "C2-001" for alert in summary.alerts))
+        self.assertFalse(any(alert.rule_id == "P0-C2-001" for alert in summary.alerts))
+        self.assertNotIn("命令控制", {item.phase for item in summary.attack_chain})
+
+    def test_suspicious_sysmon_dns_creates_c2_alert_not_p0_alert(self):
+        xml = (
+            "<Event><System><EventID>22</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:25.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Image\">C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe</Data>"
+            "<Data Name=\"QueryName\">stage.ceye.io</Data>"
+            "<Data Name=\"QueryStatus\">0</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Sysmon.xml")
+        event = result.events[0]
+
+        self.assertEqual(event.level, ThreatLevel.HIGH)
+        self.assertEqual(event.mitre_attack, "T1071.004")
+        self.assertIn("c2", event.tags)
+        self.assertIn("callback-domain", event.tags)
+
+        summary = run_detection(result.events)
+        rule_ids = {alert.rule_id for alert in summary.alerts}
+        self.assertIn("C2-001", rule_ids)
+        self.assertNotIn("P0-C2-001", rule_ids)
+        self.assertIn("命令控制", {item.phase for item in summary.attack_chain})
+
+    def test_sysmon_dns_long_encoded_query_creates_exfil_alert(self):
+        xml = (
+            "<Event><System><EventID>22</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:25.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Image\">C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe</Data>"
+            "<Data Name=\"QueryName\">DC011UWhRCAAAAAAAAAAAAAAAAAAAAAAAAAAAAwbEAYBAAAA.attackrange.local</Data>"
+            "<Data Name=\"QueryStatus\">0</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Sysmon.xml")
+        event = result.events[0]
+
+        self.assertEqual(event.level, ThreatLevel.HIGH)
+        self.assertEqual(event.mitre_attack, "T1048.003")
+        self.assertIn("dns-exfiltration", event.tags)
+        self.assertIn("data-exfiltration", event.tags)
+
+        summary = run_detection(result.events)
+        alerts = {alert.rule_id: alert for alert in summary.alerts}
+        self.assertIn("EXFIL-002", alerts)
+        self.assertEqual(alerts["EXFIL-002"].mitre_phase, "数据外传")
+        self.assertEqual(alerts["C2-001"].mitre_attack, "T1071.004")
+        self.assertIn("数据外传", {item.phase for item in summary.attack_chain})
+
+    def test_auditpol_tampering_command_creates_defense_evasion_alert(self):
+        xml = (
+            "<Event><System><EventID>1</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Image\">C:\\Windows\\System32\\auditpol.exe</Data>"
+            "<Data Name=\"CommandLine\">auditpol /clear /y</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Sysmon.xml")
+        event = result.events[0]
+
+        self.assertEqual(event.level, ThreatLevel.CRITICAL)
+        self.assertEqual(event.mitre_attack, "T1562.002")
+        self.assertIn("audit-policy", event.tags)
+        self.assertIn("defense-evasion", event.tags)
+
+        summary = run_detection(result.events)
+        alerts = {alert.rule_id: alert for alert in summary.alerts}
+        self.assertIn("EVAS-002", alerts)
+        self.assertIn("防御规避", {item.phase for item in summary.attack_chain})
+
+    def test_uac_bypass_registry_change_creates_privilege_alert(self):
+        xml = (
+            "<Event><System><EventID>13</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"EventType\">SetValue</Data>"
+            "<Data Name=\"Image\">C:\\Windows\\System32\\reg.exe</Data>"
+            "<Data Name=\"TargetObject\">HKU\\S-1-5-21-1-2-3-500_Classes\\mscfile\\shell\\open\\command\\(Default)</Data>"
+            "<Data Name=\"Details\">Empty</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Sysmon.xml")
+        event = result.events[0]
+
+        self.assertEqual(event.level, ThreatLevel.HIGH)
+        self.assertEqual(event.mitre_attack, "T1548.002")
+        self.assertIn("uac-bypass", event.tags)
+        self.assertIn("privilege-escalation", event.tags)
+
+        summary = run_detection(result.events)
+        alerts = {alert.rule_id: alert for alert in summary.alerts}
+        self.assertIn("PRIV-006", alerts)
+        self.assertIn("权限提升", {item.phase for item in summary.attack_chain})
+
+    def test_non_lsass_sysmon_access_does_not_create_credential_alert(self):
+        xml = (
+            "<Event><System><EventID>10</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"SourceImage\">C:\\Tools\\Akagi_64.exe</Data>"
+            "<Data Name=\"TargetImage\">C:\\Windows\\System32\\cmd.exe</Data>"
+            "<Data Name=\"GrantedAccess\">0x00001410</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Sysmon.xml")
+        summary = run_detection(result.events)
+
+        self.assertFalse(any(alert.rule_id.startswith("CRED") for alert in summary.alerts))
+        self.assertNotIn("凭据访问", {item.phase for item in summary.attack_chain})
+
+    def test_windows_wmi_remote_execution_chain_creates_lateral_alert(self):
+        xml = (
+            "<Event><System><EventID>4624</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:00.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TargetUserName\">Administrator</Data>"
+            "<Data Name=\"TargetDomainName\">EXAMPLE</Data>"
+            "<Data Name=\"IpAddress\">10.0.2.17</Data>"
+            "<Data Name=\"LogonType\">3</Data></EventData></Event>"
+            "<Event><System><EventID>4688</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:30.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"NewProcessName\">C:\\Windows\\System32\\wbem\\WmiPrvSE.exe</Data>"
+            "<Data Name=\"CommandLine\">C:\\Windows\\System32\\wbem\\WmiPrvSE.exe</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Security.xml")
+        summary = run_detection(result.events)
+
+        alerts = {alert.rule_id: alert for alert in summary.alerts}
+        self.assertIn("LAT-003", alerts)
+        self.assertEqual(alerts["LAT-003"].mitre_attack, "T1047")
+        self.assertTrue(any("10.0.2.17" in item for item in alerts["LAT-003"].evidence))
+        self.assertIn("横向移动", {item.phase for item in summary.attack_chain})
+
+    def test_wmi_persistence_events_create_persistence_alert(self):
+        xml = (
+            "<Event><System><EventID>20</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Name\">BotConsumer23</Data>"
+            "<Data Name=\"Destination\">\"C:\\Windows\\System32\\cmd.exe\"</Data>"
+            "<Data Name=\"Operation\">Created</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Sysmon.xml")
+        summary = run_detection(result.events)
+
+        alerts = {alert.rule_id: alert for alert in summary.alerts}
+        self.assertIn("PERS-005", alerts)
+        self.assertEqual(alerts["PERS-005"].mitre_attack, "T1546.003")
+        self.assertIn("持久化", {item.phase for item in summary.attack_chain})
+
+    def test_scheduled_task_persistence_command_creates_high_risk_alert(self):
+        task_content = (
+            "&lt;Task&gt;&lt;Actions&gt;&lt;Exec&gt;"
+            "&lt;Command&gt;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe&lt;/Command&gt;"
+            "&lt;Arguments&gt;-NoP -EncodedCommand SQBFAFgA&lt;/Arguments&gt;"
+            "&lt;/Exec&gt;&lt;/Actions&gt;&lt;/Task&gt;"
+        )
+        xml = (
+            "<Event><System><EventID>4698</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:27.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TaskName\">\\Microsoft\\Windows\\WinUpdate</Data>"
+            f"<Data Name=\"TaskContent\">{task_content}</Data>"
+            "<Data Name=\"SubjectUserName\">alice</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Security.xml")
+        event = result.events[0]
+
+        self.assertEqual(event.level, ThreatLevel.CRITICAL)
+        self.assertEqual(event.details.get("task_name"), "\\Microsoft\\Windows\\WinUpdate")
+        self.assertEqual(event.details.get("task_command"), "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
+        self.assertIn("-EncodedCommand", event.details.get("task_arguments", ""))
+        self.assertIn("suspicious-persistence", event.tags)
+
+        summary = run_detection(result.events)
+        alerts = {alert.rule_id: alert for alert in summary.alerts}
+        self.assertIn("PERS-002", alerts)
+        self.assertIn("PERS-004", alerts)
+        self.assertEqual(alerts["PERS-004"].level, ThreatLevel.CRITICAL)
+        self.assertTrue(any("-EncodedCommand" in item for item in alerts["PERS-004"].evidence))
+        self.assertIn("持久化", {item.phase for item in summary.attack_chain})
+
+    def test_windows_maintenance_task_has_low_confidence_persistence_alert(self):
+        task_content = (
+            "&lt;Task&gt;&lt;Actions&gt;&lt;Exec&gt;"
+            "&lt;Command&gt;C:\\Windows\\System32\\usoclient.exe&lt;/Command&gt;"
+            "&lt;Arguments&gt;StartScan&lt;/Arguments&gt;"
+            "&lt;/Exec&gt;&lt;/Actions&gt;&lt;/Task&gt;"
+        )
+        xml = (
+            "<Event><System><EventID>4698</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:29.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"TaskName\">\\Microsoft\\Windows\\UpdateOrchestrator\\Schedule Scan</Data>"
+            f"<Data Name=\"TaskContent\">{task_content}</Data>"
+            "<Data Name=\"SubjectUserName\">SYSTEM</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Security.xml")
+        event = result.events[0]
+
+        self.assertEqual(event.details.get("persistence_baseline"), "windows-maintenance-task")
+        self.assertEqual(event.details.get("persistence_alert_confidence"), "low")
+        self.assertNotIn("suspicious-persistence", event.tags)
+
+        summary = run_detection(result.events)
+        alerts = {alert.rule_id: alert for alert in summary.alerts}
+        self.assertIn("PERS-002", alerts)
+        self.assertNotIn("PERS-004", alerts)
+        self.assertEqual(alerts["PERS-002"].confidence, "low")
+        self.assertTrue(any("基线候选" in item for item in alerts["PERS-002"].evidence))
+
     def test_attack_chain_uses_response_phase_without_alert_double_counting(self):
         lines = [
             f"Mar 15 10:00:0{i} web sshd[100{i}]: Failed password for alice from 198.51.100.20 port 22 ssh2"
@@ -193,6 +433,70 @@ class DetectionRegressionTests(unittest.TestCase):
         self.assertIn("核心账号: alice", evidence)
         self.assertIn("资产: server01", evidence)
         self.assertIn("证据类型: Shell 命令历史", evidence)
+
+    def test_incident_evidence_and_timeline_sanitize_event_messages(self):
+        content = (
+            "9.9.9.9 - - [15/Mar/2024:10:00:00 +0800] "
+            "\"GET /search?q=1%27%20or%201=1&access_token=super-secret HTTP/1.1\" "
+            f"200 10 \"-\" \"sqlmap/1.7 {BAD_TERMINAL_SEGMENT}\"\n"
+        )
+        result = parse_web_access(content, "access.log")
+        summary = run_detection(result.events)
+
+        self.assertTrue(summary.incidents)
+        incident = summary.incidents[0]
+        combined = "\n".join(incident.evidence + [item.message for item in incident.timeline])
+
+        self.assertIn("access_token=<redacted>", combined)
+        self.assertIn("token=<redacted>", combined)
+        self.assertNotIn("super-secret", combined)
+        self.assertNotIn("\x1b", combined)
+        self.assertEqual(incident.timeline[0].event_id, result.events[0].id)
+        self.assertIn("super-secret", result.events[0].raw_line)
+
+    def test_summary_timeline_sanitizes_event_messages_without_mutating_events(self):
+        content = (
+            "9.9.9.9 - - [15/Mar/2024:10:00:00 +0800] "
+            "\"GET /search?q=1%27%20or%201=1&access_token=super-secret HTTP/1.1\" "
+            f"200 10 \"-\" \"sqlmap/1.7 {BAD_TERMINAL_SEGMENT}\"\n"
+        )
+        result = parse_web_access(content, f"{BAD_TERMINAL_SEGMENT}.log")
+        summary = run_detection(result.events)
+
+        self.assertTrue(summary.timeline)
+        timeline_text = "\n".join(
+            (entry.message or "") + " " + (entry.source_file or "")
+            for entry in summary.timeline
+        )
+
+        self.assertIn("access_token=<redacted>", timeline_text)
+        self.assertIn("token=<redacted>", timeline_text)
+        self.assertNotIn("super-secret", timeline_text)
+        self.assertNotIn("\x1b", timeline_text)
+        self.assertIn("super-secret", result.events[0].message)
+        self.assertIn("super-secret", result.events[0].raw_line)
+
+    def test_summary_alerts_sanitize_evidence_without_mutating_events(self):
+        content = (
+            "9.9.9.9 - - [15/Mar/2024:10:00:00 +0800] "
+            "\"GET /search?q=1%27%20or%201=1&access_token=super-secret HTTP/1.1\" "
+            f"200 10 \"-\" \"sqlmap/1.7 {BAD_TERMINAL_SEGMENT}\"\n"
+        )
+        result = parse_web_access(content, "access.log")
+        summary = run_detection(result.events)
+        alert = next(item for item in summary.alerts if item.rule_id == "WEB-SQL")
+
+        combined = "\n".join(
+            [alert.rule_name, alert.description, alert.recommendation] + alert.evidence
+        )
+
+        self.assertIn("access_token=<redacted>", combined)
+        self.assertIn("token=<redacted>", combined)
+        self.assertNotIn("super-secret", combined)
+        self.assertNotIn("\x1b", combined)
+        self.assertEqual(alert.affected_events, [result.events[0].id])
+        self.assertIn("super-secret", result.events[0].message)
+        self.assertIn("super-secret", result.events[0].raw_line)
 
     def test_allowlist_suppresses_trusted_noise_before_detection(self):
         content = (
@@ -775,6 +1079,71 @@ web_attacks:
                         KILL_CHAIN_ORDER.index("主机失陷"))
         self.assertLess(KILL_CHAIN_ORDER.index("主机失陷"),
                         KILL_CHAIN_ORDER.index("命令控制"))
+
+    def test_windows_eventlog_multisource_incident_title_is_not_p0(self):
+        from bla.detection.correlation import correlate_incidents
+
+        events = [
+            LogEvent(
+                id="win-json-1",
+                timestamp="2026-05-30T10:00:00",
+                level=ThreatLevel.HIGH,
+                category="Sysmon",
+                source="Microsoft-Windows-Sysmon/Operational",
+                source_file="otrf.json",
+                message="UAC registry change",
+                raw_line="{}",
+                user="alice",
+                host="workstation5",
+                details={
+                    "account": "alice",
+                    "asset": "workstation5",
+                    "event_family": "privilege-escalation",
+                    "source_type": "edr",
+                },
+            ),
+            LogEvent(
+                id="win-json-2",
+                timestamp="2026-05-30T10:00:01",
+                level=ThreatLevel.CRITICAL,
+                category="日志操作",
+                source="Security",
+                source_file="otrf.json",
+                message="audit policy tampering",
+                raw_line="{}",
+                user="alice",
+                host="workstation5",
+                details={
+                    "account": "alice",
+                    "asset": "workstation5",
+                    "event_family": "defense-evasion",
+                    "source_type": "windows-event",
+                },
+            ),
+        ]
+        alerts = [
+            DetectionAlert(
+                id="alert-1",
+                rule_id="WIN-JSON-001",
+                rule_name="Windows EventLog multi-source",
+                description="Windows EventLog multi-source case",
+                level=ThreatLevel.CRITICAL,
+                category="Windows",
+                mitre_attack="T1562.002",
+                mitre_phase="防御规避",
+                affected_events=["win-json-1", "win-json-2"],
+                evidence=["fixture"],
+                recommendation="review",
+                timestamp="2026-05-30T10:00:01",
+                confidence="high",
+            )
+        ]
+
+        incidents = correlate_incidents(events, alerts)
+
+        self.assertTrue(incidents)
+        self.assertIn("多源关联案件", incidents[0].title)
+        self.assertNotIn("P0 多源关联案件", incidents[0].title)
 
     def test_incident_correlation_merges_overlapping_alert_groups(self):
         from bla.detection.correlation import correlate_incidents

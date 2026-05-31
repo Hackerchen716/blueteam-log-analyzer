@@ -42,11 +42,14 @@ _P0_FILENAME_HINTS = (
 
 _P0_FIELD_HINTS = (
     "src_ip", "source_ip", "client_ip", "remote_addr", "xff",
-    "dst_ip", "dest_ip", "destination_ip", "user", "username", "account",
-    "action", "result", "uri", "url", "query", "domain", "rule_id",
+    "source_addr", "source_address", "dst_ip", "dest_ip", "destination_ip",
+    "destination_addr", "destination_address", "dst_port", "dest_port",
+    "destination_port", "user", "username", "account", "action", "result",
+    "policy_action", "event_action", "uri", "url", "query", "domain", "rule_id",
     "signature", "command", "cmd", "process", "severity", "alert",
     "threat", "event_type", "log_type",
 )
+_P0_WRAPPER_RECORD_KEYS = ("events", "records", "logs", "items", "data")
 
 _KV_RE = re.compile(r'([A-Za-z_][\w.\-]*)=(?:"([^"]*)"|\'([^\']*)\'|(\S+))')
 _IP_RE = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
@@ -115,12 +118,12 @@ def looks_like_p0_security_log(file_path: str, sample_text: str) -> bool:
     if any(hint in fname for hint in _P0_FILENAME_HINTS):
         return True
 
-    sample = sample_text[:4096].lower()
+    sample = sample_text[:4096]
     if _looks_like_json_record(sample_text) or _looks_like_csv_header(sample_text):
-        hits = sum(1 for hint in _P0_FIELD_HINTS if hint in sample)
+        hits = _p0_field_hint_hits(sample)
         return hits >= 2
     if _KV_RE.search(sample_text):
-        hits = sum(1 for hint in _P0_FIELD_HINTS if hint in sample)
+        hits = _p0_field_hint_hits(sample)
         return hits >= 2
     return False
 
@@ -160,10 +163,7 @@ def parse_p0_security_json(content: str, source_file: str, file_size_bytes: int 
         return _result(source_file, events, t0, file_size_bytes, parse_errors=1)
     if not isinstance(data, (list, dict)):
         return _result(source_file, events, t0, file_size_bytes, parse_errors=1)
-    rows = data if isinstance(data, list) else [data]
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
+    for row in _json_value_records(data):
         ev = _event_from_record(row, json.dumps(row, ensure_ascii=False), source_file)
         if ev:
             events.append(ev)
@@ -236,25 +236,93 @@ def _iter_json_records_from_chunks(chunks: Iterable[str]) -> Iterator[Dict[str, 
                 if not fill():
                     raise
 
+    def require_char(expected: str, message: str) -> None:
+        nonlocal pos
+        if not skip_ws() or buffer[pos] != expected:
+            raise json.JSONDecodeError(message, buffer, pos)
+        pos += 1
+
+    def iter_array_records() -> Iterator[Dict[str, Any]]:
+        nonlocal pos
+        require_char("[", "expected JSON array")
+        need_separator = False
+        while True:
+            if not skip_ws():
+                raise json.JSONDecodeError("unterminated JSON array", buffer, pos)
+            if buffer[pos] == "]":
+                pos += 1
+                return
+            if need_separator:
+                if buffer[pos] != ",":
+                    raise json.JSONDecodeError("expected comma between JSON array records", buffer, pos)
+                pos += 1
+                if not skip_ws():
+                    raise json.JSONDecodeError("unterminated JSON array", buffer, pos)
+                if buffer[pos] == "]":
+                    raise json.JSONDecodeError("trailing comma in JSON array", buffer, pos)
+                need_separator = False
+                continue
+            if buffer[pos] == ",":
+                raise json.JSONDecodeError("unexpected comma in JSON array", buffer, pos)
+            yield from _json_value_records(decode_value())
+            need_separator = True
+
+    def iter_object_records() -> Iterator[Dict[str, Any]]:
+        nonlocal pos
+        require_char("{", "expected JSON object")
+        record_object: Dict[str, Any] = {}
+        wrapper_seen = False
+        need_separator = False
+        while True:
+            if not skip_ws():
+                raise json.JSONDecodeError("unterminated JSON object", buffer, pos)
+            if buffer[pos] == "}":
+                pos += 1
+                if not wrapper_seen:
+                    yield record_object
+                return
+            if need_separator:
+                if buffer[pos] != ",":
+                    raise json.JSONDecodeError("expected comma between JSON object fields", buffer, pos)
+                pos += 1
+                if not skip_ws():
+                    raise json.JSONDecodeError("unterminated JSON object", buffer, pos)
+                if buffer[pos] == "}":
+                    raise json.JSONDecodeError("trailing comma in JSON object", buffer, pos)
+                need_separator = False
+                continue
+            if buffer[pos] == ",":
+                raise json.JSONDecodeError("unexpected comma in JSON object", buffer, pos)
+            key = decode_value()
+            if not isinstance(key, str):
+                raise json.JSONDecodeError("expected JSON object string key", buffer, pos)
+            require_char(":", "expected colon after JSON object key")
+            if not skip_ws():
+                raise json.JSONDecodeError("unterminated JSON object", buffer, pos)
+            if key in _P0_WRAPPER_RECORD_KEYS and buffer[pos] == "[":
+                wrapper_seen = True
+                yield from iter_array_records()
+            else:
+                value = decode_value()
+                if not wrapper_seen:
+                    record_object[key] = value
+            need_separator = True
+
     while True:
         if not skip_ws():
             return
         if not mode:
             if buffer[pos] == "[":
                 mode = "array"
-                pos += 1
                 continue
             mode = "sequence"
 
         if mode == "array":
-            if not skip_ws():
-                raise json.JSONDecodeError("unterminated JSON array", buffer, pos)
-            if buffer[pos] == "]":
-                return
-            if buffer[pos] == ",":
-                pos += 1
-                continue
-            yield from _json_value_records(decode_value())
+            yield from iter_array_records()
+            return
+
+        if buffer[pos] == "{":
+            yield from iter_object_records()
             continue
 
         yield from _json_value_records(decode_value())
@@ -262,7 +330,7 @@ def _iter_json_records_from_chunks(chunks: Iterable[str]) -> Iterator[Dict[str, 
 
 def _json_value_records(value: Any) -> Iterator[Dict[str, Any]]:
     if isinstance(value, dict):
-        for key in ("events", "records", "logs", "items", "data"):
+        for key in _P0_WRAPPER_RECORD_KEYS:
             nested = value.get(key)
             if isinstance(nested, list) and all(isinstance(item, dict) for item in nested):
                 yield from nested
@@ -971,15 +1039,162 @@ def _timestamp(fields: Dict[str, str]) -> str:
     return normalize_timestamp(value)
 
 
+def _normalized_action(fields: Dict[str, str], kind: str) -> str:
+    names = ("action",)
+    if kind in {"firewall", "proxy"}:
+        names += ("result", "outcome")
+    names += (
+        "disposition", "policy_action", "policyaction",
+        "event_action", "eventaction", "rule_action", "ruleaction",
+        "session_action", "sessionaction", "action_type", "actiontype",
+        "event", "operation", "operation_type", "operationtype", "activity",
+    )
+    return _field(fields, *names)
+
+
+def _normalized_asset(fields: Dict[str, str], kind: str) -> str:
+    asset = _field(
+        fields,
+        "asset", "target", "target_host", "targethost", "target_asset",
+        "targetasset", "dst_host", "dsthost", "dest_host", "desthost",
+        "destination_host", "destinationhost", "dst_domain", "dstdomain",
+        "dest_domain", "destdomain", "destination_domain", "destinationdomain",
+        "server", "server_ip", "serverip", "host", "hostname", "client_host",
+        "clienthost", "endpoint", "device",
+    )
+    if asset:
+        return asset
+    if kind == "firewall":
+        return _dst_ip(fields)
+    if kind == "proxy":
+        return _field(fields, "domain")
+    return ""
+
+
+def _normalized_risk_category(fields: Dict[str, str]) -> str:
+    return _field(
+        fields,
+        "threat_category", "threatcategory", "risk_category", "riskcategory",
+        "security_category", "securitycategory", "url_category", "urlcategory",
+        "domain_category", "domaincategory", "query_category", "querycategory",
+        "dns_category", "dnscategory", "classification", "verdict",
+    )
+
+
+def _normalized_device_name(fields: Dict[str, str]) -> str:
+    return _field(
+        fields,
+        "device_name", "devicename", "device", "dev_name", "devname",
+        "appliance", "appliance_name", "appliancename",
+        "sensor", "sensor_name", "sensorname",
+        "gateway", "gateway_name", "gatewayname",
+    )
+
+
+def _normalized_policy_name(fields: Dict[str, str]) -> str:
+    return _field(
+        fields,
+        "policy_name", "policyname", "policy_rule", "policyrule",
+        "policy_rule_name", "policyrulename",
+    )
+
+
+def _normalized_policy_id(fields: Dict[str, str]) -> str:
+    return _field(
+        fields,
+        "policy_id", "policyid", "policy_uuid", "policyuuid",
+        "policy_no", "policyno",
+    )
+
+
+def _normalized_signature_name(fields: Dict[str, str]) -> str:
+    return _field(
+        fields,
+        "signature_name", "signaturename", "sig_name", "signame",
+        "attack_name", "attackname", "threat_name", "threatname",
+        "detection_name", "detectionname", "alert_name", "alertname",
+    )
+
+
+def _normalized_signature_id(fields: Dict[str, str]) -> str:
+    return _field(
+        fields,
+        "signature_id", "signatureid", "sig_id", "sigid",
+        "rule_id", "ruleid", "threat_id", "threatid",
+        "detection_id", "detectionid",
+    )
+
+
+def _normalized_source_zone(fields: Dict[str, str]) -> str:
+    return _field(
+        fields,
+        "source_zone", "sourcezone", "src_zone", "srczone",
+        "from_zone", "fromzone", "zone_src", "zonesrc",
+    )
+
+
+def _normalized_destination_zone(fields: Dict[str, str]) -> str:
+    return _field(
+        fields,
+        "destination_zone", "destinationzone", "dest_zone", "destzone",
+        "dst_zone", "dstzone", "to_zone", "tozone",
+        "zone_dst", "zonedst",
+    )
+
+
+def _normalized_source_interface(fields: Dict[str, str]) -> str:
+    return _field(
+        fields,
+        "source_interface", "sourceinterface", "src_interface", "srcinterface",
+        "src_intf", "srcintf", "src_iface", "srciface",
+        "ingress_interface", "ingressinterface", "ingress_intf", "ingressintf",
+        "incoming_interface", "incominginterface", "in_interface", "ininterface",
+        "in_intf", "inintf",
+    )
+
+
+def _normalized_destination_interface(fields: Dict[str, str]) -> str:
+    return _field(
+        fields,
+        "destination_interface", "destinationinterface",
+        "dest_interface", "destinterface", "dst_interface", "dstinterface",
+        "dst_intf", "dstintf", "dst_iface", "dstiface",
+        "egress_interface", "egressinterface", "egress_intf", "egressintf",
+        "outgoing_interface", "outgoinginterface", "out_interface",
+        "outinterface", "out_intf", "outintf",
+    )
+
+
+def _normalized_tenant(fields: Dict[str, str]) -> str:
+    return _field(
+        fields,
+        "tenant", "tenant_id", "tenantid", "tenant_name", "tenantname",
+        "organization", "organization_id", "organizationid",
+        "org", "org_id", "orgid", "customer", "customer_id",
+        "customerid", "customer_name", "customername",
+        "vdom", "vd", "virtual_domain", "virtualdomain",
+    )
+
+
 def _details(fields: Dict[str, str], kind: str) -> Dict[str, str]:
     details = {
         "p0_kind": kind,
         "source_type": kind,
+        "device_name": _normalized_device_name(fields),
+        "policy_name": _normalized_policy_name(fields),
+        "policy_id": _normalized_policy_id(fields),
+        "signature_name": _normalized_signature_name(fields),
+        "signature_id": _normalized_signature_id(fields),
+        "source_zone": _normalized_source_zone(fields),
+        "destination_zone": _normalized_destination_zone(fields),
+        "source_interface": _normalized_source_interface(fields),
+        "destination_interface": _normalized_destination_interface(fields),
+        "tenant": _normalized_tenant(fields),
         "src_ip": _src_ip(fields),
         "dst_ip": _dst_ip(fields),
-        "asset": _field(fields, "asset", "target", "target_host", "targethost", "dst_host", "dsthost", "server", "host", "hostname", "endpoint", "device"),
+        "asset": _normalized_asset(fields, kind),
         "account": _user(fields),
-        "action": _field(fields, "action", "disposition", "policy_action", "policyaction", "event", "operation"),
+        "action": _normalized_action(fields, kind),
         "status": _field(fields, "status", "status_code", "statuscode", "response_code", "responsecode", "result", "outcome"),
         "url": _field(fields, "url", "uri", "path", "request_url", "requesturl", "request_uri", "requesturi", "request", "full_url", "fullurl"),
         "command": _field(fields, "command", "cmd", "command_line", "commandline", "input"),
@@ -990,8 +1205,18 @@ def _details(fields: Dict[str, str], kind: str) -> Dict[str, str]:
             generic_names=("bytes",),
         )),
         "direction": _direction(fields),
-        "session_id": _field(fields, "session_id", "sessionid", "sid", "session"),
-        "trace_id": _field(fields, "trace_id", "traceid", "request_id", "requestid"),
+        "session_id": _field(
+            fields,
+            "session_id", "sessionid", "sid", "session", "flow_id", "flowid",
+            "connection_id", "connectionid", "conn_id", "connid",
+        ),
+        "trace_id": _field(
+            fields,
+            "trace_id", "traceid", "request_id", "requestid",
+            "transaction_id", "transactionid", "tx_id", "txid",
+            "span_id", "spanid", "correlation_id", "correlationid",
+        ),
+        "risk_category": _normalized_risk_category(fields),
     }
     for key, value in list(fields.items())[:40]:
         if value:
@@ -1175,14 +1400,23 @@ def _looks_like_json_record(sample: str) -> bool:
     return stripped.startswith("{") or stripped.startswith("[")
 
 
+def _p0_field_hint_hits(sample: str) -> int:
+    lower = sample.lower()
+    compact = _norm_key(sample)
+    return sum(
+        1
+        for hint in _P0_FIELD_HINTS
+        if hint in lower or _norm_key(hint) in compact
+    )
+
+
 def _looks_like_csv_header(sample: str) -> bool:
     first = sample.splitlines()[0] if sample.splitlines() else ""
     if first.lstrip().startswith(("{", "[")):
         return False
     if "," not in first:
         return False
-    lower = first.lower()
-    return sum(1 for hint in _P0_FIELD_HINTS if hint in lower) >= 2
+    return _p0_field_hint_hits(first) >= 2
 
 
 _P0_ADAPTERS: Tuple[P0Adapter, ...] = (

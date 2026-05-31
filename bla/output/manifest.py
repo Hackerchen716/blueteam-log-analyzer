@@ -133,5 +133,8 @@ def _sanitize_manifest_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_manifest_value(item) for item in value]
     if isinstance(value, dict):
-        return {key: _sanitize_manifest_value(item) for key, item in value.items()}
+        return {
+            sanitize_report_text(key) if isinstance(key, str) else key: _sanitize_manifest_value(item)
+            for key, item in value.items()
+        }
     return value

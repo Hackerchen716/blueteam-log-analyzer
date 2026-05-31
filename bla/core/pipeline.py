@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -121,17 +122,19 @@ def parse_files(
 ) -> List[ParseResult]:
     parse_results: List[ParseResult] = []
     errors: List[str] = []
+    display_names = _source_display_names(files)
     workers = jobs if jobs > 0 else min(8, max(1, len(files)))
     emit = print_fn if print_fn is not None else print
     if len(files) <= 1 or workers == 1:
         for i, fpath in enumerate(files, 1):
-            fname = sanitize_report_text(os.path.basename(fpath))
+            fname = sanitize_report_text(display_names.get(fpath, os.path.basename(fpath)))
             if not quiet:
                 emit(f"  [{i}/{len(files)}] 解析: {fname} ...", end=" ", flush=True)
             try:
                 result = auto_parse(fpath, parser_name=parser_name)
                 if rdp_only:
                     result = _filter_rdp_only_result(result)
+                _apply_display_source_name(result, display_names.get(fpath, result.file_name))
                 parse_results.append(result)
                 if not quiet:
                     emit(f"✓ ({result.stats.total} 事件)")
@@ -148,11 +151,12 @@ def parse_files(
             future_to_path = {pool.submit(auto_parse, fpath, parser_name): fpath for fpath in files}
             for done, future in enumerate(as_completed(future_to_path), 1):
                 fpath = future_to_path[future]
-                fname = sanitize_report_text(os.path.basename(fpath))
+                fname = sanitize_report_text(display_names.get(fpath, os.path.basename(fpath)))
                 try:
                     result = future.result()
                     if rdp_only:
                         result = _filter_rdp_only_result(result)
+                    _apply_display_source_name(result, display_names.get(fpath, result.file_name))
                     parse_results.append(result)
                     if not quiet:
                         emit(f"  [{done}/{len(files)}] ✓ {fname} ({result.stats.total} 事件)")
@@ -169,6 +173,108 @@ def parse_files(
             raise AnalysisError(f"所有文件解析失败；请先处理解析错误：\n- {joined}")
         raise AnalysisError("所有文件解析失败；请先处理上方解析错误。")
     return parse_results
+
+
+def _source_display_names(files: List[str]) -> Dict[str, str]:
+    """Return stable, non-absolute labels for parsed inputs.
+
+    Unique basenames keep the historical display name. When multiple inputs
+    share a basename, use the shortest path suffix that distinguishes them.
+    """
+    labels = {path: os.path.basename(path) for path in files}
+    basename_groups: Dict[str, List[str]] = {}
+    for path in files:
+        basename_groups.setdefault(os.path.basename(path), []).append(path)
+
+    for group in basename_groups.values():
+        if len(group) <= 1:
+            continue
+        parts_by_path = {path: _path_suffix_parts(path) for path in group}
+        max_depth = max((len(parts) for parts in parts_by_path.values()), default=1)
+        for depth in range(2, max_depth + 1):
+            candidates = {
+                path: "/".join(parts[-depth:])
+                for path, parts in parts_by_path.items()
+            }
+            if len(set(candidates.values())) == len(group):
+                labels.update(candidates)
+                break
+        else:
+            labels.update({
+                path: "/".join(parts_by_path[path])
+                for path in group
+            })
+    return labels
+
+
+def _path_suffix_parts(path: str) -> List[str]:
+    normalized = os.path.normpath(path).replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part and part != "."]
+    return parts or [os.path.basename(path)]
+
+
+def _apply_display_source_name(result: ParseResult, display_name: Optional[str]) -> None:
+    if not display_name or display_name == result.file_name:
+        return
+    original_name = result.file_name
+    result.file_name = display_name
+    for event in result.events:
+        if event.source_file == original_name:
+            event.source_file = display_name
+
+
+def build_local_manifest_context(
+    files: List[str],
+    parse_results: List[ParseResult],
+    parse_errors: Optional[List[str]] = None,
+    suppressed_events: int = 0,
+) -> Dict[str, Any]:
+    """Build local input provenance for a report bundle manifest."""
+    return _local_manifest_context(files, parse_results, parse_errors or [], suppressed_events)
+
+
+def _local_manifest_context(
+    files: List[str],
+    parse_results: List[ParseResult],
+    parse_errors: List[str],
+    suppressed_events: int,
+) -> Dict[str, Any]:
+    result_by_name = {result.file_name: result for result in parse_results}
+    display_names = _source_display_names(files)
+    inputs = []
+    for path in files:
+        name = display_names.get(path, os.path.basename(path))
+        result = result_by_name.get(name)
+        inputs.append({
+            "name": name,
+            "type": result.log_type if result else "",
+            "size_bytes": _file_size_or_zero(path),
+            "sha256": _sha256_file_or_empty(path),
+            "events": result.stats.total if result else 0,
+        })
+    return {
+        "inputs": inputs,
+        "parse_errors": list(parse_errors),
+        "suppressed_events": suppressed_events,
+    }
+
+
+def _file_size_or_zero(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _sha256_file_or_empty(path: str) -> str:
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
 
 
 def run_analysis(
@@ -207,7 +313,11 @@ def run_analysis(
     all_events = [event for result in parse_results for event in result.events]
     summary = run_detection(all_events, profile=options.profile, pre_enriched=True)
     if options.outputs:
-        write_reports(parse_results, summary, options.outputs)
+        manifest_context = (
+            build_local_manifest_context(files, parse_results, parse_errors, suppressed)
+            if options.outputs.bundle_dir else None
+        )
+        write_reports(parse_results, summary, options.outputs, manifest_context=manifest_context)
 
     return AnalysisRunResult(
         files=files,

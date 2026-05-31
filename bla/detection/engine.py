@@ -11,19 +11,21 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .. import config
 from ..models import AnalysisSummary, AttackChainEntry, DetectionAlert, LogEvent, ThreatLevel, TimelineEntry
-from ..utils.helpers import gen_id, is_private_ip
+from ..utils.helpers import gen_id, is_private_ip, sanitize_report_text, truncate
 from .correlation import correlate_incidents
 from .enrichment import enrich_events
 from .registry import DetectionEventIndex, DetectorRegistry, DetectorSpec, normalize_profiles
 
 _CONFIDENCE_DOWNGRADE = {"high": "medium", "medium": "low", "low": "low"}
 _WINDOWS_ACCOUNT_CHAIN_WINDOW_SECONDS = 10 * 60
+_WINDOWS_WMI_LATERAL_WINDOW_SECONDS = 2 * 60
 _CREDENTIAL_TOOL_RE = re.compile(r'mimikatz|lsadump|sekurlsa|kerberos::ptt|privilege::debug|credential.?dump', re.I)
 _LSASS_RE = re.compile(r'lsass', re.I)
 _CREDENTIAL_DETAIL_KEYS = (
     "command", "cmd", "commandline", "process", "processname", "image",
     "alert", "threat", "message", "rule", "signature", "file", "path",
 )
+_SENSITIVE_P0_CONTEXT_KEYS = {"session_id"}
 
 
 def _adjust_for_private_ip(ip: str, confidence: str, evidence: List[str]) -> str:
@@ -70,6 +72,7 @@ def run_detection(
                     ThreatLevel.LOW      if risk_score >= 20 else
                     ThreatLevel.INFO)
     recommendations = _gen_recommendations(alerts)
+    _sanitize_alert_display_fields(alerts)
 
     return AnalysisSummary(
         risk_score      = risk_score,
@@ -82,6 +85,21 @@ def run_detection(
         files_analyzed  = len(set(e.source_file for e in events)),
         incidents       = incidents,
     )
+
+
+def _sanitize_alert_display_fields(alerts: List[DetectionAlert]) -> None:
+    """Clean alert report text while preserving alert/event reference fields."""
+    for alert in alerts:
+        alert.rule_id = sanitize_report_text(alert.rule_id)
+        alert.rule_name = sanitize_report_text(alert.rule_name)
+        alert.description = sanitize_report_text(alert.description)
+        alert.category = sanitize_report_text(alert.category)
+        alert.mitre_attack = sanitize_report_text(alert.mitre_attack)
+        alert.mitre_phase = sanitize_report_text(alert.mitre_phase)
+        alert.evidence = [sanitize_report_text(item) for item in alert.evidence]
+        alert.recommendation = sanitize_report_text(alert.recommendation)
+        alert.timestamp = sanitize_report_text(alert.timestamp)
+        alert.confidence = sanitize_report_text(alert.confidence)
 
 
 def detect_brute_force(events: List[LogEvent]) -> List[DetectionAlert]:
@@ -282,6 +300,21 @@ def detect_windows_account_remote_access_chain(events: List[LogEvent]) -> List[D
 
 def detect_privilege_escalation(events: List[LogEvent]) -> List[DetectionAlert]:
     alerts = []
+    uac_events = [e for e in events if "uac-bypass" in e.tags]
+    if uac_events:
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("ub"), rule_id="PRIV-006", rule_name="UAC 绕过痕迹",
+            description=f"检测到 {len(uac_events)} 条 UAC bypass 相关注册表或执行痕迹",
+            level=max((e.level for e in uac_events), key=lambda item: item.score, default=ThreatLevel.HIGH),
+            category="权限提升", mitre_attack="T1548.002", mitre_phase="权限提升",
+            affected_events=[e.id for e in uac_events],
+            evidence=[
+                f"{e.timestamp}: {e.details.get('TargetObject') or e.details.get('command_line') or e.message}"
+                for e in uac_events[:5]
+            ],
+            recommendation="核查 HKCU/HKLM Software\\Classes 与 UAC 相关注册表改动，确认 fodhelper/eventvwr/slui/computerdefaults 等进程链是否授权。",
+            timestamp=max(e.timestamp for e in uac_events), confidence="high",
+        ))
     group_events = [
         e for e in events
         if any(t in e.tags for t in ("group-add",))
@@ -358,25 +391,92 @@ def detect_privilege_escalation(events: List[LogEvent]) -> List[DetectionAlert]:
     return alerts
 
 
+def _persistence_confidence(event: LogEvent, default: str = "medium") -> str:
+    confidence = event.details.get("persistence_alert_confidence") or ""
+    return confidence if confidence in {"high", "medium", "low"} else default
+
+
+def _append_persistence_baseline_evidence(evidence: List[str], event: LogEvent) -> None:
+    hint = event.details.get("false_positive_hint")
+    baseline = event.details.get("persistence_baseline")
+    if baseline:
+        evidence.append(f"基线候选: {baseline}")
+    if hint:
+        evidence.append(f"复核提示: {hint}")
+
+
 def detect_persistence(events: List[LogEvent]) -> List[DetectionAlert]:
     alerts = []
     for ev in [e for e in events if "service-install" in e.tags]:
+        evidence = [ev.message, f"时间: {ev.timestamp}"]
+        if ev.details.get("persistence_command"):
+            evidence.insert(1, f"执行内容: {ev.details.get('persistence_command')}")
+        _append_persistence_baseline_evidence(evidence, ev)
         alerts.append(DetectionAlert(
             id="a"+gen_id("ps"), rule_id="PERS-001", rule_name="安装新系统服务",
             description=ev.message, level=ThreatLevel.HIGH, category="持久化",
             mitre_attack="T1543.003", mitre_phase="持久化", affected_events=[ev.id],
-            evidence=[ev.message, f"时间: {ev.timestamp}"],
+            evidence=evidence,
             recommendation="验证服务合法性，检查服务二进制路径",
-            timestamp=ev.timestamp, confidence="medium",
+            timestamp=ev.timestamp, confidence=_persistence_confidence(ev),
         ))
     for ev in [e for e in events if "scheduled-task" in e.tags and e.event_id == "4698"]:
+        evidence = [ev.message, f"创建者: {ev.user or '?'}"]
+        if ev.details.get("persistence_command"):
+            evidence.insert(1, f"执行内容: {ev.details.get('persistence_command')}")
+        _append_persistence_baseline_evidence(evidence, ev)
         alerts.append(DetectionAlert(
             id="a"+gen_id("pt"), rule_id="PERS-002", rule_name="创建计划任务",
             description=ev.message, level=ThreatLevel.HIGH, category="持久化",
             mitre_attack="T1053.005", mitre_phase="持久化", affected_events=[ev.id],
-            evidence=[ev.message, f"创建者: {ev.user or '?'}"],
+            evidence=evidence,
             recommendation="检查计划任务执行内容，验证是否为合法维护任务",
-            timestamp=ev.timestamp, confidence="medium",
+            timestamp=ev.timestamp, confidence=_persistence_confidence(ev),
+        ))
+    wmi_persistence = [
+        e for e in events
+        if "wmi-persistence" in e.tags
+        and str(e.details.get("wmi_operation") or e.details.get("Operation") or "created").strip().lower() != "deleted"
+    ]
+    if wmi_persistence:
+        evidence = []
+        for event in wmi_persistence[:5]:
+            command = event.details.get("persistence_command") or event.details.get("command_line") or ""
+            evidence.append(f"{event.timestamp}: {event.message}")
+            if command:
+                evidence.append(f"执行内容: {command}")
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("pw"),
+            rule_id="PERS-005",
+            rule_name="WMI 事件订阅持久化",
+            description=f"检测到 {len(wmi_persistence)} 条 WMI Event Filter/Consumer/Binding 持久化痕迹",
+            level=max((e.level for e in wmi_persistence), key=lambda item: item.score, default=ThreatLevel.HIGH),
+            category="持久化",
+            mitre_attack="T1546.003",
+            mitre_phase="持久化",
+            affected_events=[e.id for e in wmi_persistence],
+            evidence=evidence[:8],
+            recommendation="检查 WMI __EventFilter、CommandLineEventConsumer 和 FilterToConsumerBinding，导出 root\\subscription 并删除未授权订阅。",
+            timestamp=max(e.timestamp for e in wmi_persistence),
+            confidence="high",
+        ))
+    suspicious = [e for e in events if "suspicious-persistence" in e.tags]
+    if suspicious:
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("sp"), rule_id="PERS-004", rule_name="高危持久化执行内容",
+            description=f"检测到 {len(suspicious)} 条服务或计划任务中嵌入的高危执行内容",
+            level=max((e.level for e in suspicious), key=lambda item: item.score, default=ThreatLevel.HIGH),
+            category="持久化",
+            mitre_attack=_common_event_mitre(suspicious) or "T1547",
+            mitre_phase="持久化",
+            affected_events=[e.id for e in suspicious],
+            evidence=[
+                f"{e.timestamp}: {e.details.get('persistence_mechanism') or '?'} -> {e.details.get('persistence_command') or e.message}"
+                for e in suspicious[:5]
+            ],
+            recommendation="优先核查服务/计划任务的创建者、执行命令、落地文件、网络外联和同时间窗口进程树，必要时禁用该持久化项。",
+            timestamp=max(e.timestamp for e in suspicious),
+            confidence="high" if any(e.level.score >= ThreatLevel.CRITICAL.score for e in suspicious) else "medium",
         ))
     for ev in [e for e in events if "account-creation" in e.tags and e.details.get("account_sensitivity") != "system-initialization"]:
         target = ev.details.get("target_account") or ev.details.get("target_user") or ev.user or "?"
@@ -503,7 +603,7 @@ def detect_suspicious_execution(events: List[LogEvent]) -> List[DetectionAlert]:
             recommendation="检查 PS 脚本内容，启用脚本块日志，考虑启用 AMSI 和 CLM",
             timestamp=max(e.timestamp for e in critical_ps), confidence="high",
         ))
-    lolbins = [e for e in events if "lolbin" in e.tags]
+    lolbins = [e for e in events if "lolbin" in e.tags and e.details.get("source_type") != "edr"]
     if lolbins:
         alerts.append(DetectionAlert(
             id="a"+gen_id("lb"), rule_id="EXEC-002", rule_name="Living-off-the-Land (LOLBins)",
@@ -546,23 +646,92 @@ def detect_suspicious_execution(events: List[LogEvent]) -> List[DetectionAlert]:
 
 
 def detect_data_exfiltration(events: List[LogEvent]) -> List[DetectionAlert]:
-    shell_exfil = [e for e in events if "shell-exfiltration" in e.tags or "data-exfiltration" in e.tags]
-    if not shell_exfil:
+    alerts: List[DetectionAlert] = []
+    shell_exfil = [e for e in events if "shell-exfiltration" in e.tags]
+    dns_exfil = [e for e in events if "dns-exfiltration" in e.tags or "dns-tunnel" in e.tags]
+    other_exfil = [
+        e for e in events
+        if "data-exfiltration" in e.tags and e not in shell_exfil and e not in dns_exfil
+    ]
+    command_exfil = shell_exfil + other_exfil
+    if command_exfil:
+        shell_only = bool(shell_exfil) and not other_exfil
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("xf"), rule_id="EXFIL-001",
+            rule_name="Shell 数据外传命令" if shell_only else "数据外传行为",
+            description=f"检测到 {len(command_exfil)} 条疑似本地文件或命令行外传行为",
+            level=ThreatLevel.HIGH, category="数据外传",
+            mitre_attack=_common_event_mitre(command_exfil) or "T1041", mitre_phase="数据外传",
+            affected_events=[e.id for e in command_exfil],
+            evidence=[f"{e.details.get('sequence', '?')}: {e.details.get('command') or e.message}" for e in command_exfil[:5]],
+            recommendation="核查外传命令执行账号、源主机、目标地址和传输对象，结合代理/DNS/防火墙/DLP 确认数据范围。",
+            timestamp=max(e.timestamp for e in command_exfil), confidence="high",
+        ))
+    if dns_exfil:
+        alerts.append(DetectionAlert(
+            id="a"+gen_id("xd"), rule_id="EXFIL-002", rule_name="DNS 数据外传/隧道",
+            description=f"检测到 {len(dns_exfil)} 条长编码 DNS 查询或 DNS 查询命令，可能用于隧道或数据外传",
+            level=max((e.level for e in dns_exfil), key=lambda item: item.score, default=ThreatLevel.HIGH),
+            category="数据外传",
+            mitre_attack=_common_event_mitre(dns_exfil) or "T1048.003",
+            mitre_phase="数据外传",
+            affected_events=[e.id for e in dns_exfil],
+            evidence=[
+                f"{e.timestamp}: {e.details.get('dns_query') or e.details.get('QueryName') or e.details.get('command_line') or e.message}"
+                for e in dns_exfil[:5]
+            ],
+            recommendation="核查 DNS 查询来源进程、查询长度和编码内容，结合 DNS 服务器、代理和终端进程树确认外传范围。",
+            timestamp=max(e.timestamp for e in dns_exfil), confidence="medium",
+        ))
+    return alerts
+
+
+def detect_sysmon_command_control(events: List[LogEvent]) -> List[DetectionAlert]:
+    evts = [
+        e for e in events
+        if "sysmon" in e.tags
+        and any(tag in e.tags for tag in ("c2", "malicious-domain", "callback-domain", "dns-tunnel"))
+    ]
+    if not evts:
         return []
+
+    level = max((e.level for e in evts), key=lambda item: item.score, default=ThreatLevel.HIGH)
+    if level.score < ThreatLevel.HIGH.score:
+        level = ThreatLevel.HIGH
+    evidence = []
+    for event in evts[:5]:
+        query = event.details.get("dns_query") or event.details.get("QueryName") or ""
+        dst = event.details.get("destination_host") or event.details.get("destination_ip") or event.ip or ""
+        process = event.process or event.details.get("process") or event.details.get("Image") or "?"
+        indicator = query or dst or "?"
+        evidence.append(f"{event.timestamp}: {indicator} via {process}")
+    if all("dns-tunnel" in event.tags and "c2" not in event.tags for event in evts):
+        mitre_attack = "T1071.004"
+    else:
+        mitre_attack = _common_event_mitre(evts) or "T1071"
+
     return [DetectionAlert(
-        id="a"+gen_id("xf"), rule_id="EXFIL-001", rule_name="Shell 数据外传命令",
-        description=f"命令历史中检测到 {len(shell_exfil)} 条疑似本地文件外传命令",
-        level=ThreatLevel.HIGH, category="数据外传",
-        mitre_attack="T1041", mitre_phase="数据外传",
-        affected_events=[e.id for e in shell_exfil],
-        evidence=[f"{e.details.get('sequence', '?')}: {e.details.get('command') or e.message}" for e in shell_exfil[:5]],
-        recommendation="核查外传命令执行账号、源主机、目标地址和传输对象，结合代理/DNS/防火墙/DLP 确认数据范围。",
-        timestamp=max(e.timestamp for e in shell_exfil), confidence="high",
+        id="a"+gen_id("c2"),
+        rule_id="C2-001",
+        rule_name="Sysmon 可疑命令控制/外联",
+        description=f"Sysmon 检测到 {len(evts)} 条可疑 DNS/网络外联事件",
+        level=level,
+        category="命令控制",
+        mitre_attack=mitre_attack,
+        mitre_phase="命令控制",
+        affected_events=[e.id for e in evts],
+        evidence=evidence,
+        recommendation="核查源主机进程树、DNS 缓存、代理/防火墙同时间窗口外联，必要时隔离终端并封禁域名/IP。",
+        timestamp=max(e.timestamp for e in evts),
+        confidence="medium",
     )]
 
 
 def detect_lateral_movement(events: List[LogEvent]) -> List[DetectionAlert]:
     alerts = []
+    wmi_alert = _detect_windows_wmi_remote_execution(events)
+    if wmi_alert:
+        alerts.append(wmi_alert)
     rdp = [e for e in events if "rdp" in e.tags and "lateral-movement" in e.tags]
     if rdp:
         unique_hosts = set(e.host for e in rdp if e.host)
@@ -593,6 +762,113 @@ def detect_lateral_movement(events: List[LogEvent]) -> List[DetectionAlert]:
             timestamp=max(e.timestamp for e in explicit), confidence="medium",
         ))
     return alerts
+
+
+def _detect_windows_wmi_remote_execution(events: List[LogEvent]) -> Optional[DetectionAlert]:
+    remote_logons = [
+        event for event in events
+        if event.event_id == "4624"
+        and "successful-login" in event.tags
+        and str(event.details.get("LogonType", "")).strip() == "3"
+        and _remote_source_ip(event)
+    ]
+    wmi_processes = [
+        event for event in events
+        if event.event_id in ("1", "4688")
+        and _is_wmi_process_event(event)
+    ]
+    if not remote_logons or not wmi_processes:
+        return None
+
+    related: List[LogEvent] = []
+    for process_event in wmi_processes:
+        matches = [
+            logon for logon in remote_logons
+            if _same_host(logon, process_event)
+            and _seconds_between(logon, process_event) is not None
+            and 0 <= _seconds_between(logon, process_event) <= _WINDOWS_WMI_LATERAL_WINDOW_SECONDS
+        ]
+        if not matches:
+            continue
+        related.extend(matches)
+        related.append(process_event)
+        related.extend(_process_events_near(events, process_event, seconds=30))
+
+    related = _dedup_events_by_id(sorted(related, key=lambda item: item.timestamp or ""))
+    if not related:
+        return None
+
+    source_ips = sorted({ip for event in related if (ip := _remote_source_ip(event))})
+    hosts = sorted({event.host for event in related if event.host})
+    processes = sorted({
+        _process_basename(event.process or event.details.get("child_process") or event.details.get("Image") or event.details.get("NewProcessName") or "")
+        for event in related
+        if event.event_id in ("1", "4688")
+    })
+    evidence = [
+        f"来源IP: {', '.join(source_ips[:5]) or '?'}",
+        f"目标主机: {', '.join(hosts[:5]) or '?'}",
+        f"相关进程: {', '.join([item for item in processes if item][:5]) or '?'}",
+    ]
+    evidence.extend(f"{event.timestamp}: {event.message}" for event in related[:5])
+    return DetectionAlert(
+        id="a"+gen_id("wm"),
+        rule_id="LAT-003",
+        rule_name="WMI 远程执行链",
+        description=f"检测到远程网络登录后短时间内出现 WMI 进程执行，涉及 {len(related)} 条事件",
+        level=ThreatLevel.HIGH,
+        category="横向移动",
+        mitre_attack="T1047",
+        mitre_phase="横向移动",
+        affected_events=[event.id for event in related],
+        evidence=evidence,
+        recommendation="核查来源主机是否授权远程管理，补采目标主机 Sysmon 进程树、WMI-Activity 日志和防火墙会话。",
+        timestamp=max(event.timestamp for event in related),
+        confidence="medium",
+    )
+
+
+def _process_events_near(events: List[LogEvent], anchor: LogEvent, seconds: int) -> List[LogEvent]:
+    nearby = []
+    for event in events:
+        if event.id == anchor.id or event.event_id not in ("1", "4688") or not _same_host(event, anchor):
+            continue
+        delta = _seconds_between(anchor, event)
+        if delta is not None and 0 <= delta <= seconds:
+            nearby.append(event)
+    return nearby
+
+
+def _is_wmi_process_event(event: LogEvent) -> bool:
+    if "wmi" in event.tags:
+        return True
+    process = _process_basename(
+        event.process
+        or event.details.get("child_process")
+        or event.details.get("Image")
+        or event.details.get("NewProcessName")
+        or ""
+    ).lower()
+    command = (event.details.get("command_line") or event.details.get("CommandLine") or "").lower()
+    return process in {"wmiprvse.exe", "wmic.exe", "winrs.exe", "winrshost.exe"} or "\\root\\subscription" in command
+
+
+def _remote_source_ip(event: LogEvent) -> str:
+    ip = str(event.details.get("source_ip") or event.ip or "").strip()
+    if not ip or ip in {"-", "::1", "127.0.0.1", "::ffff:127.0.0.1"}:
+        return ""
+    return ip
+
+
+def _same_host(left: LogEvent, right: LogEvent) -> bool:
+    if left.host and right.host:
+        return left.host.lower() == right.host.lower()
+    return True
+
+
+def _process_basename(value: str) -> str:
+    text = str(value or "").strip().strip("\"'").replace("/", "\\")
+    return text.rsplit("\\", 1)[-1] if text else ""
 
 
 def detect_web_attacks(events: List[LogEvent]) -> List[DetectionAlert]:
@@ -806,8 +1082,10 @@ def detect_p0_security_events(events: List[LogEvent]) -> List[DetectionAlert]:
         category="主机告警",
         mitre_attack="T1204",
         mitre_phase="执行",
-        predicate=lambda e: "edr" in e.tags and e.level.score >= ThreatLevel.HIGH.score,
-        recommendation="优先查看 EDR 进程树、文件 Hash、网络连接和处置动作，必要时隔离终端并导出取证包",
+        predicate=lambda e: "edr" in e.tags and (
+            e.level.score >= ThreatLevel.HIGH.score or "edr-key-evidence" in e.tags
+        ),
+        recommendation="优先查看 EDR 进程树、文件 Hash、计划任务、ACL、端口转发和网络连接，必要时隔离终端并导出取证包",
     )
 
     return alerts
@@ -833,11 +1111,12 @@ def _append_p0_alert(
     hosts = sorted(set(e.host for e in evts if e.host))
     alert_mitre = _common_event_mitre(evts) or mitre_attack
     alert_phase = _response_phase_for_events(evts) or _response_phase_for_mitre(alert_mitre) or mitre_phase
+    sample_event = _representative_alert_event(evts)
     evidence = [
         f"事件数: {len(evts)}",
-        f"IP: {', '.join(ips[:5]) or '?'}",
-        f"主机/目标: {', '.join(hosts[:5]) or '?'}",
-        f"示例: {evts[0].message}",
+        f"端点: IP={', '.join(ips[:5]) or '?'}；主机/目标={', '.join(hosts[:5]) or '?'}",
+        *_p0_context_evidence(evts),
+        f"示例: {sample_event.message}",
     ]
     alerts.append(DetectionAlert(
         id="a"+gen_id("p0"),
@@ -854,6 +1133,131 @@ def _append_p0_alert(
         timestamp=max(e.timestamp for e in evts),
         confidence="high" if actual_max_level.score >= ThreatLevel.HIGH.score else "medium",
     ))
+
+
+def _representative_alert_event(events: List[LogEvent]) -> LogEvent:
+    def priority(event: LogEvent) -> Tuple[int, str, str]:
+        tags = set(event.tags)
+        if "suspicious-execution" in tags:
+            bucket = 0
+        elif "archive-extract" in tags:
+            bucket = 1
+        elif tags & {"task-cleanup", "acl-modification"}:
+            bucket = 2
+        elif "portproxy-reset" in tags:
+            bucket = 4
+        else:
+            bucket = 3
+        return (bucket, event.timestamp or "", event.id)
+
+    return sorted(events, key=priority)[0]
+
+
+def _p0_context_evidence(events: List[LogEvent]) -> List[str]:
+    parts: List[str] = []
+    edr_context = _p0_edr_context_evidence(events)
+    for label, key in (
+        ("设备", "device_name"),
+        ("策略", "policy_name"),
+        ("策略ID", "policy_id"),
+        ("签名", "signature_name"),
+        ("签名ID", "signature_id"),
+        ("风险分类", "risk_category"),
+        ("源区域", "source_zone"),
+        ("目标区域", "destination_zone"),
+        ("入接口", "source_interface"),
+        ("出接口", "destination_interface"),
+        ("租户/虚拟域", "tenant"),
+        ("会话", "session_id"),
+        ("追踪ID", "trace_id"),
+    ):
+        values = _p0_detail_values(events, key)
+        if values:
+            parts.append(f"{label}={', '.join(values)}")
+    if not parts:
+        return edr_context
+    return edr_context + [f"P0上下文: {truncate('; '.join(parts), 500)}"]
+
+
+def _p0_edr_context_evidence(events: List[LogEvent]) -> List[str]:
+    if not any("edr" in event.tags for event in events):
+        return []
+    counters = {
+        "用户解压": sum(1 for event in events if "archive-extract" in event.tags),
+        "伪装/无签名执行": sum(1 for event in events if "suspicious-execution" in event.tags),
+        "计划任务删除": sum(1 for event in events if "task-cleanup" in event.tags),
+        "随机目录ACL修改": sum(1 for event in events if "acl-modification" in event.tags),
+        "portproxy reset": sum(1 for event in events if "portproxy-reset" in event.tags),
+    }
+    action_text = "，".join(f"{name}={count}" for name, count in counters.items() if count)
+    processes = _edr_values(events, "process_name", "target_process", limit=8)
+    paths = _edr_suspicious_paths(events, limit=5)
+    evidence: List[str] = []
+    if action_text:
+        evidence.append(f"EDR关键动作: {action_text}")
+    if processes:
+        evidence.append(f"EDR核心进程: {', '.join(processes)}")
+    if paths:
+        evidence.append(f"EDR可疑路径: {'; '.join(paths)}")
+    return evidence
+
+
+def _edr_values(events: List[LogEvent], *keys: str, limit: int = 5) -> List[str]:
+    values: List[str] = []
+    seen: Set[str] = set()
+    for event in events:
+        if "edr" not in event.tags:
+            continue
+        for key in keys:
+            value = str(event.details.get(key) or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            values.append(value)
+            if len(values) >= limit:
+                return values
+    return values
+
+
+def _edr_suspicious_paths(events: List[LogEvent], limit: int = 5) -> List[str]:
+    values: List[str] = []
+    seen: Set[str] = set()
+    for event in events:
+        if "edr" not in event.tags:
+            continue
+        for key in ("archive_output_path", "acl_path", "process_path", "target_path", "child_path"):
+            value = str(event.details.get(key) or "").strip()
+            low = value.lower()
+            if not value or value in seen:
+                continue
+            if not any(marker in low for marker in ("\\users\\", "\\inetpub\\wwwroot\\", "\\appdata\\local\\temp\\")):
+                continue
+            seen.add(value)
+            values.append(truncate(value, 120))
+            if len(values) >= limit:
+                return values
+    return values
+
+
+def _p0_detail_values(events: List[LogEvent], key: str, limit: int = 3) -> List[str]:
+    values: List[str] = []
+    seen: Set[str] = set()
+    for event in events:
+        value = event.details.get(key)
+        if not value:
+            continue
+        if key in _SENSITIVE_P0_CONTEXT_KEYS:
+            assignment = sanitize_report_text(f"{key}={value}")
+            safe = assignment.split("=", 1)[1] if "=" in assignment else assignment
+        else:
+            safe = sanitize_report_text(value)
+        safe = truncate(safe, 80)
+        if safe and safe not in seen:
+            seen.add(safe)
+            values.append(safe)
+        if len(values) >= limit:
+            break
+    return values
 
 
 def _target_account(event: LogEvent) -> str:
@@ -1067,10 +1471,18 @@ def _build_timeline(events: List[LogEvent]) -> List[TimelineEntry]:
             return float("inf")
 
     significant.sort(key=lambda e: (ts_epoch(e.timestamp), -e.level.score, e.id))
-    return [TimelineEntry(timestamp=e.timestamp, level=e.level, category=e.category,
-                          message=e.message, event_id=e.id, source_file=e.source_file,
-                          mitre_attack=e.mitre_attack)
-            for e in significant[:config.THRESHOLDS.timeline_max_items]]
+    return [
+        TimelineEntry(
+            timestamp=sanitize_report_text(e.timestamp),
+            level=e.level,
+            category=sanitize_report_text(e.category),
+            message=sanitize_report_text(e.message),
+            event_id=sanitize_report_text(e.id),
+            source_file=sanitize_report_text(e.source_file),
+            mitre_attack=sanitize_report_text(e.mitre_attack),
+        )
+        for e in significant[:config.THRESHOLDS.timeline_max_items]
+    ]
 
 
 def _fallback_web_rule_id(attack_type: str) -> str:
@@ -1102,11 +1514,15 @@ _RESPONSE_FAMILY_PHASE = {
 _RESPONSE_TECHNIQUE_PHASE = {
     "T1595": "侦察", "T1083": "侦察", "T1190": "初始访问", "T1078": "身份突破",
     "T1059": "执行", "T1218": "执行", "T1543": "持久化", "T1053": "持久化",
-    "T1136": "持久化", "T1547": "持久化", "T1548": "权限提升", "T1098": "权限提升",
+    "T1136": "持久化", "T1546": "持久化", "T1547": "持久化",
+    "T1548": "权限提升", "T1098": "权限提升",
+    "T1036": "防御规避", "T1055": "防御规避",
     "T1070": "防御规避", "T1562": "防御规避", "T1140": "防御规避",
+    "T1222": "防御规避",
     "T1003": "凭据访问", "T1110": "身份突破", "T1552": "凭据访问", "T1558": "凭据访问",
-    "T1021": "横向移动", "T1550": "横向移动", "T1071": "命令控制", "T1105": "命令控制",
-    "T1505": "主机失陷", "T1041": "数据外传",
+    "T1021": "横向移动", "T1047": "横向移动", "T1550": "横向移动",
+    "T1071": "命令控制", "T1105": "命令控制", "T1204": "执行", "T1505": "主机失陷",
+    "T1041": "数据外传", "T1048": "数据外传", "T1567": "数据外传",
 }
 
 _RESPONSE_PHASE_ORDER = [
@@ -1167,12 +1583,15 @@ def _build_attack_chain(events: List[LogEvent], alerts: List[DetectionAlert]) ->
             if event.level.score > phases[phase]["level"].score:
                 phases[phase]["level"] = event.level
             for alert_phase, alert_level, alert_mitre in alert_context.get(event.id, []):
-                if alert_phase != phase:
+                if alert_phase not in phases:
                     continue
+                if alert_phase != phase and alert_phase != "横向移动":
+                    continue
+                phases[alert_phase]["event_ids"].add(event.id)
                 if alert_mitre:
-                    phases[phase]["techniques"].add(alert_mitre)
-                if alert_level.score > phases[phase]["level"].score:
-                    phases[phase]["level"] = alert_level
+                    phases[alert_phase]["techniques"].add(alert_mitre)
+                if alert_level.score > phases[alert_phase]["level"].score:
+                    phases[alert_phase]["level"] = alert_level
 
     for ev in events:
         if ev.level.score >= ThreatLevel.MEDIUM.score or ev.id in alert_event_ids:
@@ -1224,6 +1643,8 @@ def _gen_recommendations(alerts: List[DetectionAlert]) -> List[str]:
         add("【高危】部署 WAF，修复已识别的 Web 漏洞，检查是否有数据泄露")
     if any(a.rule_id.startswith("P0-C2") for a in alerts):
         add("【高危】核查 DNS/代理/防火墙外联链路，定位源主机进程并封禁恶意域名或 IP")
+    if any(a.rule_id.startswith("C2") for a in alerts):
+        add("【高危】核查 Sysmon 进程树、DNS/代理/防火墙外联链路，确认是否存在命令控制或回连通道")
     if any(a.rule_id.startswith("EXFIL") for a in alerts):
         add("【高危】核查疑似外传命令对应账号、文件、目标地址和代理/防火墙记录，评估敏感数据影响范围")
     if any(a.rule_id.startswith("P0-EXFIL") for a in alerts):
@@ -1269,12 +1690,14 @@ def _select_windows_account_chain(index: DetectionEventIndex) -> List[LogEvent]:
 def _select_privilege_events(index: DetectionEventIndex) -> List[LogEvent]:
     return index.tags_any(
         "group-add", "sudo-denied", "sudo-shell", "root-login",
-        "suid-enumeration", "sudo-enumeration", "su-attempt",
+        "suid-enumeration", "sudo-enumeration", "su-attempt", "uac-bypass",
     )
 
 
 def _select_persistence_events(index: DetectionEventIndex) -> List[LogEvent]:
-    return index.tags_any("service-install", "scheduled-task", "account-creation")
+    return index.tags_any(
+        "service-install", "scheduled-task", "account-creation", "suspicious-persistence", "wmi-persistence",
+    )
 
 
 def _select_defense_evasion_events(index: DetectionEventIndex) -> List[LogEvent]:
@@ -1292,8 +1715,15 @@ def _select_exfiltration_events(index: DetectionEventIndex) -> List[LogEvent]:
     return index.tags_any("shell-exfiltration", "data-exfiltration")
 
 
+def _select_sysmon_command_control_events(index: DetectionEventIndex) -> List[LogEvent]:
+    return index.union(
+        index.tags_any("c2", "malicious-domain", "callback-domain", "dns-tunnel"),
+        index.event_ids("3", "22"),
+    )
+
+
 def _select_lateral_events(index: DetectionEventIndex) -> List[LogEvent]:
-    return index.tags_any("rdp", "lateral-movement", "explicit-creds")
+    return index.tags_any("rdp", "lateral-movement", "explicit-creds", "remote-access", "wmi")
 
 
 def _select_recon_events(index: DetectionEventIndex) -> List[LogEvent]:
@@ -1315,10 +1745,11 @@ def _select_credential_events(index: DetectionEventIndex) -> List[LogEvent]:
 
 
 def _select_p0_events(index: DetectionEventIndex) -> List[LogEvent]:
-    return index.tags_any(
+    candidates = index.tags_any(
         "c2", "dns-tunnel", "exfiltration", "bastion-command",
         "exposed-service", "edr",
     )
+    return [event for event in candidates if event.details.get("p0_kind")]
 
 
 def _select_cn_hvv_events(index: DetectionEventIndex) -> List[LogEvent]:
@@ -1343,6 +1774,7 @@ def _ensure_default_detectors() -> None:
         DetectorSpec("credential-access", detect_credential_access, selector=_select_credential_events),
         DetectorSpec("suspicious-execution", detect_suspicious_execution, selector=_select_execution_events),
         DetectorSpec("data-exfiltration", detect_data_exfiltration, selector=_select_exfiltration_events),
+        DetectorSpec("sysmon-command-control", detect_sysmon_command_control, selector=_select_sysmon_command_control_events),
         DetectorSpec("lateral-movement", detect_lateral_movement, selector=_select_lateral_events),
         DetectorSpec("web-attacks", detect_web_attacks, selector=lambda index: index.tags_any("web-attack")),
         DetectorSpec("reconnaissance", detect_reconnaissance, selector=_select_recon_events),

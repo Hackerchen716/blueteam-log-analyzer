@@ -38,14 +38,24 @@ _COMBINED_RE = re.compile(
     r'(?:"([^"]*)")?'                    # user-agent
 )
 
+_COMMAND_WORDS_RE = (
+    r'(?:whoami|id|uname|cat|curl|wget|bash|sh|nc|netcat|python|perl|php|'
+    r'powershell|cmd(?:\.exe)?)'
+)
+_COMMAND_SEPARATOR_RE = r'(?:;|%3b|\|\||%7c%7c|&&|%26%26)'
+_COMMAND_PARAM_RE = r'(?:cmd|exec|command|shell|payload|run)\s*='
+_COMMAND_EXEC_RE = (
+    rf'(?:{_COMMAND_PARAM_RE}|{_COMMAND_SEPARATOR_RE}\s*{_COMMAND_WORDS_RE}\b|'
+    rf'=\s*{_COMMAND_WORDS_RE}\b)'
+)
+
 _SUSPICIOUS_GENERIC = re.compile(
     r'(\.\./|%2e%2e|%252e|%2f%2e%2e|%5c%2e%2e|'
-    r'\bwhoami\b|\bid\b|\buname\b|\bcat\b|/etc/passwd|'
+    rf'{_COMMAND_EXEC_RE}|/etc/passwd|'
     r'\b(select|union)\b.{0,40}\b(select|from)\b|'
     r'(\bor\b|\band\b)\s+\d+\s*=\s*\d+|'
     r'1\s*=\s*1|'
-    r'(\bexec\b|\bxp_cmdshell\b)|'
-    r'(;|%3b|\|\||%7c%7c|&&|%26%26))',
+    r'(\bexec\b|\bxp_cmdshell\b))',
     re.I
 )
 
@@ -70,9 +80,9 @@ _ATTACK_PATTERNS: List[Tuple[re.Pattern, ThreatLevel, str, str, str, List[str]]]
                 r'\/windows\/system32|c:\\windows)', re.I),
      ThreatLevel.CRITICAL, "Web攻击", "LFI/RFI", "T1083", ["lfi", "rfi", "path-traversal"]),
 
-    (re.compile(r'(cmd=|exec=|system\s*\(|passthru|shell_exec|'
+    (re.compile(rf'({_COMMAND_EXEC_RE}|system\s*\(|passthru|shell_exec|'
                 r'phpinfo\s*\(|eval\s*\(|assert\s*\(|'
-                r'\bwhoami\b|\bid\b|\buname\b)', re.I),
+                r'\bxp_cmdshell\b)', re.I),
      ThreatLevel.CRITICAL, "Web攻击", "命令注入/代码执行", "T1059", ["rce", "command-injection"]),
 
     (re.compile(r'(\.php\?.*=http|\.php\?.*=ftp|include\s*\(|require\s*\()', re.I),
@@ -319,7 +329,7 @@ def _parse_access_line(line: str, source_file: str, ip_stats: Dict) -> Optional[
             rule_name = f"HTTP {status} 服务器错误"
             event_msg = f"服务器错误 {status}: {display_path}"
 
-        elif not tags and 200 <= status < 300:
+        elif not tags and 200 <= status < 400:
             return None  # 过滤正常成功请求
 
     return LogEvent(

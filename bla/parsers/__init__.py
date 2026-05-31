@@ -32,11 +32,13 @@ from .p0_security import (
     parse_p0_security_json,
     parse_p0_security_lines,
 )
+from .edr_xlsx import looks_like_edr_xlsx, parse_edr_xlsx_content, parse_edr_xlsx_file
 from .registry import ParserContext, ParserRegistry, ParserSpec, normalize_aliases
 from .shell_history import parse_shell_history, parse_shell_history_file
 from .stats import compute_stats
 from .web_access import parse_web_access, parse_web_access_file
 from .windows_evtx import parse_windows_evtx, parse_windows_xml, parse_windows_xml_file
+from .windows_json import looks_like_windows_event_json, parse_windows_json, parse_windows_json_file
 
 _DEFAULT_REGISTRY = ParserRegistry()
 _DEFAULTS_REGISTERED = False
@@ -111,6 +113,22 @@ def _ensure_default_parsers() -> None:
             description="Windows Event XML exports",
         ),
         ParserSpec(
+            name="windows-json",
+            aliases=normalize_aliases(("winjson", "windows-eventlog-json", "otrf-windows")),
+            can_parse=_can_parse_windows_json,
+            parse_file=lambda ctx: parse_windows_json_file(ctx.file_path or "", ctx.source_name),
+            parse_content=lambda ctx: parse_windows_json(ctx.content or "", ctx.source_name),
+            description="Windows EventLog JSON/JSONL exports",
+        ),
+        ParserSpec(
+            name="edr-xlsx",
+            aliases=normalize_aliases(("edr-excel", "xlsx", "p0-xlsx", "endpoint-xlsx")),
+            can_parse=_can_parse_edr_xlsx,
+            parse_file=lambda ctx: parse_edr_xlsx_file(ctx.file_path or "", ctx.source_name),
+            parse_content=lambda ctx: parse_edr_xlsx_content(ctx.content or "", ctx.source_name),
+            description="EDR/XDR Excel process telemetry exports",
+        ),
+        ParserSpec(
             name="linux-auth",
             aliases=normalize_aliases(("auth", "secure", "linux")),
             can_parse=_can_parse_linux_auth,
@@ -158,6 +176,14 @@ def _ensure_default_parsers() -> None:
 def _can_parse_windows_xml(context: ParserContext) -> bool:
     sample = context.sample_text[:2000].lower()
     return "<event" in sample and ("xmlns" in sample or "<eventid>" in sample)
+
+
+def _can_parse_windows_json(context: ParserContext) -> bool:
+    return looks_like_windows_event_json(context.file_path or context.source_name, context.sample_text)
+
+
+def _can_parse_edr_xlsx(context: ParserContext) -> bool:
+    return bool(context.file_path and looks_like_edr_xlsx(context.file_path, context.sample_text))
 
 
 def _can_parse_linux_auth(context: ParserContext) -> bool:

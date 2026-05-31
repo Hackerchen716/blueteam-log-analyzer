@@ -207,6 +207,190 @@ class P0SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(event.details.get("action"), "allow")
         self.assertTrue(any(alert.rule_id == "P0-FW-001" for alert in summary.alerts))
 
+    def test_p0_normalized_action_accepts_event_action_and_result_aliases(self):
+        lines = [
+            "time=2024-03-15T11:01:00 log_type=firewall "
+            "src_ip=203.0.113.9 dst_ip=10.0.0.9 dst_port=3389 "
+            "event_action=allow protocol=tcp",
+            "time=2024-03-15T11:02:00 log_type=firewall "
+            "src_ip=203.0.113.10 dst_ip=10.0.0.10 dst_port=3389 "
+            "result=allow protocol=tcp",
+        ]
+
+        result = parse_p0_security_lines(lines, "firewall.log")
+        by_dst = {event.details.get("dst_ip"): event for event in result.events}
+
+        self.assertEqual(len(result.events), 2)
+        self.assertEqual(by_dst["10.0.0.9"].details.get("action"), "allow")
+        self.assertEqual(by_dst["10.0.0.10"].details.get("action"), "allow")
+        self.assertTrue(all(event.rule_name == "防火墙放行敏感端口访问" for event in result.events))
+
+        vpn = parse_p0_security_lines([
+            "time=2024-03-15T11:03:00 log_type=vpn user=alice "
+            "src_ip=198.51.100.44 result=failed",
+        ], "vpn.log")
+        self.assertEqual(vpn.events[0].details.get("status"), "failed")
+        self.assertEqual(vpn.events[0].details.get("action"), "")
+
+    def test_p0_normalized_asset_uses_target_aliases_and_dst_ip_fallback(self):
+        lines = [
+            "time=2024-03-15T11:04:00 log_type=firewall "
+            "src_ip=203.0.113.9 dst_ip=10.0.0.9 dst_port=3389 "
+            "action=allow protocol=tcp",
+            "time=2024-03-15T11:05:00 log_type=proxy "
+            "src_ip=10.0.0.8 user=alice destination_host=beacon.evil.example "
+            "threat_category=C2 action=allow",
+        ]
+
+        result = parse_p0_security_lines(lines, "p0.log")
+        by_source = {event.source: event for event in result.events}
+
+        self.assertEqual(len(result.events), 2)
+        self.assertEqual(by_source["Firewall/NAT"].host, "10.0.0.9")
+        self.assertEqual(by_source["Firewall/NAT"].details.get("asset"), "10.0.0.9")
+        self.assertEqual(by_source["Proxy/SWG"].host, "beacon.evil.example")
+        self.assertEqual(by_source["Proxy/SWG"].details.get("asset"), "beacon.evil.example")
+        self.assertEqual(by_source["Proxy/SWG"].details.get("destinationhost"), "beacon.evil.example")
+
+    def test_p0_normalized_session_and_trace_accept_flow_and_transaction_aliases(self):
+        line = (
+            "time=2024-03-15T11:06:00 log_type=proxy "
+            "src_ip=10.0.0.8 user=alice destination_host=beacon.evil.example "
+            "flow_id=flow-42 transaction_id=req-abc-123 threat_category=C2 action=allow"
+        )
+
+        result = parse_p0_security_lines([line], "proxy.log")
+
+        self.assertEqual(len(result.events), 1)
+        event = result.events[0]
+        self.assertEqual(event.details.get("session_id"), "flow-42")
+        self.assertEqual(event.details.get("trace_id"), "req-abc-123")
+        self.assertEqual(event.details.get("flowid"), "flow-42")
+        self.assertEqual(event.details.get("transactionid"), "req-abc-123")
+
+    def test_p0_normalized_risk_category_preserves_vendor_classification(self):
+        lines = [
+            "time=2024-03-15T11:07:00 log_type=proxy "
+            "src_ip=10.0.0.8 user=alice url=https://beacon.evil.example/a "
+            "url_category=Malware threat_category=C2 action=allowed",
+            "time=2024-03-15T11:08:00 log_type=dns client_ip=10.0.0.8 "
+            "query=beacon.evil.example classification=Botnet rcode=NOERROR",
+        ]
+
+        result = parse_p0_security_lines(lines, "p0.log")
+        by_source = {event.source: event for event in result.events}
+
+        self.assertEqual(len(result.events), 2)
+        self.assertEqual(by_source["Proxy/SWG"].details.get("risk_category"), "C2")
+        self.assertEqual(by_source["Proxy/SWG"].details.get("urlcategory"), "Malware")
+        self.assertEqual(by_source["DNS"].details.get("risk_category"), "Botnet")
+        self.assertEqual(by_source["DNS"].details.get("classification"), "Botnet")
+
+    def test_p0_normalized_device_name_accepts_common_vendor_aliases(self):
+        lines = [
+            "time=2024-03-15T11:09:00 log_type=proxy devname=FW-EDGE-01 "
+            "src_ip=10.0.0.8 user=alice url=https://beacon.evil.example/a "
+            "threat_category=C2 action=allow",
+            "time=2024-03-15T11:10:00 log_type=vpn gateway=vpn-gw-01 "
+            "user=alice src_ip=198.51.100.44 result=failed",
+        ]
+
+        result = parse_p0_security_lines(lines, "p0.log")
+        by_source = {event.source: event for event in result.events}
+
+        self.assertEqual(len(result.events), 2)
+        self.assertEqual(by_source["Proxy/SWG"].details.get("device_name"), "FW-EDGE-01")
+        self.assertEqual(by_source["Proxy/SWG"].details.get("devname"), "FW-EDGE-01")
+        self.assertEqual(by_source["VPN"].details.get("device_name"), "vpn-gw-01")
+        self.assertEqual(by_source["VPN"].host, "vpn-gw-01")
+
+    def test_p0_normalized_vendor_rule_metadata_preserves_policy_and_signature_aliases(self):
+        line = (
+            "time=2024-03-15T11:11:00 log_type=waf src_ip=203.0.113.9 "
+            "host=app.example request_uri=\"/login?id=1 UNION SELECT NULL--\" "
+            "policy_action=block policy_name=Block-SQLi policy_id=POL-42 "
+            "signature_name=\"SQLi UNION\" signature_id=SIG-9"
+        )
+
+        result = parse_p0_security_lines([line], "waf.log")
+
+        self.assertEqual(len(result.events), 1)
+        event = result.events[0]
+        self.assertEqual(event.rule_name, "SQL注入")
+        self.assertEqual(event.rule_id, "SIG-9")
+        self.assertEqual(event.details.get("policy_name"), "Block-SQLi")
+        self.assertEqual(event.details.get("policy_id"), "POL-42")
+        self.assertEqual(event.details.get("signature_name"), "SQLi UNION")
+        self.assertEqual(event.details.get("signature_id"), "SIG-9")
+        self.assertEqual(event.details.get("policyname"), "Block-SQLi")
+        self.assertEqual(event.details.get("signatureid"), "SIG-9")
+
+    def test_p0_normalized_network_context_preserves_zone_interface_and_tenant_aliases(self):
+        line = (
+            "time=2024-03-15T11:12:00 log_type=firewall "
+            "src_ip=203.0.113.9 dst_ip=10.0.0.9 dst_port=3389 "
+            "action=allow protocol=tcp src_zone=untrust dst_zone=server "
+            "srcintf=wan1 dstintf=dmz1 vdom=root"
+        )
+
+        result = parse_p0_security_lines([line], "firewall.log")
+
+        self.assertEqual(len(result.events), 1)
+        event = result.events[0]
+        self.assertEqual(event.rule_name, "防火墙放行敏感端口访问")
+        self.assertEqual(event.details.get("source_zone"), "untrust")
+        self.assertEqual(event.details.get("destination_zone"), "server")
+        self.assertEqual(event.details.get("source_interface"), "wan1")
+        self.assertEqual(event.details.get("destination_interface"), "dmz1")
+        self.assertEqual(event.details.get("tenant"), "root")
+        self.assertEqual(event.details.get("srczone"), "untrust")
+        self.assertEqual(event.details.get("dstintf"), "dmz1")
+        self.assertEqual(event.details.get("vdom"), "root")
+
+    def test_p0_alert_evidence_includes_normalized_context(self):
+        line = (
+            "time=2024-03-15T11:13:00 log_type=firewall "
+            "device_name=FW-EDGE-01 src_ip=203.0.113.9 dst_ip=10.0.0.9 "
+            "dst_port=3389 action=allow protocol=tcp policy_name=Allow-RDP "
+            "policy_id=POL-42 src_zone=untrust dst_zone=server "
+            "srcintf=wan1 dstintf=dmz1 vdom=root"
+        )
+
+        result = parse_p0_security_lines([line], "firewall.log")
+        summary = run_detection(result.events)
+        alert = next(item for item in summary.alerts if item.rule_id == "P0-FW-001")
+        evidence = "\n".join(alert.evidence)
+
+        self.assertTrue(any("P0上下文" in item for item in alert.evidence[:3]))
+        self.assertTrue(any("IP=203.0.113.9" in item for item in alert.evidence[:3]))
+        self.assertTrue(any("主机/目标=10.0.0.9" in item for item in alert.evidence[:3]))
+        self.assertIn("P0上下文", evidence)
+        self.assertIn("设备=FW-EDGE-01", evidence)
+        self.assertIn("策略=Allow-RDP", evidence)
+        self.assertIn("策略ID=POL-42", evidence)
+        self.assertIn("源区域=untrust", evidence)
+        self.assertIn("目标区域=server", evidence)
+        self.assertIn("入接口=wan1", evidence)
+        self.assertIn("出接口=dmz1", evidence)
+        self.assertIn("租户/虚拟域=root", evidence)
+
+    def test_p0_alert_context_redacts_session_id_value(self):
+        line = (
+            "time=2024-03-15T11:14:00 log_type=proxy src_ip=10.0.0.8 "
+            "user=alice url=https://beacon.evil.example/a threat_category=C2 "
+            "action=allow session_id=sess-super-secret-token trace_id=req-abc-123"
+        )
+
+        result = parse_p0_security_lines([line], "proxy.log")
+        summary = run_detection(result.events)
+        alert = next(item for item in summary.alerts if item.rule_id == "P0-C2-001")
+        evidence = "\n".join(alert.evidence)
+
+        self.assertIn("P0上下文", evidence)
+        self.assertIn("会话=<redacted>", evidence)
+        self.assertIn("追踪ID=req-abc-123", evidence)
+        self.assertNotIn("sess-super-secret-token", evidence)
+
     def test_p0_proxy_and_firewall_accept_common_bytes_out_aliases(self):
         lines = [
             "time=2024-03-15T10:06:00 log_type=proxy src_ip=10.0.0.8 user=alice "
@@ -503,6 +687,79 @@ class P0SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(result.events[0].source, "EDR/XDR")
         self.assertIn("lsass-dump", result.events[0].tags)
 
+    def test_p0_json_wrapper_content_is_supported(self):
+        content = _json.dumps({
+            "vendor": "acme",
+            "events": [{
+                "log_type": "edr",
+                "time": "2024-03-15 10:04:00",
+                "host": "win-01",
+                "severity": "critical",
+                "alert": "Mimikatz credential dumping",
+            }],
+        })
+
+        direct = parse_p0_security_json(content, "edr.json")
+        via_registry = parse_content(content, "edr.json", parser_name="p0-security")
+
+        for result in (direct, via_registry):
+            self.assertEqual(len(result.events), 1)
+            self.assertEqual(result.events[0].source, "EDR/XDR")
+            self.assertIn("lsass-dump", result.events[0].tags)
+            self.assertEqual(result.stats.parse_errors, 0)
+
+    def test_p0_auto_detects_camelcase_vendor_fields(self):
+        content = _json.dumps({
+            "logType": "firewall",
+            "srcIp": "198.51.100.8",
+            "dstIp": "10.0.0.5",
+            "dstPort": "3389",
+            "policyAction": "allow",
+            "protocol": "tcp",
+        })
+
+        result = parse_content(content, "events.json")
+
+        self.assertEqual(result.log_type, "P0 Security Log (HVV/重保)")
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].rule_name, "防火墙放行敏感端口访问")
+        self.assertIn("exposed-service", result.events[0].tags)
+        self.assertEqual(result.events[0].details.get("src_ip"), "198.51.100.8")
+        self.assertEqual(result.events[0].details.get("dst_ip"), "10.0.0.5")
+
+    def test_p0_auto_detects_address_style_firewall_csv(self):
+        content = (
+            "SourceAddress,DestinationAddress,DestinationPort,Action,Protocol\n"
+            "198.51.100.8,10.0.0.5,3389,allow,tcp\n"
+        )
+
+        result = parse_content(content, "events.csv")
+
+        self.assertEqual(result.log_type, "P0 Security Log (HVV/重保)")
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].rule_name, "防火墙放行敏感端口访问")
+        self.assertIn("exposed-service", result.events[0].tags)
+        self.assertEqual(result.events[0].source, "Firewall/NAT")
+        self.assertEqual(result.events[0].details.get("src_ip"), "198.51.100.8")
+        self.assertEqual(result.events[0].details.get("dst_ip"), "10.0.0.5")
+        self.assertEqual(result.events[0].details.get("action"), "allow")
+
+    def test_p0_json_wrapper_keeps_partial_events_and_counts_decode_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "vpn.json"
+            path.write_text(
+                '{"vendor":"acme","records":['
+                '{"log_type":"vpn","time":"2024-03-15 10:00:00","user":"alice","src_ip":"198.51.100.44","result":"failed"},'
+                '{"log_type":"vpn","time":"2024-03-15 10:00:01","user":"alice","src_ip":'
+                ,
+                encoding="utf-8",
+            )
+            result = parse_p0_security_json_file(str(path), path.name)
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.stats.parse_errors, 1)
+        self.assertIn("failed-login", result.events[0].tags)
+
     def test_p0_json_file_keeps_partial_events_and_counts_decode_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "vpn.json"
@@ -518,6 +775,36 @@ class P0SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(len(result.events), 1)
         self.assertEqual(result.stats.parse_errors, 1)
         self.assertIn("failed-login", result.events[0].tags)
+
+    def test_p0_json_array_requires_commas_between_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "vpn.json"
+            path.write_text(
+                '['
+                '{"log_type":"vpn","time":"2024-03-15 10:00:00","user":"alice","src_ip":"198.51.100.44","result":"failed"}'
+                '{"log_type":"vpn","time":"2024-03-15 10:00:01","user":"alice","src_ip":"198.51.100.44","result":"failed"}'
+                ']',
+                encoding="utf-8",
+            )
+            result = parse_p0_security_json_file(str(path), path.name)
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.stats.parse_errors, 1)
+        self.assertIn("failed-login", result.events[0].tags)
+
+    def test_p0_json_sequence_without_array_still_parses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "vpn.jsonl"
+            path.write_text(
+                '{"log_type":"vpn","time":"2024-03-15 10:00:00","user":"alice","src_ip":"198.51.100.44","result":"failed"}\n'
+                '{"log_type":"vpn","time":"2024-03-15 10:00:01","user":"alice","src_ip":"198.51.100.44","result":"failed"}\n',
+                encoding="utf-8",
+            )
+            result = parse_p0_security_json_file(str(path), path.name)
+
+        self.assertEqual(len(result.events), 2)
+        self.assertEqual(result.stats.parse_errors, 0)
+        self.assertTrue(all("failed-login" in event.tags for event in result.events))
 
     def test_p0_adapter_registry_exposes_expected_kinds(self):
         self.assertEqual(

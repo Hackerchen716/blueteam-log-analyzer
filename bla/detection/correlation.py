@@ -6,6 +6,7 @@ from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from ..models import DetectionAlert, Incident, LogEvent, ThreatLevel, TimelineEntry
+from ..utils.helpers import sanitize_report_text
 
 
 _LEVEL_ORDER = {
@@ -64,6 +65,14 @@ _SHELL_HISTORY_PHASE_SUBJECT = {
     "凭据访问": "Shell 凭据访问轨迹",
     "防御规避": "Shell 清痕轨迹",
 }
+
+
+def _safe_text(value: object) -> str:
+    return sanitize_report_text(value)
+
+
+def _safe_list(values: Sequence[str]) -> List[str]:
+    return [_safe_text(value) for value in values]
 
 
 def correlate_incidents(events: Sequence[LogEvent], alerts: Sequence[DetectionAlert]) -> List[Incident]:
@@ -248,29 +257,67 @@ def _build_incident(index: int, events: Sequence[LogEvent], alerts: Sequence[Det
         dict.fromkeys(raw_phases),
         key=lambda phase: (_PHASE_INDEX.get(phase, len(_PHASE_INDEX)), phase),
     )
+    display_source_ips = _safe_list(source_ips)
+    display_accounts = _safe_list(accounts)
+    display_assets = _safe_list(assets)
+    display_operators = _safe_list(operators)
+    display_workstations = _safe_list(workstations)
+    display_source_types = _safe_list(source_types)
+    display_families = _safe_list(families)
+    display_phases = _safe_list(phases)
+
     confidence = _confidence(events, alerts, source_types, families)
-    title = _title(source_ips, accounts, assets, workstations, source_types, phases, max_level, alerts)
-    description = _description(source_ips, accounts, assets, operators, workstations, source_types, phases, alerts, events)
+    title = _title(
+        display_source_ips,
+        display_accounts,
+        display_assets,
+        display_workstations,
+        display_source_types,
+        display_phases,
+        max_level,
+        alerts,
+    )
+    description = _description(
+        display_source_ips,
+        display_accounts,
+        display_assets,
+        display_operators,
+        display_workstations,
+        display_source_types,
+        display_phases,
+        alerts,
+        events,
+    )
     timeline = _timeline(events)
-    evidence = _evidence(events, alerts, source_ips, accounts, assets, operators, workstations, source_types, phases)
+    evidence = _evidence(
+        events,
+        alerts,
+        display_source_ips,
+        display_accounts,
+        display_assets,
+        display_operators,
+        display_workstations,
+        display_source_types,
+        display_phases,
+    )
 
     return Incident(
         id=f"inc-{index:03d}",
-        title=title,
-        description=description,
+        title=_safe_text(title),
+        description=_safe_text(description),
         level=max_level,
         confidence=confidence,
         affected_alerts=[alert.id for alert in alerts],
         affected_events=[event.id for event in events],
-        source_ips=source_ips,
-        accounts=accounts,
-        assets=assets,
-        source_types=source_types,
-        attack_phases=phases,
+        source_ips=display_source_ips,
+        accounts=display_accounts,
+        assets=display_assets,
+        source_types=display_source_types,
+        attack_phases=display_phases,
         evidence=evidence,
         timeline=timeline,
-        recommended_actions=_recommended_actions(source_types, families, max_level),
-        next_logs=_next_logs(source_types, families),
+        recommended_actions=_safe_list(_recommended_actions(source_types, families, max_level)),
+        next_logs=_safe_list(_next_logs(source_types, families)),
     )
 
 
@@ -412,6 +459,9 @@ def _confidence(
 ) -> str:
     if any(alert.rule_id == "WIN-CHAIN-001" for alert in alerts):
         return "high"
+    if any(alert.rule_id == "P0-EDR-001" and alert.confidence == "high" for alert in alerts):
+        if len(events) >= 10 or len(families) >= 2:
+            return "high"
     if len(source_types) >= 3 or (len(source_types) >= 2 and len(families) >= 3):
         return "high"
     if len(source_types) >= 2 or len(alerts) >= 2 or len(events) >= 5:
@@ -437,12 +487,22 @@ def _title(
     if any(alert.rule_id == "WIN-CHAIN-001" for alert in alerts):
         account = _chain_account(alerts) or _first_human(accounts)
         return f"可疑本地管理员账号与远程登录: {account}" if account else "可疑本地管理员账号与远程登录"
+    if "edr" in source_types and any(alert.rule_id == "P0-EDR-001" for alert in alerts):
+        account = _first_human(accounts)
+        return f"EDR 高危终端案件: {account} / 伪装安装包执行" if account else "EDR 高危终端案件: 伪装安装包执行"
     subject = _incident_subject(source_ips, accounts, assets, workstations, source_types, phases)
     if len(source_types) >= 2:
-        return f"P0 多源关联案件: {subject}"
+        prefix = "P0 多源关联案件" if _is_p0_multisource_incident(source_types) else "多源关联案件"
+        return f"{prefix}: {subject}"
     if phases and not _is_shell_history_subject(subject, source_types):
         return f"{level.label}案件: {subject} / {phases[0]}"
     return f"{level.label}案件: {subject}"
+
+
+def _is_p0_multisource_incident(source_types: Sequence[str]) -> bool:
+    p0_sources = {"waf", "vpn", "bastion", "dns", "proxy", "firewall", "edr", "application"}
+    values = set(source_types)
+    return bool(values) and values.issubset(p0_sources)
 
 
 def _description(
@@ -479,6 +539,15 @@ def _description(
             "日志源: Shell History；"
             f"{context_text}"
             "建议补采对应主机、账号、进程树和同时间窗口审计日志。"
+        )
+    if "edr" in source_types and any(alert.rule_id == "P0-EDR-001" for alert in alerts):
+        account_text = ", ".join(accounts[:5]) or "?"
+        return (
+            f"{subject} 关联到 EDR 高危终端链路；"
+            f"核心账号: {account_text}；"
+            f"关键事件: {len(events)} 条；"
+            f"阶段: {', '.join(phases[:6]) or '未分类'}；"
+            "应按已执行恶意安装包处置，并补采进程树、样本 Hash、计划任务、ACL、portproxy 和网络侧日志。"
         )
     return (
         f"{subject} 在 {len(source_types) or 1} 类日志源中关联到 "
@@ -536,11 +605,11 @@ def _timeline(events: Sequence[LogEvent]) -> List[TimelineEntry]:
         TimelineEntry(
             timestamp=event.timestamp,
             level=event.level,
-            category=event.category,
-            message=event.message,
-            event_id=event.id,
-            source_file=event.source_file,
-            mitre_attack=event.mitre_attack,
+            category=_safe_text(event.category),
+            message=_safe_text(event.message),
+            event_id=_safe_text(event.id),
+            source_file=_safe_text(event.source_file),
+            mitre_attack=_safe_text(event.mitre_attack),
         )
         for event in ordered[:30]
     ]
@@ -570,6 +639,8 @@ def _evidence(
         evidence.append(f"资产: {', '.join(assets[:5])}")
     if "shell-history" in source_types:
         evidence.append("证据类型: Shell 命令历史")
+    if "edr" in source_types:
+        evidence.extend(_edr_case_evidence(events))
     evidence.extend([
         f"日志源: {', '.join(source_types) or '?'}",
         f"攻击阶段: {', '.join(phases) or '?'}",
@@ -577,15 +648,74 @@ def _evidence(
         f"关键事件: {len(events)} 条",
     ])
     for alert in alerts[:3]:
-        evidence.append(f"{alert.rule_id}: {alert.rule_name} ({alert.level.label})")
+        evidence.append(f"{_safe_text(alert.rule_id)}: {_safe_text(alert.rule_name)} ({alert.level.label})")
     for event in sorted(events, key=lambda item: item.timestamp or "")[:3]:
-        source_type = event.details.get("source_type") or event.source
-        evidence.append(f"{event.timestamp or '?'} {source_type}: {event.message}")
+        source_type = _safe_text(event.details.get("source_type") or event.source)
+        evidence.append(f"{event.timestamp or '?'} {source_type}: {_safe_text(event.message)}")
+    return [_safe_text(item) for item in evidence]
+
+
+def _edr_case_evidence(events: Sequence[LogEvent]) -> List[str]:
+    edr_events = [event for event in events if "edr" in event.tags]
+    if not edr_events:
+        return []
+    counters = [
+        ("用户解压", sum(1 for event in edr_events if "archive-extract" in event.tags)),
+        ("伪装/无签名执行", sum(1 for event in edr_events if "suspicious-execution" in event.tags)),
+        ("计划任务删除", sum(1 for event in edr_events if "task-cleanup" in event.tags)),
+        ("随机目录ACL修改", sum(1 for event in edr_events if "acl-modification" in event.tags)),
+        ("portproxy reset", sum(1 for event in edr_events if "portproxy-reset" in event.tags)),
+    ]
+    action_text = "，".join(f"{label}={count}" for label, count in counters if count)
+    processes = _edr_unique_details(edr_events, ("process_name", "target_process"), 8)
+    paths = _edr_suspicious_paths(edr_events, 4)
+    evidence: List[str] = []
+    if action_text:
+        evidence.append(f"EDR关键动作: {action_text}")
+    if processes:
+        evidence.append(f"EDR核心进程: {', '.join(processes)}")
+    if paths:
+        evidence.append(f"EDR可疑路径: {'; '.join(paths)}")
     return evidence
+
+
+def _edr_unique_details(events: Sequence[LogEvent], keys: Sequence[str], limit: int) -> List[str]:
+    values: List[str] = []
+    seen: Set[str] = set()
+    for event in events:
+        for key in keys:
+            value = str(event.details.get(key) or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            values.append(value)
+            if len(values) >= limit:
+                return values
+    return values
+
+
+def _edr_suspicious_paths(events: Sequence[LogEvent], limit: int) -> List[str]:
+    values: List[str] = []
+    seen: Set[str] = set()
+    for event in events:
+        for key in ("archive_output_path", "acl_path", "process_path", "target_path", "child_path"):
+            value = str(event.details.get(key) or "").strip()
+            low = value.lower()
+            if not value or value in seen:
+                continue
+            if not any(marker in low for marker in ("\\users\\", "\\inetpub\\wwwroot\\", "\\appdata\\local\\temp\\")):
+                continue
+            seen.add(value)
+            values.append(_safe_text(value))
+            if len(values) >= limit:
+                return values
+    return values
 
 
 def _recommended_actions(source_types: Sequence[str], families: Sequence[str], level: ThreatLevel) -> List[str]:
     actions = []
+    if "edr" in source_types and level.score >= ThreatLevel.HIGH.score:
+        actions.append("按已执行恶意安装包处置：隔离终端，保全样本、进程树、Hash、网络连接、计划任务、ACL 和 portproxy 证据。")
     if level.score >= ThreatLevel.CRITICAL.score or "compromise" in families:
         actions.append("优先隔离疑似失陷主机，保全内存、进程树、网络连接和关键日志。")
     if "initial-access" in families or "waf" in source_types:
@@ -605,6 +735,14 @@ def _recommended_actions(source_types: Sequence[str], families: Sequence[str], l
 
 def _next_logs(source_types: Sequence[str], families: Sequence[str]) -> List[str]:
     wanted = []
+    if "edr" in source_types:
+        wanted.extend([
+            "EDR/XDR 完整进程树和样本 Hash",
+            "TaskScheduler Operational 日志",
+            "PortProxy 注册表与 netsh show all",
+            "IIS/WebRoot 文件与访问日志",
+            "同时间窗口网络连接/DNS/代理日志",
+        ])
     if "waf" in source_types or "initial-access" in families:
         wanted.extend(["Web access/error 日志", "业务应用日志", "WAF 原始命中详情"])
     if "identity" in families:
@@ -619,4 +757,4 @@ def _next_logs(source_types: Sequence[str], families: Sequence[str]) -> List[str
         wanted.extend(["DLP/数据库审计", "对象存储/文件服务器访问日志"])
     if not wanted:
         wanted.extend(["同时间窗口 P0 日志源", "资产 CMDB/变更记录"])
-    return sorted(dict.fromkeys(wanted))
+    return list(dict.fromkeys(wanted))

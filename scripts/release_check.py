@@ -8,8 +8,10 @@ commands, and optionally inspects built distributions.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -49,6 +51,8 @@ def _check_release_surfaces(version: str) -> None:
         ROOT / "bla" / "output" / "geo_map.py",
         ROOT / "bla" / "output" / "assets" / "world-countries.geojson",
         ROOT / "bla" / "parsers" / "shell_history.py",
+        ROOT / "bla" / "parsers" / "windows_json.py",
+        ROOT / "bla" / "parsers" / "edr_xlsx.py",
         ROOT / "docs" / "releases" / f"v{version}.md",
         ROOT / "sample_logs" / "auth.log",
         ROOT / "sample_logs" / "windows_rdp_sample.xml",
@@ -107,6 +111,8 @@ def _check_distribution(version: str) -> None:
                 "wheel is missing bla/output/assets/world-countries.geojson")
         _assert("bla/output/geo_map.py" in names, "wheel is missing bla/output/geo_map.py")
         _assert("bla/parsers/shell_history.py" in names, "wheel is missing bla/parsers/shell_history.py")
+        _assert("bla/parsers/windows_json.py" in names, "wheel is missing bla/parsers/windows_json.py")
+        _assert("bla/parsers/edr_xlsx.py" in names, "wheel is missing bla/parsers/edr_xlsx.py")
         _assert("bla/remote/ssh_workspace.py" in names, "wheel is missing bla/remote/ssh_workspace.py")
         _assert("bla/cli/main.py" in names, "wheel is missing bla/cli/main.py")
         _assert("bla/output/manifest.py" in names, "wheel is missing bla/output/manifest.py")
@@ -124,6 +130,8 @@ def _check_distribution(version: str) -> None:
             "/bla/output/assets/world-countries.geojson",
             "/bla/output/geo_map.py",
             "/bla/parsers/shell_history.py",
+            "/bla/parsers/windows_json.py",
+            "/bla/parsers/edr_xlsx.py",
             "/bla/cli/main.py",
             "/bla_cli.py",
             "/scripts/release_check.py",
@@ -133,6 +141,358 @@ def _check_distribution(version: str) -> None:
         ]
         for suffix in suffixes:
             _assert(any(name.endswith(suffix) for name in names), f"sdist is missing {suffix}")
+
+    _run_distribution_install_smoke(wheels[0])
+
+
+def _venv_python(venv_dir: Path) -> Path:
+    if os.name == "nt":
+        return venv_dir / "Scripts" / "python.exe"
+    return venv_dir / "bin" / "python"
+
+
+def _venv_script(venv_dir: Path, name: str) -> Path:
+    if os.name == "nt":
+        return venv_dir / "Scripts" / f"{name}.exe"
+    return venv_dir / "bin" / name
+
+
+def _run_distribution_install_smoke(wheel_path: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="bla-dist-install-") as tmp:
+        tmp_path = Path(tmp)
+        venv_dir = tmp_path / "venv"
+        _run([sys.executable, "-m", "venv", str(venv_dir)])
+        venv_python = _venv_python(venv_dir)
+        _run([str(venv_python), "-m", "pip", "install", "--no-index", str(wheel_path)])
+
+        smoke = r'''
+import json
+from pathlib import Path
+
+from bla.parsers import auto_parse, list_parser_names, parse_content
+
+names = list_parser_names()
+assert "windows-json" in names, names
+assert "edr-xlsx" in names, names
+
+edr_content = "\n".join([
+    "\t".join(["事件类型", "事件子类型", "时间", "进程用户名", "进程名", "进程映像路径", "进程文件签名", "进程事件文件路径", "目标进程文件签名", "进程命令"]),
+    "\t".join([
+        "进程事件", "进程创建", "2026-01-21 21:40:00", "Administrator",
+        "II-10.tmp", r"C:\Users\ADMINI~1\AppData\Local\Temp\is-TED13.tmp\II-10.tmp",
+        "", r"C:\inetpub\wwwroot\rMmZhp\ewWB4p\g36Q6KT.exe", "",
+        r'"C:\inetpub\wwwroot\rMmZhp\ewWB4p\g36Q6KT"',
+    ]),
+])
+edr_result = parse_content(edr_content, "edr-export.tsv", parser_name="edr-xlsx")
+assert edr_result.log_type == "EDR Excel Export", edr_result.log_type
+assert edr_result.stats.high == 1, edr_result.stats.high
+assert "webroot-executable" in edr_result.events[0].tags, edr_result.events[0].tags
+
+flat_record = {
+    "SourceName": "Microsoft-Windows-Sysmon",
+    "ProviderGuid": "{5770385F-C22A-43E0-BF4C-06F5698FFBD9}",
+    "Channel": "Microsoft-Windows-Sysmon/Operational",
+    "Hostname": "WORKSTATION5.theshire.local",
+    "UtcTime": "2020-10-23 02:36:51.000",
+    "@timestamp": "2020-10-23T02:36:51.000Z",
+    "EventID": 1,
+    "Image": r"C:\Windows\System32\cmd.exe",
+    "CommandLine": r"cmd.exe /c whoami",
+    "Message": "Process Create.",
+}
+winlogbeat_record = {
+    "@timestamp": "2022-08-18T06:57:28.129Z",
+    "event": {"code": 4688, "provider": "Microsoft-Windows-Security-Auditing"},
+    "host": {"name": "pedro-computer"},
+    "winlog": {
+        "event_id": 4688,
+        "channel": "Security",
+        "provider_name": "Microsoft-Windows-Security-Auditing",
+        "computer_name": "pedro-computer",
+        "event_data": {
+            "SubjectUserName": "pedro-admin",
+            "SubjectDomainName": "PEDRO-COMPUTER",
+            "NewProcessName": r"C:\Windows\System32\auditpol.exe",
+            "ParentProcessName": r"C:\Users\pedro\Downloads\payload.exe",
+            "CommandLine": "auditpol.exe /clear /y",
+        },
+    },
+    "process": {
+        "executable": r"C:\Windows\System32\auditpol.exe",
+        "command_line": "auditpol.exe /clear /y",
+        "parent": {"executable": r"C:\Users\pedro\Downloads\payload.exe"},
+    },
+    "message": "A new process has been created.",
+}
+content = "\n".join([
+    json.dumps(flat_record),
+    '{"EventID": 1, "SourceName": ',
+    json.dumps(winlogbeat_record),
+]) + "\n"
+result = parse_content(content, "windows-eventlog.jsonl")
+assert result.log_type == "Windows Event Log (JSON)", result.log_type
+assert result.stats.total == 2, result.stats.total
+assert result.stats.parse_errors == 1, result.stats.parse_errors
+assert {event.event_id for event in result.events} == {"1", "4688"}
+assert any("auditpol-tampering" in event.tags for event in result.events), [event.tags for event in result.events]
+
+pretty_path = Path("winlogbeat-pretty.json")
+pretty_path.write_text(json.dumps(winlogbeat_record, indent=2), encoding="utf-8")
+file_result = auto_parse(str(pretty_path))
+assert file_result.log_type == "Windows Event Log (JSON)", file_result.log_type
+assert file_result.stats.total == 1, file_result.stats.total
+assert file_result.stats.parse_errors == 0, file_result.stats.parse_errors
+assert file_result.events[0].event_id == "4688", file_result.events[0].event_id
+assert "auditpol-tampering" in file_result.events[0].tags, file_result.events[0].tags
+'''
+        completed = subprocess.run(
+            [str(venv_python), "-c", smoke],
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        _assert(
+            completed.returncode == 0,
+            "installed wheel windows-json parser smoke failed:\n"
+            + completed.stdout
+            + completed.stderr,
+        )
+
+        bla_cmd = _venv_script(venv_dir, "bla")
+        version_completed = subprocess.run(
+            [str(bla_cmd), "--version"],
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        _assert(
+            version_completed.returncode == 0,
+            "installed console script --version failed:\n"
+            + version_completed.stdout
+            + version_completed.stderr,
+        )
+
+        cli_report = tmp_path / "installed-cli-report.json"
+        cli_completed = subprocess.run(
+            [
+                str(bla_cmd),
+                str(tmp_path / "winlogbeat-pretty.json"),
+                "--json",
+                str(cli_report),
+                "--exit-on",
+                "none",
+                "--no-color",
+                "--max-alerts",
+                "5",
+            ],
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        _assert(
+            cli_completed.returncode == 0,
+            "installed console script Windows JSON smoke failed:\n"
+            + cli_completed.stdout
+            + cli_completed.stderr,
+        )
+        report = json.loads(cli_report.read_text(encoding="utf-8"))
+        event_ids = {item.get("event_id") for item in report.get("events", [])}
+        _assert("4688" in event_ids, "installed console script JSON report missing Windows 4688 event")
+        _assert(
+            any("auditpol-tampering" in item.get("tags", []) for item in report.get("events", [])),
+            "installed console script JSON report missing auditpol-tampering tag",
+        )
+
+        bundle_dir = tmp_path / "installed-cli-bundle"
+        bundle_completed = subprocess.run(
+            [
+                str(bla_cmd),
+                str(tmp_path / "winlogbeat-pretty.json"),
+                "--out",
+                str(bundle_dir),
+                "--exit-on",
+                "none",
+                "--no-color",
+                "--max-alerts",
+                "5",
+            ],
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        _assert(
+            bundle_completed.returncode == 0,
+            "installed console script report bundle smoke failed:\n"
+            + bundle_completed.stdout
+            + bundle_completed.stderr,
+        )
+        for name in ("index.html", "report.json", "events.csv", "iocs.txt", "report.sarif", "manifest.json"):
+            _assert((bundle_dir / name).exists(), f"installed CLI report bundle missing {name}")
+
+        bundle_report = json.loads((bundle_dir / "report.json").read_text(encoding="utf-8"))
+        _assert(
+            any(item.get("event_id") == "4688" for item in bundle_report.get("events", [])),
+            "installed CLI report bundle JSON missing Windows 4688 event",
+        )
+
+        manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+        _assert(manifest.get("schema") == "bla-report-manifest-v1", "installed CLI manifest schema mismatch")
+        manifest_inputs = manifest.get("inputs", [])
+        input_record = next(
+            (item for item in manifest_inputs if item.get("name") == "winlogbeat-pretty.json"),
+            None,
+        )
+        _assert(input_record is not None, "installed CLI manifest missing input record")
+        _assert(
+            not os.path.isabs(str(input_record.get("path", ""))),
+            "installed CLI manifest leaked an absolute input path",
+        )
+        expected_input_hash = hashlib.sha256((tmp_path / "winlogbeat-pretty.json").read_bytes()).hexdigest()
+        _assert(
+            input_record.get("sha256") == expected_input_hash,
+            "installed CLI manifest input hash mismatch",
+        )
+        outputs = {item.get("name"): item for item in manifest.get("outputs", [])}
+        for name in ("index.html", "report.json", "events.csv", "iocs.txt", "report.sarif"):
+            output_record = outputs.get(name)
+            _assert(output_record is not None, f"installed CLI manifest missing output record for {name}")
+            _assert(len(str(output_record.get("sha256", ""))) == 64,
+                    f"installed CLI manifest missing output hash for {name}")
+        html_text = (bundle_dir / "index.html").read_text(encoding="utf-8")
+        _assert("cdn.jsdelivr" not in html_text and "unpkg.com" not in html_text,
+                "installed CLI HTML bundle should not depend on CDN assets")
+
+        dup_root = tmp_path / "duplicate-basenames"
+        dup_host_a = dup_root / "host-a"
+        dup_host_b = dup_root / "host-b"
+        dup_host_a.mkdir(parents=True)
+        dup_host_b.mkdir(parents=True)
+        dup_a_content = (
+            '9.9.9.9 - - [15/Mar/2024:10:00:00 +0800] '
+            '"GET /admin.php HTTP/1.1" 404 10 "-" "curl/8"\n'
+        )
+        dup_b_content = (
+            '198.51.100.10 - - [15/Mar/2024:10:00:01 +0800] '
+            '"GET /download.php?file=../../etc/passwd HTTP/1.1" 200 10 "-" "Mozilla/5.0"\n'
+        )
+        (dup_host_a / "access.log").write_text(dup_a_content, encoding="utf-8")
+        (dup_host_b / "access.log").write_text(dup_b_content, encoding="utf-8")
+        dup_bundle_dir = tmp_path / "duplicate-basenames-bundle"
+        dup_completed = subprocess.run(
+            [
+                str(bla_cmd),
+                str(dup_host_a / "access.log"),
+                str(dup_host_b / "access.log"),
+                "--out",
+                str(dup_bundle_dir),
+                "--exit-on",
+                "none",
+                "--no-color",
+                "--max-alerts",
+                "5",
+            ],
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        _assert(
+            dup_completed.returncode == 0,
+            "installed console script duplicate basename bundle smoke failed:\n"
+            + dup_completed.stdout
+            + dup_completed.stderr,
+        )
+        dup_manifest = json.loads((dup_bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+        expected_names = {"host-a/access.log", "host-b/access.log"}
+        input_names = {item.get("name") for item in dup_manifest.get("inputs", [])}
+        parsed_names = {item.get("name") for item in dup_manifest.get("parsed_files", [])}
+        _assert(input_names == expected_names, "installed CLI duplicate basename manifest inputs collapsed")
+        _assert(parsed_names == expected_names, "installed CLI duplicate basename parsed files collapsed")
+        _assert(dup_manifest.get("summary", {}).get("files_analyzed") == 2,
+                "installed CLI duplicate basename summary file count mismatch")
+        dup_manifest_text = json.dumps(dup_manifest, ensure_ascii=False)
+        _assert(str(tmp_path) not in dup_manifest_text,
+                "installed CLI duplicate basename manifest leaked temp absolute path")
+        dup_hashes = {item.get("name"): item.get("sha256") for item in dup_manifest.get("inputs", [])}
+        _assert(
+            dup_hashes.get("host-a/access.log") == hashlib.sha256(dup_a_content.encode()).hexdigest(),
+            "installed CLI duplicate basename manifest host-a hash mismatch",
+        )
+        _assert(
+            dup_hashes.get("host-b/access.log") == hashlib.sha256(dup_b_content.encode()).hexdigest(),
+            "installed CLI duplicate basename manifest host-b hash mismatch",
+        )
+
+        secret_root = tmp_path / "token=super-secret"
+        rules_dir = secret_root / "rules-token=super-secret"
+        secret_root.mkdir()
+        rules_dir.mkdir()
+        options_log = secret_root / "access.log"
+        options_config = secret_root / "thresholds.json"
+        options_allowlist = secret_root / "allowlist.json"
+        options_log.write_text(dup_a_content, encoding="utf-8")
+        options_config.write_text('{"brute_force_min": 5}', encoding="utf-8")
+        options_allowlist.write_text("{}", encoding="utf-8")
+        options_bundle_dir = tmp_path / "manifest-options-bundle"
+        options_completed = subprocess.run(
+            [
+                str(bla_cmd),
+                str(options_log),
+                "--config",
+                str(options_config),
+                "--allowlist",
+                str(options_allowlist),
+                "--rules",
+                str(rules_dir),
+                "--out",
+                str(options_bundle_dir),
+                "--exit-on",
+                "none",
+                "--no-color",
+                "--max-alerts",
+                "5",
+            ],
+            cwd=tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        _assert(
+            options_completed.returncode == 0,
+            "installed console script manifest options smoke failed:\n"
+            + options_completed.stdout
+            + options_completed.stderr,
+        )
+        options_manifest = json.loads((options_bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+        options = options_manifest.get("options", {})
+        _assert(options.get("config") == "thresholds.json",
+                "installed CLI manifest options leaked config path")
+        _assert(options.get("allowlist") == "allowlist.json",
+                "installed CLI manifest options leaked allowlist path")
+        _assert(options.get("rules") == ["rules-token=<redacted>"],
+                "installed CLI manifest options did not sanitize rules path")
+        options_manifest_text = json.dumps(options_manifest, ensure_ascii=False)
+        _assert(str(tmp_path) not in options_manifest_text,
+                "installed CLI manifest options leaked temp absolute path")
+        _assert("super-secret" not in options_manifest_text,
+                "installed CLI manifest options leaked raw secret")
 
 
 def _run_sample_smokes() -> None:

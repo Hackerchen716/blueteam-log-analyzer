@@ -45,6 +45,7 @@ _NEW_USER_RE  = re.compile(r'new user:|useradd|adduser', re.I)
 _LOCKOUT_RE   = re.compile(r'too many authentication failures|maximum authentication attempts', re.I)
 _PAM_FAIL_RE  = re.compile(r'pam_unix.*(?:authentication failure|auth could not identify)', re.I)
 _DISCONNECT_RE= re.compile(r'Disconnected from|Disconnecting', re.I)
+_PREAUTH_INVALID_USER_RE = re.compile(r'input_userauth_request:\s*invalid user\b', re.I)
 
 
 def parse_linux_auth(content: str, source_file: str) -> ParseResult:
@@ -142,7 +143,18 @@ def _parse_auth_line(line: str, source_file: str, syslog_year: Optional[int] = N
         user    = user_m.group(1) if user_m else ""
         port    = int(port_m.group(1)) if port_m else None
 
-        if _SSH_FAIL_RE.search(message):
+        if _PREAUTH_INVALID_USER_RE.search(message) and not ip:
+            return None
+
+        if _LOCKOUT_RE.search(message):
+            level     = ThreatLevel.HIGH
+            cat       = "SSH"
+            tags      = ["brute-force", "lockout"]
+            mitre     = "T1110"
+            rule_name = "认证失败次数过多"
+            event_msg = f"认证失败次数过多: 用户={user or '?'} 来源={ip or '?'}"
+
+        elif _SSH_FAIL_RE.search(message):
             level     = ThreatLevel.MEDIUM
             cat       = "SSH"
             tags      = ["failed-login", "authentication"]
@@ -166,14 +178,6 @@ def _parse_auth_line(line: str, source_file: str, syslog_year: Optional[int] = N
             mitre     = "T1078.003"
             rule_name = "Root 账户直接登录"
             event_msg = "Root 账户 SSH 会话已开启"
-
-        elif _LOCKOUT_RE.search(message):
-            level     = ThreatLevel.HIGH
-            cat       = "SSH"
-            tags      = ["brute-force", "lockout"]
-            mitre     = "T1110"
-            rule_name = "认证失败次数过多"
-            event_msg = f"认证失败次数过多: 来源={ip or '?'}"
 
         elif _DISCONNECT_RE.search(message):
             cat   = "SSH"

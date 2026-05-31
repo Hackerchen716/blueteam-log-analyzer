@@ -27,7 +27,7 @@ from bla.config import (
     set_thresholds,
     validate_thresholds,
 )
-from bla.core import AnalysisError, AnalysisOptions, collect_files, run_analysis
+from bla.core import AnalysisError, AnalysisOptions, AnalysisOutputs, collect_files, run_analysis
 from bla.core.pipeline import parse_files
 from bla.detection import DetectionEventIndex, DetectorRegistry, DetectorSpec, list_detector_names, run_detection
 from bla.detection.engine import _dedup_alerts
@@ -50,6 +50,7 @@ from bla.output.manifest import generate_manifest
 from bla.output.sarif_report import generate_sarif_report
 from bla.output.terminal import print_terminal_report
 from bla.parsers import _parse_generic, auto_parse, list_parser_names, parse_content
+from bla.parsers.edr_xlsx import parse_edr_xlsx_content, parse_edr_xlsx_file
 from bla.parsers.linux_auth import parse_linux_auth
 from bla.parsers.p0_security import (
     list_p0_adapter_kinds,
@@ -60,6 +61,7 @@ from bla.parsers.p0_security import (
 from bla.parsers.shell_history import parse_shell_history
 from bla.parsers.web_access import parse_web_access
 from bla.parsers.windows_evtx import _parse_xml_event, parse_windows_xml, parse_windows_xml_file
+from bla.parsers.windows_json import parse_windows_json, parse_windows_json_file
 from bla.remote import RemoteWorkspace, SSHClient
 from bla.remote.ssh_workspace import _split_workspace_line
 from bla.rules import reset_rule_cache, set_rule_dirs, validate_web_attack_rules

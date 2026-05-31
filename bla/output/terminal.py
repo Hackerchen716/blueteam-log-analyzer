@@ -77,6 +77,8 @@ _PHASE_HINTS = {
     "T1505": "主机失陷",
     "T1071": "命令控制",
     "T1041": "数据外传",
+    "T1222": "防御规避",
+    "T1053": "持久化",
 }
 
 def _level_color(level: ThreatLevel) -> str:
@@ -295,6 +297,231 @@ def _event_entity_hint(event: LogEvent) -> str:
     if account:
         bits.append(f"account={_safe_text(account)}")
     return "  " + DIM + "[" + " | ".join(bits[:3]) + "]" + RESET if bits else ""
+
+
+def _render_edr_timeline_entry(entry: TimelineEntry, event: LogEvent, full_evidence: bool) -> List[str]:
+    details = event.details
+    parent = _safe_text(details.get("process_name") or _basename(details.get("process_path") or "") or event.process or "?")
+    child = _safe_text(details.get("target_process") or _basename(details.get("target_path") or "") or "?")
+    action = _safe_text(event.rule_name or details.get("action") or entry.category or "EDR 事件")
+    color = _level_color(entry.level)
+    mitre = f" {DIM}[{_safe_text(entry.mitre_attack)}]{RESET}" if entry.mitre_attack else ""
+    lines = [
+        f"  {DIM}{_safe_text(_fmt_time(entry.timestamp))}{RESET}  {_level_badge(entry.level)}  {color}{action}{RESET}{mitre}",
+        f"      {parent} -> {child}",
+    ]
+    path = (
+        details.get("archive_output_path")
+        or details.get("acl_path")
+        or details.get("target_path")
+        or details.get("child_path")
+        or details.get("process_path")
+        or ""
+    )
+    if path:
+        lines.append(f"      路径: {_evidence_text(path, full_evidence, 140)}")
+    command = _safe_text(details.get("command_line") or details.get("command") or "")
+    if command:
+        lines.append(f"      命令: {_evidence_text(command, full_evidence, 160)}")
+    reasons = _safe_text(details.get("suspicion_reasons") or "")
+    if reasons and full_evidence:
+        lines.append(f"      依据: {reasons}")
+    return lines
+
+
+def _render_edr_process_chains(
+    incident: Incident,
+    event_by_id: Dict[str, LogEvent],
+    full_evidence: bool,
+) -> List[str]:
+    events = [
+        event_by_id[event_id]
+        for event_id in incident.affected_events
+        if event_id in event_by_id and event_by_id[event_id].details.get("source_type") == "edr"
+    ]
+    if not events:
+        return []
+
+    create_events = [
+        event for event in events
+        if "process-create" in event.tags
+        and _edr_tree_event_is_useful(event)
+    ]
+    if not create_events:
+        return []
+
+    grouped: Dict[str, List[LogEvent]] = {}
+    for event in sorted(create_events, key=lambda item: (item.timestamp or "", item.id)):
+        grouped.setdefault(_short_time(event.timestamp), []).append(event)
+
+    group_items = list(grouped.items())
+    if not full_evidence:
+        group_items = group_items[:5]
+
+    lines = [f"       {GRAY}EDR 进程链:{RESET}"]
+    for group_index, (time_label, group_events) in enumerate(group_items):
+        if group_index:
+            lines.append("")
+        lines.append(f"         {BOLD}{CYAN}{time_label}{RESET}")
+        lines.extend(_render_edr_group_tree(group_events, full_evidence))
+
+    if len(grouped) > len(group_items):
+        lines.append(f"         {DIM}还有 {len(grouped) - len(group_items)} 个时间片，使用 --full 查看。{RESET}")
+    return lines
+
+
+def _edr_tree_event_is_useful(event: LogEvent) -> bool:
+    child = _basename(event.details.get("target_path") or "")
+    if child.lower() == "conhost.exe":
+        return False
+    return bool(
+        event.level.score >= ThreatLevel.MEDIUM.score
+        or "edr-key-evidence" in event.tags
+        or "suspicious-execution" in event.tags
+        or "archive-extract" in event.tags
+    )
+
+
+def _render_edr_group_tree(events: List[LogEvent], full_evidence: bool) -> List[str]:
+    children: Dict[str, List[LogEvent]] = {}
+    child_names = set()
+    for event in events:
+        parent = _safe_text(event.details.get("process_name") or _basename(event.details.get("process_path") or "") or "?")
+        child = _safe_text(event.details.get("target_process") or _basename(event.details.get("target_path") or "") or "?")
+        if not parent or not child or child == "?":
+            continue
+        children.setdefault(parent, []).append(event)
+        child_names.add(child)
+
+    if not children:
+        return []
+
+    roots = [parent for parent in children if parent not in child_names]
+    if not roots:
+        roots = list(children)[:1]
+    roots = sorted(roots, key=lambda value: (0 if value.lower() in {"explorer.exe", "tencentttmeeti5681.exe"} else 1, value.lower()))
+
+    lines: List[str] = []
+    seen_edges = set()
+    max_edges = 24 if full_evidence else 14
+
+    def render_node(name: str, prefix: str, is_root: bool = False) -> None:
+        if len(seen_edges) >= max_edges:
+            return
+        if is_root:
+            lines.append(f"         {name}")
+        outgoing = _dedupe_edr_edges(children.get(name, []))
+        for idx, event in enumerate(outgoing):
+            if len(seen_edges) >= max_edges:
+                lines.append(f"         {prefix}{DIM}└─ 还有更多分支，使用 --full 查看{RESET}")
+                return
+            child = _safe_text(event.details.get("target_process") or _basename(event.details.get("target_path") or "") or "?")
+            edge_key = (name, child, event.details.get("target_path", ""), event.details.get("command_line", ""))
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+            connector = "└─" if idx == len(outgoing) - 1 else "├─"
+            next_prefix = prefix + ("   " if idx == len(outgoing) - 1 else "│  ")
+            lines.append(f"         {prefix}{connector} {_edr_child_label(event)}")
+            extra = _edr_edge_extra(event)
+            for extra_index, item in enumerate(extra):
+                extra_connector = "└─" if extra_index == len(extra) - 1 and child not in children else "├─"
+                lines.append(f"         {next_prefix}{extra_connector} {item}")
+            if child in children:
+                render_node(child, next_prefix)
+
+    for root in roots:
+        render_node(root, "", is_root=True)
+    return lines
+
+
+def _dedupe_edr_edges(events: List[LogEvent]) -> List[LogEvent]:
+    result = []
+    seen = set()
+    for event in events:
+        key = (
+            event.details.get("target_process", ""),
+            event.details.get("target_path", ""),
+            event.details.get("command_line", ""),
+            event.rule_id or "",
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(event)
+    return result
+
+
+def _edr_child_label(event: LogEvent) -> str:
+    child = _safe_text(event.details.get("target_process") or _basename(event.details.get("target_path") or "") or "?")
+    annotations = []
+    signature = _safe_text(event.details.get("target_signature") or "")
+    parent_signature = _safe_text(event.details.get("process_signature") or "")
+    size = _format_file_size(event.details.get("file_size") or "")
+    if _is_unsigned_signature(signature):
+        annotations.append("无签名")
+    elif "Tencent" in signature:
+        annotations.append("腾讯签名")
+        if _is_unsigned_signature(parent_signature):
+            annotations.append("像诱饵/合法安装器")
+    elif signature:
+        annotations.append(f"签名: {_truncate_text(signature, 24)}")
+    if size:
+        annotations.append(f"约 {size}")
+    if event.rule_id == "EDR-XLSX-SCHTASKS-DELETE":
+        task = _safe_text(event.details.get("task_name") or "?")
+        annotations.append(f"删除任务 {task}")
+    elif event.rule_id == "EDR-XLSX-RANDOM-ACL":
+        annotations.append("修改随机目录 ACL")
+    elif event.rule_id == "EDR-XLSX-PORTPROXY-RESET":
+        annotations.append("portproxy reset")
+    suffix = f"  [{', '.join(annotations)}]" if annotations else ""
+    return f"{child}{suffix}"
+
+
+def _edr_edge_extra(event: LogEvent) -> List[str]:
+    details = event.details
+    if event.rule_id == "EDR-XLSX-ARCHIVE-EXTRACT":
+        output = _safe_text(details.get("archive_output_path") or "")
+        return [f"解压到 {output}"] if output else []
+    if event.rule_id == "EDR-XLSX-RANDOM-ACL":
+        path = _safe_text(details.get("acl_path") or "")
+        child = _basename(details.get("target_path") or "")
+        return [path] if path and child.lower() == "cmd.exe" else []
+    if event.rule_id == "EDR-XLSX-SCHTASKS-DELETE":
+        command = _safe_text(details.get("command_line") or "")
+        return [command] if command else []
+    path = _safe_text(details.get("target_path") or "")
+    if path and _edr_tree_path_is_investigative(path):
+        return [path]
+    return []
+
+
+def _edr_tree_path_is_investigative(path: str) -> bool:
+    normalized = _safe_text(path).replace("/", "\\").lower()
+    return bool(
+        "\\appdata\\local\\temp\\is-" in normalized
+        or "\\inetpub\\wwwroot\\" in normalized
+        or ("\\users\\" in normalized and "\\documents\\" in normalized)
+    )
+
+
+def _is_unsigned_signature(signature: str) -> bool:
+    return str(signature or "").strip().lower() in {"", "-", "none", "null", "unknown", "unsigned", "无", "未知", "未签名"}
+
+
+def _format_file_size(value: object) -> str:
+    try:
+        size = int(float(str(value or "0")))
+    except ValueError:
+        return ""
+    if size <= 0:
+        return ""
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.0f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.0f} KB"
+    return f"{size} B"
 
 
 def _render_stage_topology(summary: AnalysisSummary) -> List[str]:
@@ -581,6 +808,10 @@ def print_terminal_report(
             if topology_lines:
                 for line in topology_lines:
                     out.write(f"{line}\n")
+            edr_tree_lines = _render_edr_process_chains(incident, event_by_id, full_evidence)
+            if edr_tree_lines:
+                for line in edr_tree_lines:
+                    out.write(f"{line}\n")
             if incident.next_logs:
                 out.write(f"       {CYAN}建议补采: {', '.join(_safe_text(item) for item in incident.next_logs[:5])}{RESET}\n")
             if incident.recommended_actions:
@@ -637,6 +868,11 @@ def print_terminal_report(
     if summary.timeline:
         out.write(_section("📅 关键事件时间线 Top 20（按时间）"))
         for entry in summary.timeline[:20]:
+            event = event_by_id.get(entry.event_id)
+            if event and event.details.get("source_type") == "edr":
+                for line in _render_edr_timeline_entry(entry, event, full_evidence):
+                    out.write(f"{line}\n")
+                continue
             color = _level_color(entry.level)
             badge = _level_badge(entry.level)
             mitre = f" {DIM}[{_safe_text(entry.mitre_attack)}]{RESET}" if entry.mitre_attack else ""

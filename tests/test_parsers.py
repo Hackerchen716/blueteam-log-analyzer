@@ -1,4 +1,59 @@
 from _support import *
+from xml.sax.saxutils import escape as _xml_escape
+import zipfile
+
+
+def _write_minimal_xlsx(path: Path, rows):
+    def cell_ref(col: int, row: int) -> str:
+        name = ""
+        col += 1
+        while col:
+            col, rem = divmod(col - 1, 26)
+            name = chr(ord("A") + rem) + name
+        return f"{name}{row}"
+
+    sheet_rows = []
+    for row_index, row in enumerate(rows, start=1):
+        cells = []
+        for col_index, value in enumerate(row):
+            ref = cell_ref(col_index, row_index)
+            text = _xml_escape(str(value or ""))
+            cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{text}</t></is></c>')
+        sheet_rows.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+    sheet_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<sheetData>{"".join(sheet_rows)}</sheetData></worksheet>'
+    )
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            "</Types>"
+        ))
+        archive.writestr("_rels/.rels", (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            "</Relationships>"
+        ))
+        archive.writestr("xl/workbook.xml", (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<sheets><sheet name="EDR" sheetId="1" r:id="rId1"/></sheets></workbook>'
+        ))
+        archive.writestr("xl/_rels/workbook.xml.rels", (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            "</Relationships>"
+        ))
+        archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
 
 
 class ParserRegressionTests(unittest.TestCase):
@@ -45,6 +100,47 @@ class ParserRegressionTests(unittest.TestCase):
         summary = run_detection(result.events)
         self.assertTrue(any(alert.rule_name == "Web攻击: SQL注入" for alert in summary.alerts))
 
+    def test_web_parser_does_not_flag_browser_ua_or_id_param_as_command(self):
+        content = (
+            "202.130.127.38 - - [15/May/2017:02:09:03 -0700] "
+            "\"GET / HTTP/1.1\" 200 10792 \"-\" "
+            "\"Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/56.0.2924.87 Safari/537.36\"\n"
+            "1.1.1.1 - - [15/Mar/2024:10:00:00 +0800] "
+            "\"GET /article?id=123 HTTP/1.1\" 200 10 \"-\" \"Mozilla/5.0\"\n"
+        )
+
+        result = parse_web_access(content, "access.log")
+
+        self.assertEqual(result.events, [])
+
+    def test_web_parser_still_detects_command_execution_params(self):
+        content = (
+            "1.1.1.1 - - [15/Mar/2024:10:00:00 +0800] "
+            "\"GET /vuln.php?cmd=id HTTP/1.1\" 200 10 \"-\" \"Mozilla/5.0\"\n"
+        )
+
+        result = parse_web_access(content, "access.log")
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].rule_name, "命令注入/代码执行")
+
+    def test_web_parser_filters_benign_redirects_without_losing_sensitive_redirect(self):
+        content = (
+            "1.1.1.1 - - [15/Mar/2024:10:00:00 +0800] "
+            "\"GET / HTTP/1.1\" 301 10 \"-\" \"Mozilla/5.0\"\n"
+            "1.1.1.1 - - [15/Mar/2024:10:00:01 +0800] "
+            "\"GET /style.css HTTP/1.1\" 304 10 \"-\" \"Mozilla/5.0\"\n"
+            "1.1.1.1 - - [15/Mar/2024:10:00:02 +0800] "
+            "\"GET /wp-admin/ HTTP/1.1\" 301 10 \"-\" \"Mozilla/5.0\"\n"
+        )
+
+        result = parse_web_access(content, "access.log")
+
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].rule_name, "敏感文件探测")
+        self.assertEqual(result.events[0].details.get("status"), "301")
+
     def test_web_attack_ip_can_still_create_volume_alert(self):
         content = "".join(
             "198.51.100.30 - - [15/Mar/2024:10:00:%02d +0800] "
@@ -58,6 +154,148 @@ class ParserRegressionTests(unittest.TestCase):
         self.assertTrue(any(event.category == "流量异常" for event in result.events))
         self.assertTrue(any(alert.rule_name.startswith("Web攻击:") for alert in summary.alerts))
         self.assertTrue(any(alert.rule_id == "RECON-003" for alert in summary.alerts))
+
+    def test_edr_xlsx_auto_parse_detects_unsigned_fake_software_chain(self):
+        rows = [
+            [
+                "事件类型", "事件子类型", "时间", "进程用户名", "进程ID", "进程名",
+                "进程映像路径", "进程文件签名", "进程SHA1值", "目标进程PID",
+                "进程事件文件路径", "目标进程文件签名", "文件SHA1值", "文件类型",
+                "文件大小", "上次修改时间", "创建时间", "最后访问时间", "进程命令",
+            ],
+            [
+                "进程事件", "进程创建", "2026-01-21 21:38:00", "SYSTEM", "1828",
+                "services.exe", r"C:\Windows\System32\services.exe", "Microsoft Windows Publisher",
+                "395aa8b83cf4087ef62ca5407c6f69abf229411b", "15072",
+                r"C:\Windows\System32\svchost.exe", "Microsoft Windows Publisher",
+                "3f64c98f22da277a07cab248c44c56eedb796a81", "exe", "79920", "", "", "",
+                r"C:\Windows\System32\svchost.exe -k netsvcs",
+            ],
+            [
+                "进程事件", "进程创建", "2026-01-21 21:40:00", "Administrator", "4743",
+                "TencentttMeeti5681.exe",
+                r"C:\Users\Administrator\Downloads\TencentttMeeti5681\TencentttMeeti5681.exe",
+                "", "", "5109",
+                r"C:\Users\Administrator\Downloads\TencentttMeeti5681\II-10.exe",
+                "", "5819a2e46ceee9c7cab09cfedb14a83efe9e312d", "exe", "875008", "", "", "",
+                r'"C:\Users\Administrator\Downloads\TencentttMeeti5681\II-10.exe"',
+            ],
+            [
+                "进程事件", "进程加载", "2026-01-21 21:41:00", "Administrator", "5065",
+                "3Fv6Bsq.exe",
+                r"C:\Users\Administrator\Documents\NCElSz\c8XAtk\3Fv6Bsq.exe",
+                "", "be6316f0906fed16e477d0eca5bb07919fea25bc", "0",
+                r"C:\Windows\System32\TAuxMod64.dll", "Guangzhou TEC Solutions Co., Ltd.",
+                "89662b6df6fbdc0c507b41fc7b603b0585787ffc", "dll", "1234", "", "", "",
+                r'"C:\Users\Administrator\Documents\NCElSz\c8XAtk\3Fv6Bsq"',
+            ],
+            [
+                "进程事件", "进程创建", "2026-01-21 21:41:01", "Administrator", "5065",
+                "II-10.tmp",
+                r"C:\Users\ADMINI~1\AppData\Local\Temp\is-TED13.tmp\II-10.tmp",
+                "", "", "5099",
+                r"C:\inetpub\wwwroot\rMmZhp\ewWB4p\g36Q6KT.exe",
+                "", "", "exe", "5593032", "", "", "",
+                r'"C:\inetpub\wwwroot\rMmZhp\ewWB4p\g36Q6KT"',
+            ],
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "日志查询.xlsx"
+            _write_minimal_xlsx(path, rows)
+
+            result = auto_parse(str(path))
+
+        self.assertEqual(result.log_type, "EDR Excel Export")
+        self.assertEqual(result.stats.total, 4)
+        high_events = [event for event in result.events if event.level == ThreatLevel.HIGH]
+        self.assertGreaterEqual(len(high_events), 2)
+        self.assertTrue(any("masquerading" in event.tags for event in high_events))
+        self.assertTrue(any("random-name" in event.tags for event in high_events))
+        self.assertTrue(all(event.details.get("p0_kind") == "edr" for event in high_events))
+        security_component = next(event for event in result.events if event.details.get("target_process") == "TAuxMod64.dll")
+        self.assertEqual(security_component.level, ThreatLevel.INFO)
+        self.assertIn("security-component-load", security_component.tags)
+
+        summary = run_detection(result.events)
+        edr_alert = next(alert for alert in summary.alerts if alert.rule_id == "P0-EDR-001")
+        self.assertEqual(edr_alert.mitre_phase, "执行")
+
+    def test_edr_xlsx_flags_system_cleanup_acl_portproxy_and_archive_context(self):
+        header = [
+            "事件类型", "事件子类型", "时间", "进程用户名", "进程名",
+            "进程映像路径", "进程文件签名", "进程事件文件路径",
+            "目标进程文件签名", "文件类型", "文件大小", "进程命令",
+        ]
+        rows = [
+            header,
+            [
+                "进程事件", "进程创建", "2026-01-21 12:27:00", "Administrator",
+                "Explorer.EXE", r"C:\windows\Explorer.EXE", "Microsoft Windows",
+                r"C:\Program Files\7-Zip\7zG.exe", "", "exe", "553984",
+                r'"C:\Program Files\7-Zip\7zG.exe" x -o"C:\Users\Administrator\Downloads\TencentttMeeti5681\" -spe',
+            ],
+            [
+                "进程事件", "进程创建", "2026-01-21 12:27:59", "SYSTEM",
+                "elevation_service.exe",
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\143.0.3650.139\elevation_service.exe",
+                "Microsoft Corporation", r"C:\windows\system32\schtasks.exe",
+                "Microsoft Windows", "exe", "258048",
+                'schtasks.exe /delete /tn "9C773OPWwZPGaqDwUHQyB" /f',
+            ],
+            [
+                "进程事件", "进程创建", "2026-01-21 12:27:59", "SYSTEM",
+                "elevation_service.exe",
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\143.0.3650.139\elevation_service.exe",
+                "Microsoft Corporation", r"C:\Windows\System32\cmd.exe",
+                "Microsoft Windows", "exe", "323584",
+                r'C:\Windows\System32\cmd.exe /c icacls "C:\inetpub\wwwroot\rMmZhp\ewWB4p\." /deny "Users":(D) & icacls "C:\inetpub\wwwroot\rMmZhp\ewWB4p\." /grant "Users":(OI)(CI)(RX)',
+            ],
+            [
+                "进程事件", "进程创建", "2026-01-21 12:40:00", "SYSTEM",
+                "elevation_service.exe",
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\143.0.3650.139\elevation_service.exe",
+                "Microsoft Corporation", r"C:\windows\system32\netsh.exe",
+                "Microsoft Windows", "exe", "118784",
+                r'"C:\windows\system32\netsh.exe" interface portproxy reset',
+            ],
+        ]
+        content = "\n".join("\t".join(row) for row in rows)
+
+        result = parse_content(content, "edr-export.tsv", parser_name="edr-xlsx")
+        by_rule = {event.rule_id: event for event in result.events if event.rule_id}
+
+        self.assertEqual(by_rule["EDR-XLSX-ARCHIVE-EXTRACT"].level, ThreatLevel.MEDIUM)
+        self.assertEqual(by_rule["EDR-XLSX-SCHTASKS-DELETE"].mitre_attack, "T1053.005")
+        self.assertIn("task-cleanup", by_rule["EDR-XLSX-SCHTASKS-DELETE"].tags)
+        self.assertEqual(by_rule["EDR-XLSX-RANDOM-ACL"].mitre_attack, "T1222.001")
+        self.assertIn("acl-modification", by_rule["EDR-XLSX-RANDOM-ACL"].tags)
+        self.assertEqual(by_rule["EDR-XLSX-PORTPROXY-RESET"].level, ThreatLevel.MEDIUM)
+        self.assertIn("network-config", by_rule["EDR-XLSX-PORTPROXY-RESET"].tags)
+
+        summary = run_detection(result.events)
+        alert = next(alert for alert in summary.alerts if alert.rule_id == "P0-EDR-001")
+        self.assertEqual(len(summary.alerts), 1)
+        self.assertIn("计划任务删除=1", "\n".join(alert.evidence))
+        self.assertIn("随机目录ACL修改=1", "\n".join(alert.evidence))
+        self.assertIn("portproxy reset=1", "\n".join(alert.evidence))
+
+    def test_edr_xlsx_content_parser_supports_tsv_rows(self):
+        content = "\n".join([
+            "\t".join(["事件类型", "事件子类型", "时间", "进程用户名", "进程名", "进程映像路径", "进程文件签名", "进程事件文件路径", "目标进程文件签名", "进程命令"]),
+            "\t".join([
+                "进程事件", "进程创建", "2026-01-21 21:40:00", "Administrator",
+                "II-10.tmp", r"C:\Users\ADMINI~1\AppData\Local\Temp\is-TED13.tmp\II-10.tmp",
+                "", r"C:\inetpub\wwwroot\rMmZhp\ewWB4p\g36Q6KT.exe", "",
+                r'"C:\inetpub\wwwroot\rMmZhp\ewWB4p\g36Q6KT"',
+            ]),
+        ])
+
+        result = parse_content(content, "edr-export.tsv", parser_name="edr-xlsx")
+
+        self.assertEqual(result.log_type, "EDR Excel Export")
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].level, ThreatLevel.HIGH)
+        self.assertIn("webroot-executable", result.events[0].tags)
 
     def test_windows_event_with_malformed_logon_type_is_not_dropped(self):
         xml = (
@@ -156,6 +394,36 @@ class ParserRegressionTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("bad.log", errors[0])
         self.assertIn("boom", errors[0])
+
+    def test_parse_files_disambiguates_duplicate_basenames_with_relative_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            host_a = root / "host-a"
+            host_b = root / "host-b"
+            host_a.mkdir()
+            host_b.mkdir()
+            first = host_a / "access.log"
+            second = host_b / "access.log"
+            first.write_text(
+                '9.9.9.9 - - [15/Mar/2024:10:00:00 +0800] '
+                '"GET /admin.php HTTP/1.1" 404 10 "-" "curl/8"\n',
+                encoding="utf-8",
+            )
+            second.write_text(
+                '198.51.100.10 - - [15/Mar/2024:10:00:01 +0800] '
+                '"GET /download.php?file=../../etc/passwd HTTP/1.1" 200 10 "-" "Mozilla/5.0"\n',
+                encoding="utf-8",
+            )
+
+            results = parse_files([str(first), str(second)], jobs=1, quiet=True)
+
+        names = {result.file_name for result in results}
+        event_sources = {event.source_file for result in results for event in result.events}
+        self.assertEqual(names, {"host-a/access.log", "host-b/access.log"})
+        self.assertEqual(event_sources, names)
+        for name in names:
+            self.assertFalse(Path(name).is_absolute())
+            self.assertNotIn(str(root), name)
 
     def test_windows_system_account_creation_is_not_persistence_alert(self):
         xml = (
@@ -302,6 +570,224 @@ class ParserRegressionTests(unittest.TestCase):
         summary = run_detection(result.events)
         self.assertFalse(any(item.phase == "执行" for item in summary.attack_chain))
 
+    def test_windows_4688_credential_dump_command_feeds_credential_detector(self):
+        xml = (
+            "<Event><System><EventID>4688</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name=\"NewProcessName\">C:\\Tools\\procdump.exe</Data>"
+            "<Data Name=\"ParentProcessName\">C:\\Windows\\System32\\cmd.exe</Data>"
+            "<Data Name=\"CommandLine\">procdump.exe -accepteula -ma lsass.exe C:\\Temp\\lsass.dmp</Data>"
+            "</EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Security.xml")
+        event = result.events[0]
+
+        self.assertEqual(event.level, ThreatLevel.CRITICAL)
+        self.assertEqual(event.mitre_attack, "T1003.001")
+        self.assertEqual(event.details.get("credential_dump_method"), "lsass-memory-dump")
+        self.assertIn("credential-access", event.tags)
+        self.assertIn("credential-dump", event.tags)
+        self.assertIn("lsass-dump", event.tags)
+
+        summary = run_detection(result.events)
+        rule_ids = {alert.rule_id for alert in summary.alerts}
+        self.assertIn("CRED-001", rule_ids)
+        self.assertIn("CRED-002", rule_ids)
+
+    def test_sysmon_process_creation_normalizes_and_detects_reg_save(self):
+        xml = (
+            "<Event><System><EventID>1</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Image\">C:\\Windows\\System32\\reg.exe</Data>"
+            "<Data Name=\"ParentImage\">C:\\Windows\\System32\\cmd.exe</Data>"
+            "<Data Name=\"CommandLine\">reg save HKLM\\SAM C:\\Temp\\sam.save</Data>"
+            "</EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Sysmon.xml")
+        event = result.events[0]
+
+        self.assertEqual(event.level, ThreatLevel.CRITICAL)
+        self.assertEqual(event.mitre_attack, "T1003.002")
+        self.assertEqual(event.details.get("parent_process"), "C:\\Windows\\System32\\cmd.exe")
+        self.assertEqual(event.details.get("child_process"), "reg.exe")
+        self.assertEqual(event.details.get("child_path"), "C:\\Windows\\System32\\reg.exe")
+        self.assertEqual(event.details.get("credential_dump_method"), "registry-hive-save")
+        self.assertIn("credential-access", event.tags)
+        self.assertIn("credential-dump", event.tags)
+        self.assertNotIn("lsass-dump", event.tags)
+
+        summary = run_detection(result.events)
+        rule_ids = {alert.rule_id for alert in summary.alerts}
+        self.assertIn("CRED-001", rule_ids)
+        self.assertNotIn("CRED-002", rule_ids)
+
+    def test_sysmon_process_access_non_lsass_is_not_credential_dump(self):
+        xml = (
+            "<Event><System><EventID>10</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"SourceImage\">C:\\Tools\\Akagi_64.exe</Data>"
+            "<Data Name=\"TargetImage\">C:\\Windows\\System32\\cmd.exe</Data>"
+            "<Data Name=\"GrantedAccess\">0x00001410</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Sysmon.xml")
+        event = result.events[0]
+
+        self.assertEqual(event.level, ThreatLevel.MEDIUM)
+        self.assertIsNone(event.mitre_attack)
+        self.assertIn("process-access", event.tags)
+        self.assertNotIn("lsass", event.tags)
+        self.assertNotIn("credential-access", event.tags)
+        self.assertNotIn("lsass-dump", event.tags)
+
+    def test_powershell_4104_minidump_lsass_is_credential_dump(self):
+        xml = (
+            "<Event><System><EventID>4104</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-PowerShell/Operational</Channel></System>"
+            "<EventData><Data Name=\"ScriptBlockText\">"
+            "$Process = Get-Process lsass; $null = MiniDumpWriteDump($Process.Handle)"
+            "</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "PowerShell.xml")
+        event = result.events[0]
+
+        self.assertEqual(event.level, ThreatLevel.CRITICAL)
+        self.assertEqual(event.mitre_attack, "T1003.001")
+        self.assertEqual(event.details.get("credential_dump_method"), "lsass-memory-dump")
+        self.assertIn("credential-access", event.tags)
+        self.assertIn("credential-dump", event.tags)
+        self.assertIn("lsass-dump", event.tags)
+
+    def test_sysmon_wmi_subscription_events_are_persistence(self):
+        xml = (
+            "<Event><System><EventID>20</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Name\">BotConsumer23</Data>"
+            "<Data Name=\"Destination\">\"C:\\Windows\\System32\\cmd.exe\"</Data>"
+            "<Data Name=\"Operation\">Created</Data></EventData></Event>"
+            "<Event><System><EventID>21</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:25.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Consumer\">CommandLineEventConsumer.Name=&quot;BotConsumer23&quot;</Data>"
+            "<Data Name=\"Filter\">__EventFilter.Name=&quot;BotFilter82&quot;</Data>"
+            "<Data Name=\"Operation\">Created</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Sysmon.xml")
+        consumer, binding = result.events
+
+        self.assertEqual(consumer.level, ThreatLevel.HIGH)
+        self.assertEqual(consumer.mitre_attack, "T1546.003")
+        self.assertEqual(consumer.details.get("persistence_mechanism"), "wmi-event-subscription")
+        self.assertEqual(consumer.details.get("child_process"), "cmd.exe")
+        self.assertIn("wmi-persistence", consumer.tags)
+        self.assertIn("persistence", consumer.tags)
+        self.assertIn("wmi-persistence", binding.tags)
+
+    def test_sysmon_wmi_subscription_delete_command_is_not_persistence_creation(self):
+        xml = (
+            "<Event><System><EventID>1</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Image\">C:\\Windows\\System32\\wbem\\WMIC.exe</Data>"
+            "<Data Name=\"CommandLine\">"
+            "\"C:\\Windows\\System32\\wbem\\WMIC.exe\" /namespace:\"\\\\root\\subscription\" "
+            "PATH __EventFilter WHERE Name=\"BotFilter82\" DELETE"
+            "</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Sysmon.xml")
+        event = result.events[0]
+
+        self.assertIn("wmi", event.tags)
+        self.assertNotIn("wmi-persistence", event.tags)
+        self.assertNotIn("persistence", event.tags)
+        self.assertIsNone(event.mitre_attack)
+
+    def test_sysmon_network_and_dns_fields_are_normalized(self):
+        xml = (
+            "<Event><System><EventID>3</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:24.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Image\">C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe</Data>"
+            "<Data Name=\"SourceIp\">10.0.0.5</Data>"
+            "<Data Name=\"SourcePort\">49152</Data>"
+            "<Data Name=\"DestinationIp\">203.0.113.9</Data>"
+            "<Data Name=\"DestinationPort\">443</Data>"
+            "<Data Name=\"DestinationHostname\">updates.example.test</Data>"
+            "<Data Name=\"Protocol\">tcp</Data>"
+            "<Data Name=\"Initiated\">true</Data></EventData></Event>"
+            "<Event><System><EventID>22</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:25.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>Microsoft-Windows-Sysmon/Operational</Channel></System>"
+            "<EventData><Data Name=\"Image\">C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe</Data>"
+            "<Data Name=\"QueryName\">updates.example.test</Data>"
+            "<Data Name=\"QueryStatus\">0</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "Sysmon.xml")
+        network, dns = result.events
+
+        self.assertEqual(network.ip, "203.0.113.9")
+        self.assertEqual(network.details.get("source_ip"), "10.0.0.5")
+        self.assertEqual(network.details.get("source_port"), "49152")
+        self.assertEqual(network.details.get("destination_ip"), "203.0.113.9")
+        self.assertEqual(network.details.get("destination_port"), "443")
+        self.assertEqual(network.details.get("destination_host"), "updates.example.test")
+        self.assertEqual(network.details.get("network_protocol"), "tcp")
+        self.assertIn("network", network.tags)
+        self.assertIsNone(network.mitre_attack)
+
+        self.assertEqual(dns.details.get("dns_query"), "updates.example.test")
+        self.assertEqual(dns.details.get("query_status"), "0")
+        self.assertIn("dns", dns.tags)
+        self.assertIsNone(dns.mitre_attack)
+
+    def test_windows_service_install_normalizes_suspicious_image_path(self):
+        xml = (
+            "<Event><System><EventID>7045</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:26.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>System</Channel></System>"
+            "<EventData><Data Name=\"ServiceName\">WinUpdateSvc</Data>"
+            "<Data Name=\"ImagePath\">\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" "
+            "-NoP -EncodedCommand SQBFAFgA</Data>"
+            "<Data Name=\"ServiceAccount\">LocalSystem</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "System.xml")
+        event = result.events[0]
+
+        self.assertEqual(event.level, ThreatLevel.CRITICAL)
+        self.assertEqual(event.details.get("service_name"), "WinUpdateSvc")
+        self.assertEqual(event.details.get("service_account"), "LocalSystem")
+        self.assertEqual(event.details.get("child_process"), "powershell.exe")
+        self.assertEqual(event.details.get("persistence_mechanism"), "service")
+        self.assertIn("-EncodedCommand", event.details.get("persistence_command", ""))
+        self.assertIn("service-install", event.tags)
+        self.assertIn("suspicious-persistence", event.tags)
+        self.assertIn("powershell", event.tags)
+
+    def test_windows_maintenance_service_install_gets_low_strength_hint(self):
+        xml = (
+            "<Event><System><EventID>7045</EventID>"
+            "<TimeCreated SystemTime=\"2024-02-26T15:02:28.000Z\"/>"
+            "<Computer>WIN</Computer><Channel>System</Channel></System>"
+            "<EventData><Data Name=\"ServiceName\">wuauserv</Data>"
+            "<Data Name=\"ImagePath\">C:\\Windows\\System32\\svchost.exe -k netsvcs -p</Data>"
+            "<Data Name=\"ServiceAccount\">LocalSystem</Data></EventData></Event>"
+        )
+        result = parse_windows_xml(xml, "System.xml")
+        event = result.events[0]
+
+        self.assertEqual(event.level, ThreatLevel.HIGH)
+        self.assertEqual(event.details.get("service_name"), "wuauserv")
+        self.assertEqual(event.details.get("child_process"), "svchost.exe")
+        self.assertEqual(event.details.get("persistence_baseline"), "windows-maintenance-service")
+        self.assertEqual(event.details.get("persistence_alert_confidence"), "low")
+        self.assertEqual(event.details.get("evidence_strength"), "low")
+        self.assertIn("service-install", event.tags)
+        self.assertNotIn("suspicious-persistence", event.tags)
+
     def test_windows_ntlm_success_zero_status_is_not_bruteforce(self):
         xml = (
             "<Event><System><EventID>4776</EventID>"
@@ -378,6 +864,27 @@ web_attacks:
             self.assertEqual(normalize_timestamp("Mar 15 09:00:01"), "2024-03-15T09:00:01")
         finally:
             set_syslog_year(None)
+
+    def test_linux_auth_filters_duplicate_preauth_invalid_user_and_keeps_lockout(self):
+        content = (
+            "Dec  7 05:20:40 host sshd[1]: Invalid user admin from 1.2.3.4\n"
+            "Dec  7 05:20:40 host sshd[1]: input_userauth_request: invalid user admin [preauth]\n"
+            "Dec  7 05:20:47 host sshd[2]: Disconnecting: Too many authentication failures for root [preauth]\n"
+        )
+
+        set_syslog_year(2015)
+        try:
+            result = parse_linux_auth(content, "auth.log")
+        finally:
+            set_syslog_year(None)
+
+        self.assertEqual(len(result.events), 2)
+        self.assertEqual(result.events[0].rule_name, "SSH 登录失败")
+        self.assertEqual(result.events[0].ip, "1.2.3.4")
+        self.assertEqual(result.events[1].rule_name, "认证失败次数过多")
+        self.assertEqual(result.events[1].level, ThreatLevel.HIGH)
+        self.assertIn("lockout", result.events[1].tags)
+        self.assertNotIn("failed-login", result.events[1].tags)
 
     def test_cross_year_syslog_lines_advance_year_on_month_rollback(self):
         """12 月之后出现 1 月份事件，应自动 +1 年。"""
@@ -541,6 +1048,238 @@ web_attacks:
 
         self.assertEqual(len(result.events), 1)
         self.assertEqual(result.stats.parse_errors, 1)
+
+    def test_windows_xml_single_quoted_default_namespace_is_parsed(self):
+        xml = (
+            "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'>"
+            "<System><EventID>4624</EventID>"
+            "<TimeCreated SystemTime='2024-03-15T01:02:03.000Z'/>"
+            "<Computer>host</Computer><Channel>Security</Channel></System>"
+            "<EventData><Data Name='TargetUserName'>alice</Data>"
+            "<Data Name='IpAddress'>198.51.100.8</Data>"
+            "<Data Name='LogonType'>3</Data></EventData></Event>"
+        )
+
+        result = parse_windows_xml(xml, "single-namespace.xml")
+
+        self.assertEqual(len(result.events), 1)
+        event = result.events[0]
+        self.assertEqual(event.event_id, "4624")
+        self.assertEqual(event.user, "alice")
+        self.assertIn("remote-access", event.tags)
+
+    def test_windows_json_eventlog_auto_parse_uses_windows_parser(self):
+        first = {
+            "SourceName": "Microsoft-Windows-Security-Auditing",
+            "ProviderGuid": "{54849625-5478-4994-a5ba-3e3b0328c30d}",
+            "Channel": "Security",
+            "Hostname": "pedro-computer",
+            "TimeCreated": "2022-08-18T06:57:16.613Z",
+            "@timestamp": "2022-08-18T06:57:16.613Z",
+            "EventID": 4688,
+            "SubjectUserName": "pedro-admin",
+            "SubjectDomainName": "PEDRO-COMPUTER",
+            "NewProcessName": r"C:\Windows\System32\auditpol.exe",
+            "ParentProcessName": r"C:\Users\pedro\Downloads\payload.exe",
+            "CommandLine": 'auditpol.exe /set /category:"Account Logon" /success:disable',
+            "Message": "A new process has been created.",
+        }
+        second = {
+            "SourceName": "Microsoft-Windows-Security-Auditing",
+            "ProviderGuid": "{54849625-5478-4994-a5ba-3e3b0328c30d}",
+            "Channel": "Security",
+            "Hostname": "pedro-computer",
+            "TimeCreated": "2022-08-18T06:57:28.129Z",
+            "EventID": 4688,
+            "SubjectUserName": "pedro-admin",
+            "NewProcessName": r"C:\Windows\System32\auditpol.exe",
+            "CommandLine": "auditpol.exe /clear /y",
+            "Message": "A new process has been created.",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "otrf-windows-eventlog.json"
+            path.write_text(
+                _json.dumps(first) + "\n" + _json.dumps(second) + "\n",
+                encoding="utf-8",
+            )
+            result = auto_parse(str(path))
+
+        self.assertEqual(result.log_type, "Windows Event Log (JSON)")
+        self.assertEqual(len(result.events), 2)
+        self.assertTrue(all(event.source.startswith("Security (EID:4688)") for event in result.events))
+        self.assertTrue(all("auditpol-tampering" in event.tags for event in result.events))
+        self.assertTrue(all("defense-evasion" in event.tags for event in result.events))
+        self.assertEqual({event.mitre_attack for event in result.events}, {"T1562.002"})
+
+    def test_windows_jsonl_file_keeps_partial_events_and_counts_decode_error(self):
+        good_record = {
+            "SourceName": "Microsoft-Windows-Sysmon",
+            "ProviderGuid": "{5770385F-C22A-43E0-BF4C-06F5698FFBD9}",
+            "Channel": "Microsoft-Windows-Sysmon/Operational",
+            "Hostname": "WORKSTATION5.theshire.local",
+            "UtcTime": "2020-10-23 02:36:51.000",
+            "@timestamp": "2020-10-23T02:36:51.000Z",
+            "EventID": 1,
+            "Image": r"C:\Windows\System32\cmd.exe",
+            "CommandLine": r"cmd.exe /c whoami",
+            "Message": "Process Create.",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "windows-eventlog.jsonl"
+            path.write_text(
+                "\n".join([
+                    _json.dumps(good_record),
+                    '{"EventID": 1, "SourceName": ',
+                    _json.dumps({**good_record, "CommandLine": r"cmd.exe /c hostname"}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            result = parse_windows_json_file(str(path))
+
+        self.assertEqual(result.log_type, "Windows Event Log (JSON)")
+        self.assertEqual(result.stats.total, 2)
+        self.assertEqual(result.stats.parse_errors, 1)
+        self.assertEqual([event.event_id for event in result.events], ["1", "1"])
+
+    def test_windows_jsonl_content_keeps_partial_events_and_counts_decode_error(self):
+        good_record = {
+            "SourceName": "Microsoft-Windows-Sysmon",
+            "ProviderGuid": "{5770385F-C22A-43E0-BF4C-06F5698FFBD9}",
+            "Channel": "Microsoft-Windows-Sysmon/Operational",
+            "Hostname": "WORKSTATION5.theshire.local",
+            "UtcTime": "2020-10-23 02:36:51.000",
+            "@timestamp": "2020-10-23T02:36:51.000Z",
+            "EventID": 1,
+            "Image": r"C:\Windows\System32\cmd.exe",
+            "CommandLine": r"cmd.exe /c whoami",
+            "Message": "Process Create.",
+        }
+        content = "\n".join([
+            _json.dumps(good_record),
+            '{"EventID": 1, "SourceName": ',
+            _json.dumps({**good_record, "CommandLine": r"cmd.exe /c hostname"}),
+        ]) + "\n"
+
+        result = parse_content(content, "windows-eventlog.jsonl")
+
+        self.assertEqual(result.log_type, "Windows Event Log (JSON)")
+        self.assertEqual(result.stats.total, 2)
+        self.assertEqual(result.stats.parse_errors, 1)
+        self.assertEqual([event.event_id for event in result.events], ["1", "1"])
+
+    def test_windows_json_array_parse_reuses_uac_registry_classification(self):
+        content = _json.dumps([
+            {
+                "SourceName": "Microsoft-Windows-Sysmon",
+                "ProviderGuid": "{5770385F-C22A-43E0-BF4C-06F5698FFBD9}",
+                "Channel": "Microsoft-Windows-Sysmon/Operational",
+                "Hostname": "WORKSTATION5.theshire.local",
+                "UtcTime": "2020-09-04 07:35:00.012",
+                "@timestamp": "2020-09-04T07:35:00.012Z",
+                "EventID": 13,
+                "Image": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "TargetObject": (
+                    r"HKU\S-1-5-21-1-2-3-1104_Classes\ms-settings\Shell\Open\command"
+                    r"\DelegateExecute"
+                ),
+                "Details": "",
+                "EventType": "SetValue",
+                "Message": "Registry value set.",
+            }
+        ])
+
+        result = parse_content(content, "windows-eventlog.json")
+
+        self.assertEqual(result.log_type, "Windows Event Log (JSON)")
+        self.assertEqual(len(result.events), 1)
+        event = result.events[0]
+        self.assertEqual(event.event_id, "13")
+        self.assertEqual(event.mitre_attack, "T1548.002")
+        self.assertIn("uac-bypass", event.tags)
+        self.assertIn("privilege-escalation", event.tags)
+        self.assertNotIn("persistence", event.tags)
+
+    def test_windows_json_winlogbeat_content_maps_nested_fields_to_existing_classification(self):
+        content = _json.dumps({
+            "@timestamp": "2022-08-18T06:57:28.129Z",
+            "event": {"code": 4688, "provider": "Microsoft-Windows-Security-Auditing"},
+            "host": {"name": "pedro-computer"},
+            "winlog": {
+                "event_id": 4688,
+                "channel": "Security",
+                "provider_name": "Microsoft-Windows-Security-Auditing",
+                "computer_name": "pedro-computer",
+                "event_data": {
+                    "SubjectUserName": "pedro-admin",
+                    "SubjectDomainName": "PEDRO-COMPUTER",
+                    "NewProcessName": r"C:\Windows\System32\auditpol.exe",
+                    "ParentProcessName": r"C:\Users\pedro\Downloads\payload.exe",
+                    "CommandLine": "auditpol.exe /clear /y",
+                },
+            },
+            "process": {
+                "executable": r"C:\Windows\System32\auditpol.exe",
+                "command_line": "auditpol.exe /clear /y",
+                "parent": {"executable": r"C:\Users\pedro\Downloads\payload.exe"},
+            },
+            "message": "A new process has been created.",
+        }) + "\n"
+
+        result = parse_content(content, "winlogbeat-windows.jsonl")
+
+        self.assertEqual(result.log_type, "Windows Event Log (JSON)")
+        self.assertEqual(result.stats.total, 1)
+        event = result.events[0]
+        self.assertEqual(event.event_id, "4688")
+        self.assertEqual(event.host, "pedro-computer")
+        self.assertEqual(event.user, "pedro-admin")
+        self.assertEqual(event.details.get("CommandLine"), "auditpol.exe /clear /y")
+        self.assertEqual(event.details.get("NewProcessName"), r"C:\Windows\System32\auditpol.exe")
+        self.assertIn("auditpol-tampering", event.tags)
+        self.assertIn("defense-evasion", event.tags)
+        self.assertEqual(event.mitre_attack, "T1562.002")
+
+    def test_windows_json_pretty_winlogbeat_file_streams_single_object(self):
+        record = {
+            "@timestamp": "2022-08-18T06:57:28.129Z",
+            "event": {"code": 4688, "provider": "Microsoft-Windows-Security-Auditing"},
+            "host": {"name": "pedro-computer"},
+            "winlog": {
+                "event_id": 4688,
+                "channel": "Security",
+                "provider_name": "Microsoft-Windows-Security-Auditing",
+                "computer_name": "pedro-computer",
+                "event_data": {
+                    "SubjectUserName": "pedro-admin",
+                    "SubjectDomainName": "PEDRO-COMPUTER",
+                    "NewProcessName": r"C:\Windows\System32\auditpol.exe",
+                    "ParentProcessName": r"C:\Users\pedro\Downloads\payload.exe",
+                    "CommandLine": "auditpol.exe /clear /y",
+                },
+            },
+            "process": {
+                "executable": r"C:\Windows\System32\auditpol.exe",
+                "command_line": "auditpol.exe /clear /y",
+                "parent": {"executable": r"C:\Users\pedro\Downloads\payload.exe"},
+            },
+            "message": "A new process has been created.",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "winlogbeat-windows.json"
+            path.write_text(_json.dumps(record, indent=2), encoding="utf-8")
+            result = auto_parse(str(path))
+
+        self.assertEqual(result.log_type, "Windows Event Log (JSON)")
+        self.assertEqual(result.stats.total, 1)
+        self.assertEqual(result.stats.parse_errors, 0)
+        event = result.events[0]
+        self.assertEqual(event.event_id, "4688")
+        self.assertEqual(event.host, "pedro-computer")
+        self.assertIn("auditpol-tampering", event.tags)
+        self.assertIn("defense-evasion", event.tags)
 
     def test_parser_registry_supports_explicit_type_and_content_input(self):
         """解析层应支持强制类型和内存内容，方便 Remote Collector 复用。"""

@@ -236,14 +236,18 @@ def _event_family(event: LogEvent, normalized: Dict[str, str]) -> str:
         return "compromise"
     if tags & {"web-attack", "exploit"}:
         return "initial-access"
+    if tags & {"exfiltration", "data-exfiltration", "dns-exfiltration"}:
+        return "exfiltration"
     if tags & {"c2", "dns-tunnel", "malicious-domain"}:
         return "command-control"
-    if tags & {"exfiltration"}:
-        return "exfiltration"
-    if tags & {"account-creation", "account-enabled", "account-deletion", "account-disabled", "service-install", "scheduled-task", "persistence"}:
-        return "persistence"
     if tags & {"group-add", "password-reset", "account-modified", "privilege-escalation", "sensitive-call"}:
         return "privilege-escalation"
+    if tags & {"acl-modification", "task-cleanup", "defense-evasion"}:
+        return "defense-evasion"
+    if tags & {"portproxy-reset", "network-config"}:
+        return "network"
+    if tags & {"account-creation", "account-enabled", "account-deletion", "account-disabled", "service-install", "scheduled-task", "persistence"}:
+        return "persistence"
     if tags & {"bastion-command", "lolbin"}:
         return "execution"
     if tags & {"remote-access", "remote-logon"} or ("credential-validation" in tags and "auth-success" in tags):
@@ -270,6 +274,7 @@ def _event_family_from_mitre(mitre: str) -> str:
         "T1110": "identity",
         "T1059": "execution",
         "T1218": "execution",
+        "T1204": "execution",
         "T1543": "persistence",
         "T1053": "persistence",
         "T1136": "persistence",
@@ -279,6 +284,9 @@ def _event_family_from_mitre(mitre: str) -> str:
         "T1070": "defense-evasion",
         "T1562": "defense-evasion",
         "T1140": "defense-evasion",
+        "T1036": "defense-evasion",
+        "T1055": "defense-evasion",
+        "T1222": "defense-evasion",
         "T1003": "credential-access",
         "T1552": "credential-access",
         "T1558": "credential-access",

@@ -34,6 +34,7 @@ _LEVEL_MAP = {
     ThreatLevel.LOW:      "note",
     ThreatLevel.INFO:     "none",
 }
+_MITRE_TECHNIQUE_RE = re.compile(r"^T\d{4}(?:\.\d{3})?$", re.I)
 
 
 def _build_rule(alert: DetectionAlert) -> Dict[str, Any]:
@@ -42,8 +43,7 @@ def _build_rule(alert: DetectionAlert) -> Dict[str, Any]:
         "name": sanitize_report_text(alert.rule_name),
         "shortDescription": {"text": sanitize_report_text(alert.rule_name)},
         "fullDescription": {"text": sanitize_report_text(alert.description)},
-        "helpUri": "https://attack.mitre.org/techniques/" + alert.mitre_attack.replace(".", "/")
-        if alert.mitre_attack else "",
+        "helpUri": _mitre_help_uri(alert.mitre_attack),
         "properties": {
             "category": sanitize_report_text(alert.category),
             "mitre_phase": sanitize_report_text(alert.mitre_phase),
@@ -51,6 +51,13 @@ def _build_rule(alert: DetectionAlert) -> Dict[str, Any]:
             "tags": ["security", "blueteam", sanitize_report_text(alert.category)],
         },
     }
+
+
+def _mitre_help_uri(value: str) -> str:
+    technique = sanitize_report_text(value).upper()
+    if not _MITRE_TECHNIQUE_RE.fullmatch(technique):
+        return ""
+    return "https://attack.mitre.org/techniques/" + technique.replace(".", "/")
 
 
 def _build_result(alert: DetectionAlert, source_file: str) -> Dict[str, Any]:
@@ -71,7 +78,7 @@ def _build_result(alert: DetectionAlert, source_file: str) -> Dict[str, Any]:
         "properties": {
             "confidence": sanitize_report_text(alert.confidence),
             "evidence": [sanitize_report_text(item) for item in alert.evidence],
-            "affected_events": alert.affected_events,
+            "affected_events": [sanitize_report_text(item) for item in alert.affected_events],
             "affected_event_count": len(alert.affected_events),
             "timestamp": sanitize_report_text(alert.timestamp),
             "original_source_file": sanitize_report_text(source_file),
@@ -84,7 +91,7 @@ def _artifact_uri(source_file: str) -> str:
     if re.match(r"^[A-Za-z0-9_.-]+:", source) and "://" not in source:
         host, rest = source.split(":", 1)
         host = sanitize_report_text(host)
-        rest = rest.replace("\\", "/")
+        rest = sanitize_report_text(rest.replace("\\", "/"))
         if rest.startswith("journalctl:"):
             return f"remote/{host}/journalctl/{rest.split(':', 1)[1]}"
         if rest.startswith("/"):
