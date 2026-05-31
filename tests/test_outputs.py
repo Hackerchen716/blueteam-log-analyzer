@@ -834,13 +834,12 @@ class OutputRegressionTests(unittest.TestCase):
             "9.9.9.9 - - [15/Mar/2024:10:01:00 +0800] "
             "\"GET /download.php?file=../../etc/passwd HTTP/1.1\" 200 10 \"-\" \"curl/8\"\n"
         )
-        expected_hash = __import__("hashlib").sha256(content.encode()).hexdigest()
-
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_path = root / "access.log"
             out_dir = root / "report"
             input_path.write_text(content, encoding="utf-8")
+            expected_hash = __import__("hashlib").sha256(input_path.read_bytes()).hexdigest()
 
             run_analysis(
                 AnalysisOptions(
