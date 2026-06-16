@@ -56,7 +56,7 @@ def run_detection(
     timeline     = _build_timeline(events)
     attack_chain = _build_attack_chain(events, alerts)
     incidents    = correlate_incidents(events, alerts)
-    risk_score   = _calc_risk_score(events, alerts, incidents)
+    risk_score   = _calc_risk_score(events, alerts, incidents, attack_chain)
     risk_level   = (ThreatLevel.CRITICAL if risk_score >= 80 else
                     ThreatLevel.HIGH     if risk_score >= 60 else
                     ThreatLevel.MEDIUM   if risk_score >= 40 else
@@ -903,20 +903,90 @@ def _build_attack_chain(events: List[LogEvent], alerts: List[DetectionAlert]) ->
             for p, d in phases.items() if d["count"] > 0]
 
 
-def _calc_risk_score(events: List[LogEvent], alerts: List[DetectionAlert], incidents=None) -> int:
-    score = 0
-    score += sum(1 for e in events if e.level == ThreatLevel.CRITICAL) * 8
-    score += sum(1 for e in events if e.level == ThreatLevel.HIGH)     * 4
-    score += sum(1 for e in events if e.level == ThreatLevel.MEDIUM)   * 1
-    score += sum(1 for a in alerts if a.level == ThreatLevel.CRITICAL) * 15
-    score += sum(1 for a in alerts if a.level == ThreatLevel.HIGH)     * 8
-    score += sum(1 for a in alerts if a.level == ThreatLevel.MEDIUM)   * 3
-    if any(a.rule_id.startswith("EVAS") for a in alerts): score += 25
-    if any(a.rule_id.startswith("CRED") for a in alerts): score += 25
-    if any(a.rule_id == "BRUTE-001" for a in alerts):     score += 10
+def _calc_risk_score(
+    events: List[LogEvent],
+    alerts: List[DetectionAlert],
+    incidents=None,
+    attack_chain: Optional[List[AttackChainEntry]] = None,
+) -> int:
     incidents = incidents or []
-    score += sum(1 for item in incidents if item.level == ThreatLevel.CRITICAL) * 8
-    score += sum(1 for item in incidents if item.confidence == "high") * 4
+    attack_chain = attack_chain or []
+    if not events and not alerts and not incidents:
+        return 0
+
+    event_score = min(
+        18,
+        sum(1 for e in events if e.level == ThreatLevel.CRITICAL) * 7
+        + sum(1 for e in events if e.level == ThreatLevel.HIGH) * 4
+        + sum(1 for e in events if e.level == ThreatLevel.MEDIUM) * 1,
+    )
+
+    alert_weights = {
+        ThreatLevel.CRITICAL: 34,
+        ThreatLevel.HIGH: 22,
+        ThreatLevel.MEDIUM: 12,
+        ThreatLevel.LOW: 5,
+        ThreatLevel.INFO: 1,
+    }
+    alert_bases = sorted((alert_weights.get(a.level, 0) for a in alerts), reverse=True)
+    alert_score = 0
+    if alert_bases:
+        alert_score += alert_bases[0]
+        decay_factors = (0.6, 0.35, 0.2, 0.1)
+        for idx, base in enumerate(alert_bases[1:5]):
+            factor = decay_factors[idx] if idx < len(decay_factors) else 0.1
+            alert_score += int(round(base * factor))
+        alert_score = min(52, alert_score)
+
+    incident_weights = {
+        ThreatLevel.CRITICAL: 26,
+        ThreatLevel.HIGH: 18,
+        ThreatLevel.MEDIUM: 10,
+        ThreatLevel.LOW: 4,
+        ThreatLevel.INFO: 0,
+    }
+    incident_bases = sorted((incident_weights.get(item.level, 0) for item in incidents), reverse=True)
+    incident_score = 0
+    if incident_bases:
+        incident_score += incident_bases[0]
+        for idx, base in enumerate(incident_bases[1:4]):
+            factor = (0.5, 0.25, 0.15)[idx]
+            incident_score += int(round(base * factor))
+        incident_score = min(30, incident_score)
+
+    confidence_score = min(
+        10,
+        sum(4 for item in incidents if item.confidence == "high")
+        + sum(2 for item in incidents if item.confidence == "medium"),
+    )
+
+    active_phases = {item.phase for item in attack_chain if item.event_count > 0}
+    phase_score = min(12, len(active_phases) * 3)
+    if {"执行", "持久化", "横向移动"} & active_phases:
+        phase_score += 3
+    if {"凭据访问", "命令控制"} & active_phases:
+        phase_score += 3
+    phase_score = min(18, phase_score)
+
+    special_score = 0
+    if any(a.rule_id.startswith("EVAS") for a in alerts):
+        special_score += 8
+    if any(a.rule_id.startswith("CRED") for a in alerts):
+        special_score += 8
+    if any(a.rule_id.startswith("LAT") or a.rule_id == "WIN-CHAIN-001" for a in alerts):
+        special_score += 8
+    if any(a.rule_id.startswith("PERS") for a in alerts):
+        special_score += 5
+    if any(a.rule_id.startswith(("WEB", "P0-", "CN-HVV")) for a in alerts):
+        special_score += 4
+    special_score = min(18, special_score)
+
+    if not alerts and not incidents:
+        # 没有检测结论时只给“观察分”，避免单靠事件量把风险抬得过高。
+        observation_score = event_score + min(6, len(active_phases) * 2)
+        return min(28, observation_score)
+
+    score = event_score + alert_score + incident_score + confidence_score + phase_score + special_score
     return min(100, score)
 
 

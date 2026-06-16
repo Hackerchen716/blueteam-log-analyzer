@@ -15,12 +15,14 @@ from bla.allowlist import apply_allowlist
 from bla.config import THRESHOLDS, Thresholds, load_thresholds, set_thresholds
 from bla.core import AnalysisError, AnalysisOptions, run_analysis
 from bla.detection import DetectorRegistry, DetectorSpec, list_detector_names, run_detection
-from bla.detection.engine import _dedup_alerts
+from bla.detection.engine import _calc_risk_score, _dedup_alerts
 from bla.ioc import extract_iocs, format_ioc_report
 from bla.log_sources import LOG_SOURCE_PRIORITIES, format_log_source_priorities
 from bla.models import (
     AnalysisSummary,
+    AttackChainEntry,
     DetectionAlert,
+    Incident,
     LogEvent,
     ParseResult,
     ParseStats,
@@ -124,6 +126,101 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(result.events[0].rule_name, "堡垒机高危命令")
         self.assertIn("bastion-command", result.events[0].tags)
         self.assertEqual(result.events[0].host, "10.0.0.5")
+
+    def test_risk_score_caps_event_only_noise_without_alerts(self):
+        events = [
+            LogEvent(
+                id=f"evt-{i}",
+                timestamp=f"2024-03-15T10:00:{i:02d}",
+                level=ThreatLevel.HIGH,
+                category="Web攻击",
+                source="fixture",
+                source_file="access.log",
+                message="suspicious request",
+                raw_line="line",
+            )
+            for i in range(9)
+        ]
+
+        score = _calc_risk_score(events, [], [], [])
+        self.assertLessEqual(score, 28)
+
+    def test_risk_score_prioritizes_alerts_over_single_events(self):
+        critical_event = LogEvent(
+            id="evt-crit",
+            timestamp="2024-03-15T10:00:00",
+            level=ThreatLevel.CRITICAL,
+            category="进程",
+            source="fixture",
+            source_file="security.xml",
+            message="critical process event",
+            raw_line="raw",
+        )
+        critical_alert = DetectionAlert(
+            id="a1",
+            rule_id="EXEC-001",
+            rule_name="可疑执行",
+            description="critical alert",
+            level=ThreatLevel.CRITICAL,
+            category="执行",
+            mitre_attack="T1059",
+            mitre_phase="执行",
+            affected_events=["evt-crit"],
+            evidence=["e1"],
+            recommendation="investigate",
+            timestamp="2024-03-15T10:00:00",
+            confidence="high",
+        )
+
+        event_only_score = _calc_risk_score([critical_event], [], [], [])
+        alert_score = _calc_risk_score([critical_event], [critical_alert], [], [])
+        self.assertGreater(alert_score, event_only_score)
+        self.assertGreaterEqual(alert_score, 40)
+
+    def test_risk_score_increases_with_incidents_and_attack_chain(self):
+        alert = DetectionAlert(
+            id="a2",
+            rule_id="WIN-CHAIN-001",
+            rule_name="账号接管链",
+            description="chain",
+            level=ThreatLevel.CRITICAL,
+            category="横向移动",
+            mitre_attack="T1021.001",
+            mitre_phase="横向移动",
+            affected_events=["evt-1"],
+            evidence=["e1"],
+            recommendation="contain",
+            timestamp="2024-03-15T10:00:00",
+            confidence="high",
+        )
+        incident = Incident(
+            id="inc-1",
+            title="横向移动案件",
+            description="multi-stage compromise",
+            level=ThreatLevel.CRITICAL,
+            confidence="high",
+            affected_alerts=["a2"],
+            affected_events=["evt-1"],
+            source_ips=["1.1.1.1"],
+            accounts=["ACME\\alice"],
+            assets=["host1"],
+            source_types=["Security"],
+            attack_phases=["执行", "持久化", "横向移动"],
+            evidence=["e1"],
+            timeline=[],
+            recommended_actions=["contain"],
+            next_logs=["edr"],
+        )
+        chain = [
+            AttackChainEntry(phase="执行", event_count=1, level=ThreatLevel.HIGH, techniques=["T1059"]),
+            AttackChainEntry(phase="持久化", event_count=1, level=ThreatLevel.HIGH, techniques=["T1543"]),
+            AttackChainEntry(phase="横向移动", event_count=1, level=ThreatLevel.CRITICAL, techniques=["T1021.001"]),
+        ]
+
+        alert_only_score = _calc_risk_score([], [alert], [], [])
+        correlated_score = _calc_risk_score([], [alert], [incident], chain)
+        self.assertGreater(correlated_score, alert_only_score)
+        self.assertGreaterEqual(correlated_score, 70)
 
     def test_p0_dns_key_value_detects_tunnel_like_query(self):
         line = (
