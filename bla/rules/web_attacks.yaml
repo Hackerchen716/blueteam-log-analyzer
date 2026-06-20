@@ -1,0 +1,387 @@
+web_attacks:
+  - id: WEB-LOG4SHELL-001
+    name: Log4Shell/JNDI 探测
+    severity: critical
+    confidence: high
+    category: Web攻击
+    mitre: T1190
+    tags: [log4shell, jndi, exploit, web-attack, cn-hvv]
+    source_types: [web, waf, application, proxy, dns]
+    evidence_fields: [url, uri, request, payload, user_agent, query]
+    false_positive_hints: [security scanner, vulnerability verification, benign JNDI test string]
+    remediation: 核查受影响 Java 应用与依赖版本，确认是否存在出网回连和命令执行痕迹。
+    patterns:
+      - '\$\{jndi:(?:ldap|rmi|dns|iiop)://'
+
+  - id: WEB-NACOS-001
+    name: Nacos 未授权/弱口令探测
+    severity: high
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [nacos, exploit, web-attack, cn-hvv]
+    source_types: [web, waf, application]
+    evidence_fields: [url, uri, path, status, user_agent]
+    false_positive_hints: [asset inventory scanner, exposed API documentation check]
+    remediation: 核查 Nacos 是否公网暴露，确认鉴权配置、默认口令和访问来源。
+    patterns:
+      - '/nacos/(?:v1/|index\.html|actuator|serverlist)'
+      - 'Nacos-Server'
+
+  - id: WEB-SWAGGER-001
+    name: Swagger/OpenAPI 暴露探测
+    severity: medium
+    confidence: medium
+    category: 信息收集
+    mitre: T1083
+    tags: [swagger, openapi, recon, web-attack]
+    source_types: [web, waf, application]
+    evidence_fields: [url, uri, path, status, user_agent]
+    false_positive_hints: [internal crawler, uptime monitor, API gateway inventory]
+    remediation: 确认接口文档是否需要公网访问，不需要时限制来源或关闭生产环境暴露。
+    patterns:
+      - '/(?:swagger-ui|swagger-resources|v2/api-docs|v3/api-docs|openapi\.json)'
+
+  # —— 以下为 v1.4.5 从 web_access.py 内联 _ATTACK_PATTERNS 迁入的通用 Web 攻击规则 ——
+  # 保持原有命中顺序与命名，使解析器只产事实、检测口径集中在规则层，便于扩展与校验。
+  - id: WEB-PATH-TRAVERSAL-001
+    name: 路径遍历
+    severity: high
+    confidence: medium
+    category: Web攻击
+    mitre: T1083
+    tags: [path-traversal, lfi, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, request, user_agent]
+    false_positive_hints: [合法相对路径资源引用, 误带 .. 的静态资源路径]
+    remediation: 规范化并校验文件路径，禁止越权访问应用根目录之外的文件。
+    patterns:
+      - '(\.\.|%2e%2e|%252e|\.\.%2f|\.\.%5c)'
+
+  - id: WEB-SQLI-001
+    name: SQL注入
+    severity: critical
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [sqli, injection, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, query, request, user_agent]
+    false_positive_hints: [WAF/漏扫验证流量, 业务参数恰好含 SQL 关键字]
+    remediation: 使用参数化查询/ORM，部署 WAF，核查是否存在数据外带与拖库痕迹。
+    patterns:
+      - '(union.{1,20}select|select.{1,50}from|insert.{1,20}into|drop.{1,20}table|exec\s*\(|xp_cmdshell|;\s*drop|;\s*delete|;\s*update|(\bor\b|\band\b)\s+\d+\s*=\s*\d+|1\s*=\s*1)'
+
+  - id: WEB-XSS-001
+    name: XSS攻击
+    severity: high
+    confidence: medium
+    category: Web攻击
+    mitre: T1059.007
+    tags: [xss, injection, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, query, request, user_agent]
+    false_positive_hints: [富文本/前端模板内容, 安全测试 payload]
+    remediation: 对输出做上下文编码，启用 CSP，校验并过滤用户可控内容。
+    patterns:
+      - '(<script|javascript:|onerror\s*=|onload\s*=|alert\s*\(|document\.cookie|<iframe)'
+
+  - id: WEB-LFI-001
+    name: LFI/RFI
+    severity: critical
+    confidence: medium
+    category: Web攻击
+    mitre: T1083
+    tags: [lfi, rfi, path-traversal, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, request, user_agent]
+    false_positive_hints: [合法系统路径出现在业务参数, 安全测试]
+    remediation: 禁止用户可控参数拼接文件路径，使用白名单与沙箱化文件访问。
+    patterns:
+      - '(\/etc\/passwd|\/etc\/shadow|\/proc\/self|\/windows\/system32|c:\\windows)'
+
+  - id: WEB-RCE-001
+    name: 命令注入/代码执行
+    severity: critical
+    confidence: medium
+    category: Web攻击
+    mitre: T1059
+    tags: [rce, command-injection, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, query, request, user_agent]
+    false_positive_hints: [安全测试 payload, 业务命令字恰好出现在参数]
+    remediation: 杜绝拼接执行系统命令/代码，使用白名单与最小权限，核查回连与落地文件。
+    patterns:
+      - '((?:(?:cmd|exec|command|shell|payload|run)\s*=|(?:;|%3b|\|\||%7c%7c|&&|%26%26)\s*(?:whoami|id|uname|cat|curl|wget|bash|sh|nc|netcat|python|perl|php|powershell|cmd(?:\.exe)?)\b|=\s*(?:whoami|id|uname|cat|curl|wget|bash|sh|nc|netcat|python|perl|php|powershell|cmd(?:\.exe)?)\b)|system\s*\(|passthru|shell_exec|phpinfo\s*\(|eval\s*\(|assert\s*\(|\bxp_cmdshell\b)'
+
+  - id: WEB-RFI-001
+    name: RFI攻击
+    severity: high
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [rfi, injection, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, query, request, user_agent]
+    false_positive_hints: [合法的远程资源引用, 安全测试]
+    remediation: 关闭远程文件包含，校验并白名单化包含路径，核查是否拉取了远端载荷。
+    patterns:
+      - '(\.php\?.{0,80}=http|\.php\?.{0,80}=ftp|include\s*\(|require\s*\()'
+
+  - id: WEB-SQLI-TIME-001
+    name: 时间盲注
+    severity: critical
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [sqli, blind-injection, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, query, request, user_agent]
+    false_positive_hints: [数据库压测脚本, 安全测试]
+    remediation: 使用参数化查询，监控慢查询与异常延迟，核查是否被用于盲注枚举。
+    patterns:
+      - '(\bsleep\s*\(\d+\)|\bwaitfor\s+delay\b|benchmark\s*\(|pg_sleep)'
+
+  - id: WEB-WEBSHELL-001
+    name: Webshell特征
+    severity: high
+    confidence: medium
+    category: Web攻击
+    mitre: T1505.003
+    tags: [webshell, backdoor, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, query, request, user_agent]
+    false_positive_hints: [合法使用 base64/压缩的业务接口, 安全测试]
+    remediation: 排查 Web 目录新增/可疑脚本文件，做完整性比对与隔离取样。
+    patterns:
+      - '(base64_decode|gzinflate|str_rot13|eval\s*\(.{0,40}base64|chr\s*\(.{0,40}\.\s*chr)'
+
+  - id: WEB-WEBSHELL-TOOL-001
+    name: Webshell访问/管理工具
+    severity: critical
+    confidence: medium
+    category: Web攻击
+    mitre: T1505.003
+    tags: [webshell, backdoor, cn-hvv, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, query, user_agent]
+    false_positive_hints: [合法上传目录的正常文件访问]
+    remediation: 排查 Webshell 管理工具特征流量，定位落地脚本并隔离，核查横向与外带。
+    patterns:
+      - '((?:/|%2f)(?:upload|uploads|static|assets|cache|tmp|data|images?)/[^?\s"]+\.(?:php|jsp|jspx|asp|aspx|ashx)|(?:cmd|exec|pass|pwd|shell|command)=|(?:behinder|冰蝎|godzilla|哥斯拉|antsword|蚁剑|caidao|菜刀))'
+
+  # —— v1.4.5 HVV 规则库扩充：将原 WEB-CNVULN-001 的混合指纹拆成可归因的具体规则 ——
+  - id: WEB-SHIRO-001
+    name: Shiro 反序列化/硬编码密钥利用
+    severity: critical
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [shiro, deserialization, cn-hvv, exploit, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, request, user_agent, cookie]
+    false_positive_hints: [合法使用 rememberMe 持久登录的业务, 安全测试]
+    remediation: 核查 Shiro 版本与硬编码 AES Key，确认是否存在反序列化命令执行与出网回连。
+    patterns:
+      - '(rememberme=|rememberme%3d|deleteme\b|shiro|/shiro/)'
+
+  - id: WEB-FASTJSON-001
+    name: Fastjson/Jackson 反序列化
+    severity: critical
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [fastjson, deserialization, cn-hvv, exploit, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, request, user_agent]
+    false_positive_hints: [业务 JSON 恰好含 @type 字段, 安全测试]
+    remediation: 升级 Fastjson 并关闭 autoType，核查是否触发 JNDI/JdbcRowSet 等利用链。
+    patterns:
+      - '(@type|autotype|jdbcrowsetimpl|com\.sun\.rowset|ro0ab)'
+
+  - id: WEB-STRUTS2-001
+    name: Struts2 OGNL 注入
+    severity: critical
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [struts2, ognl, rce, cn-hvv, exploit, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, query, request, user_agent]
+    false_positive_hints: [合法的 .action 业务路由, 安全测试]
+    remediation: 升级 Struts2 至安全版本，核查 OGNL 注入是否落地命令执行与 Webshell。
+    patterns:
+      - '(struts2|ognl|memberaccess|allowstaticmethodaccess|\.action\b.{0,60}redirect:)'
+
+  - id: WEB-THINKPHP-001
+    name: ThinkPHP RCE
+    severity: critical
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [thinkphp, rce, cn-hvv, exploit, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, query, request, user_agent]
+    false_positive_hints: [合法的 ThinkPHP 业务路由, 安全测试]
+    remediation: 升级 ThinkPHP，核查 invokefunction/call_user_func 等是否被用于命令执行。
+    patterns:
+      - '(invokefunction|call_user_func|thinkphp|_method=__construct)'
+
+  - id: WEB-WEBLOGIC-001
+    name: Weblogic 高频漏洞利用
+    severity: critical
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [weblogic, rce, cn-hvv, exploit, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, request, user_agent]
+    false_positive_hints: [合法的 Weblogic 控制台访问, 安全测试]
+    remediation: 修补 Weblogic（wls-wsat/async 等），核查反序列化与组件回连痕迹。
+    patterns:
+      - '(weblogic|wls-wsat|/_async/|/console/login/loginform\.jsp|coordinatortype|asyncresponseservice)'
+
+  - id: WEB-SPRING-001
+    name: Spring 框架高频漏洞利用
+    severity: critical
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [spring, rce, cn-hvv, exploit, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, request, user_agent]
+    false_positive_hints: [合法的 Actuator 监控采集, 安全测试]
+    remediation: 修补 Spring（Spring4Shell/Cloud Gateway/Boot Actuator 暴露），限制管理端点来源。
+    patterns:
+      - '(spring4shell|class\.module\.classloader|org\.springframework|/actuator/(?:env|heapdump|jolokia|gateway|mappings)|springcloudfunction)'
+
+  - id: WEB-JAVA-DESERIALIZE-001
+    name: 通用 Java 反序列化
+    severity: high
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [deserialization, rce, cn-hvv, exploit, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, request, user_agent]
+    false_positive_hints: [合法使用 Java 序列化的内部接口, 安全测试]
+    remediation: 排查反序列化入口与利用链（CommonsCollections/TemplatesImpl 等），加反序列化白名单。
+    patterns:
+      - '(ysoserial|commonscollections|templatesimpl|aced0005|runtime\.getruntime|processbuilder|反序列化)'
+
+  - id: WEB-XXE-001
+    name: XXE 外部实体注入
+    severity: high
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [xxe, injection, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, request, user_agent]
+    false_positive_hints: [合法携带 DTD 的 XML 业务接口, 安全测试]
+    remediation: 关闭 XML 解析器的外部实体与 DTD 加载，核查是否存在文件读取/SSRF 外带。
+    patterns:
+      - '(<!entity|<!doctype.{0,40}\[|system\s+["'']file:|xxe)'
+
+  - id: WEB-SSRF-001
+    name: SSRF 服务端请求伪造
+    severity: high
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [ssrf, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, query, request, user_agent]
+    false_positive_hints: [合法的回调/Webhook 配置, 内网健康检查]
+    # 仅在“危险协议(gopher/dict/file)”或“内网/回环/云元数据目标”时告警。合法应用大量
+    # 用 url=/redirect_uri= 携带外部 https 链接(OAuth 回调、分享、图片代理)，仅凭
+    # url=http(s):// 告警会造成大量误报，故外部 https URL 不在此规则内。
+    remediation: 对用户可控 URL 做协议与目标白名单，禁止访问内网与云元数据地址。
+    patterns:
+      - '((?:url|target|dest|redirect|proxy|host|uri|path)=(?:dict|gopher|file)(?:://|%3a%2f%2f)|(?://|%2f%2f)(?:127\.0\.0\.1|0\.0\.0\.0|localhost|169\.254\.169\.254|metadata\.google\.internal|\[::1\])|169\.254\.169\.254|/latest/meta-data/)'
+
+  - id: WEB-UNAUTH-ACCESS-001
+    name: 未授权访问/管理端点暴露
+    severity: high
+    confidence: medium
+    category: 信息收集
+    mitre: T1190
+    tags: [unauth, recon, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, status, user_agent]
+    false_positive_hints: [授权的运维/监控访问, 合法后台入口]
+    remediation: 为暴露的管理端点加鉴权与来源限制，移除生产环境不必要的控制台。
+    patterns:
+      - '(/druid/(?:index|websession)|/solr/admin|/manager/html|/jenkins/script|/jmx-console|/web-console|/actuator/loggers)'
+
+  - id: WEB-OA-EXPLOIT-001
+    name: 国产 OA/中间件高频利用
+    severity: high
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [oa, exploit, cn-hvv, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, query, user_agent]
+    false_positive_hints: [合法的 OA 业务访问, 安全测试]
+    remediation: 核查泛微/致远/通达/用友等 OA 与中间件补丁，确认是否落地 Webshell 或越权。
+    patterns:
+      - '(bsh\.servlet\.bshservlet|/ispirit/|getsessionlist|ncfindweb|/yyoa/|/seeyon/|/weaver/|mobile/auth_mobi)'
+
+  - id: WEB-CNVULN-001
+    name: 国内高频漏洞利用
+    severity: critical
+    confidence: medium
+    category: Web攻击
+    mitre: T1190
+    tags: [cn-hvv, exploit, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, query, request, user_agent]
+    false_positive_hints: [资产测绘/漏扫验证, 框架健康检查]
+    remediation: 按命中的组件（Shiro/Fastjson/Struts2/ThinkPHP/Weblogic/Spring 等）核查版本与利用痕迹。
+    patterns:
+      - '(rememberme=|deleteMe|shiro|jndi:ldap|jndi:rmi|jndi:dns|fastjson|@type=|autoType|struts2|ognl|memberAccess|thinkphp|invokefunction|call_user_func|weblogic|wls-wsat|/_async/|/console/login/LoginForm.jsp|spring4shell|class\.module\.classLoader|actuator/(?:env|heapdump|jolokia|gateway))'
+
+  - id: WEB-BYPASS-001
+    name: 路径/编码绕过
+    severity: medium
+    confidence: medium
+    category: Web攻击
+    mitre: T1140
+    tags: [bypass, encoding, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, request, user_agent]
+    false_positive_hints: [合法的 URL 编码内容, 多语言路径]
+    remediation: 统一解码后再做安全校验，警惕空字节/CRLF/分号截断等绕过手法。
+    patterns:
+      - '(\.\.;\/|%00|null.?byte|%0d%0a|crlf)'
+
+  - id: WEB-SENSITIVE-FILE-001
+    name: 敏感文件探测
+    severity: medium
+    confidence: medium
+    category: 信息收集
+    mitre: T1083
+    tags: [recon, sensitive-file, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [url, uri, path, status, user_agent]
+    false_positive_hints: [合法后台/管理入口访问, 正常配置文件请求]
+    remediation: 移除生产环境的备份/配置/版本控制目录暴露，限制后台入口来源。
+    patterns:
+      - '(wp-admin|wp-login|phpmyadmin|\.env|\.git\/|\.svn\/|backup\.sql|config\.php|web\.config|\.htaccess)'
+
+  - id: WEB-SCANNER-001
+    name: 安全扫描器
+    severity: high
+    confidence: medium
+    category: 扫描器
+    mitre: T1595
+    tags: [scanner, reconnaissance, web-attack]
+    source_types: [web, waf, application, proxy]
+    evidence_fields: [user_agent, url, uri, request]
+    false_positive_hints: [自有资产扫描/监控]
+    remediation: 确认扫描来源是否授权，未授权来源予以封禁并复核被探测面。
+    # 仅匹配专用攻击/扫描工具的 UA。裸 curl/wget/python-requests 等通用客户端被监控、
+    # cron、CI 大量合法使用，单凭 UA 标为高危攻击会造成大量误报，故不在此规则内。
+    patterns:
+      - '(nikto|sqlmap|nmap|masscan|nessus|openvas|acunetix|burp.?suite|dirbuster|gobuster|dirsearch|ffuf|feroxbuster|wfuzz|hydra|medusa|metasploit|w3af)'

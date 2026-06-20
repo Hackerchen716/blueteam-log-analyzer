@@ -1,0 +1,19 @@
+{"timestamp": "2026-05-18T01:39:12+08:00", "source": "nginx_access", "host": "web-01", "raw": "203.0.113.77 - - [18/May/2026:01:39:12 +0800] \"GET /.env HTTP/1.1\" 404 5 \"-\" \"sqlmap/1.7\""}
+{"timestamp": "2026-05-18T01:39:14+08:00", "source": "nginx_access", "host": "web-01", "raw": "203.0.113.77 - - [18/May/2026:01:39:14 +0800] \"GET /index.php?s=index/think/invokefunction&function=call_user_func HTTP/1.1\" 200 8 \"-\" \"curl/8\""}
+{"timestamp": "2026-05-18T01:39:32+08:00", "source": "linux_auth", "host": "web-01", "raw": "May 18 01:39:32 web-01 sshd[18001]: Failed password for invalid user admin from 203.0.113.77 port 51001 ssh2"}
+{"timestamp": "2026-05-18T01:39:35+08:00", "source": "linux_auth", "host": "web-01", "raw": "May 18 01:39:35 web-01 sshd[18002]: Failed password for invalid user git from 203.0.113.77 port 51002 ssh2"}
+{"timestamp": "2026-05-18T01:39:38+08:00", "source": "linux_auth", "host": "web-01", "raw": "May 18 01:39:38 web-01 sshd[18003]: Failed password for root from 203.0.113.77 port 51003 ssh2"}
+{"timestamp": "2026-05-18T01:39:41+08:00", "source": "linux_auth", "host": "web-01", "raw": "May 18 01:39:41 web-01 sshd[18004]: Failed password for root from 203.0.113.77 port 51004 ssh2"}
+{"timestamp": "2026-05-18T01:39:44+08:00", "source": "linux_auth", "host": "web-01", "raw": "May 18 01:39:44 web-01 sshd[18005]: Failed password for oracle from 203.0.113.77 port 51005 ssh2"}
+{"timestamp": "2026-05-18T01:39:47+08:00", "source": "linux_auth", "host": "web-01", "raw": "May 18 01:39:47 web-01 sshd[18006]: Failed password for test from 203.0.113.77 port 51006 ssh2"}
+{"timestamp": "2026-05-18T01:39:58+08:00", "source": "nginx_access", "host": "web-01", "raw": "203.0.113.77 - - [18/May/2026:01:39:58 +0800] \"POST /api/v1/file/upload/shell.jsp HTTP/1.1\" 200 12 \"-\" \"Behinder\""}
+{"timestamp": "2026-05-18T01:40:03+08:00", "source": "edr_alert", "host": "web-01", "user": "svc_app", "severity": "high", "tactic": "Execution", "technique": "T1059.004", "alert_name": "Web server spawned shell", "process": "sh", "parent_process": "w3wp"}
+{"timestamp": "2026-05-18T01:40:13+08:00", "source": "edr_alert", "host": "web-01", "user": "svc_app", "severity": "critical", "tactic": "Persistence", "technique": "T1053.003", "alert_name": "Suspicious cron execution", "process": "crontab", "parent_process": "sh"}
+{"timestamp": "2026-05-18T01:40:20+08:00", "source": "edr_alert", "host": "web-01", "user": "svc_app", "severity": "high", "tactic": "Collection", "technique": "T1560.001", "alert_name": "Archive created under /tmp", "process": "tar", "parent_process": "sh"}
+{"timestamp": "2026-05-18T01:40:56+08:00", "source": "windows_event", "host": "db-01", "channel": "Security", "event_id": 4624, "logon_type": 3, "user": "svc_backup", "src_ip": "10.20.3.15", "workstation": "web-01", "message": "An account was successfully logged on"}
+{"timestamp": "2026-05-18T01:40:49+08:00", "source": "edr_alert", "host": "web-01", "user": "svc_app", "severity": "critical", "tactic": "Command and Control", "technique": "T1071.001", "alert_name": "PowerShell network connection to rare domain", "process": "powershell", "parent_process": "w3wp", "dst_ip": "203.0.113.200"}
+{"timestamp": "2026-05-18T01:41:32+08:00", "source": "edr_alert", "host": "db-01", "user": "svc_backup", "severity": "critical", "tactic": "Exfiltration", "technique": "T1041", "alert_name": "Large outbound transfer", "process": "powershell", "dst_ip": "203.0.113.200"}
+{"timestamp": "2026-05-18T01:41:40+08:00", "source": "shell_history", "host": "web-01", "raw": "whoami"}
+{"timestamp": "2026-05-18T01:41:41+08:00", "source": "shell_history", "host": "web-01", "raw": "cat /etc/passwd"}
+{"timestamp": "2026-05-18T01:41:45+08:00", "source": "shell_history", "host": "web-01", "raw": "rm -f /tmp/pkg.tgz"}
+{"timestamp": "2026-05-18T01:41:47+08:00", "source": "shell_history", "host": "web-01", "raw": "unset HISTFILE"}

@@ -1,0 +1,62 @@
+<Events>
+  <Event>
+    <System>
+      <EventID>4625</EventID>
+      <TimeCreated SystemTime="2024-03-15T01:02:01.000Z"/>
+      <Computer>win01</Computer>
+      <Channel>Security</Channel>
+    </System>
+    <EventData>
+      <Data Name="TargetUserName">administrator</Data>
+      <Data Name="TargetDomainName">CORP</Data>
+      <Data Name="IpAddress">203.0.113.8</Data>
+      <Data Name="WorkstationName">ATTACKER</Data>
+      <Data Name="LogonType">3</Data>
+      <Data Name="FailureReason">Unknown user name or bad password.</Data>
+      <Data Name="Status">0xC000006D</Data>
+      <Data Name="SubStatus">0xC000006A</Data>
+    </EventData>
+  </Event>
+  <Event>
+    <System>
+      <EventID>4624</EventID>
+      <TimeCreated SystemTime="2024-03-15T01:03:00.000Z"/>
+      <Computer>win01</Computer>
+      <Channel>Security</Channel>
+    </System>
+    <EventData>
+      <Data Name="TargetUserName">localservice</Data>
+      <Data Name="TargetDomainName">NT AUTHORITY</Data>
+      <Data Name="LogonType">5</Data>
+      <Data Name="AuthenticationPackageName">Negotiate</Data>
+    </EventData>
+  </Event>
+  <Event>
+    <System>
+      <EventID>4624</EventID>
+      <TimeCreated SystemTime="2024-03-15T01:05:10.000Z"/>
+      <Computer>win01</Computer>
+      <Channel>Security</Channel>
+    </System>
+    <EventData>
+      <Data Name="TargetUserName">administrator</Data>
+      <Data Name="TargetDomainName">CORP</Data>
+      <Data Name="IpAddress">203.0.113.8</Data>
+      <Data Name="WorkstationName">ATTACKER</Data>
+      <Data Name="LogonType">10</Data>
+      <Data Name="AuthenticationPackageName">NTLM</Data>
+    </EventData>
+  </Event>
+  <Event>
+    <System>
+      <EventID>4688</EventID>
+      <TimeCreated SystemTime="2024-03-15T01:06:00.000Z"/>
+      <Computer>win01</Computer>
+      <Channel>Security</Channel>
+    </System>
+    <EventData>
+      <Data Name="NewProcessName">C:\Windows\System32\cmd.exe</Data>
+      <Data Name="CommandLine">cmd.exe /c whoami</Data>
+    </EventData>
+  </Event>
+</Events>

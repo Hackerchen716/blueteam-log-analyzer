@@ -1,0 +1,5 @@
+{"log_type":"waf","time":"2024-03-15 11:00:00","src_ip":"10.0.0.5","host":"app01","method":"GET","uri":"/health","action":"allow","status":"200","user_agent":"ELB-HealthChecker"}
+{"log_type":"vpn","time":"2024-03-15 11:01:00","user":"alice","src_ip":"10.0.0.8","result":"failed","reason":"mistyped password"}
+{"log_type":"vpn","time":"2024-03-15 11:02:00","user":"alice","src_ip":"10.0.0.8","result":"success","reason":"mfa passed"}
+{"log_type":"bastion","time":"2024-03-15 11:03:00","user":"ops","src_ip":"10.0.0.9","target_host":"app01","command":"systemctl status nginx","result":"success"}
+{"log_type":"proxy","time":"2024-03-15 11:04:00","src_ip":"10.0.0.10","url":"https://updates.example.com/pkg.zip","bytes_out":"2048","action":"allow"}

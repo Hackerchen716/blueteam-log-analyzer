@@ -1,0 +1,1042 @@
+"""
+终端彩色输出模块
+支持 macOS / Linux / Windows 10+ 终端 ANSI 颜色
+"""
+from __future__ import annotations
+import sys
+import unicodedata
+from typing import Dict, Iterable, List, Tuple
+
+from ..__version__ import __version__
+from ..models import (
+    ParseResult, AnalysisSummary, ThreatLevel, LogEvent, Incident, TimelineEntry
+)
+from ..utils.helpers import format_timestamp_local, is_placeholder_source, safe_stream, sanitize_report_text
+
+# ANSI 颜色
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+DIM    = "\033[2m"
+RED    = "\033[91m"
+ORANGE = "\033[38;5;208m"
+YELLOW = "\033[93m"
+GREEN  = "\033[92m"
+BLUE   = "\033[94m"
+CYAN   = "\033[96m"
+WHITE  = "\033[97m"
+GRAY   = "\033[90m"
+
+BG_RED    = "\033[41m"
+BG_ORANGE = "\033[48;5;208m"
+BG_YELLOW = "\033[43m"
+BG_GREEN  = "\033[42m"
+BG_BLUE   = "\033[44m"
+
+_PHASE_ORDER = [
+    "侦察",
+    "初始访问",
+    "身份突破",
+    "执行",
+    "持久化",
+    "权限提升",
+    "主机失陷",
+    "远程访问",
+    "横向移动",
+    "命令控制",
+    "数据外传",
+    "凭据访问",
+    "防御规避",
+    "网络活动",
+    "其他",
+]
+
+_EVENT_FAMILY_PHASE = {
+    "reconnaissance": "侦察",
+    "initial-access": "初始访问",
+    "identity": "身份突破",
+    "execution": "执行",
+    "persistence": "持久化",
+    "privilege-escalation": "权限提升",
+    "compromise": "主机失陷",
+    "remote-access": "远程访问",
+    "lateral-movement": "横向移动",
+    "command-control": "命令控制",
+    "exfiltration": "数据外传",
+    "credential-access": "凭据访问",
+    "defense-evasion": "防御规避",
+    "network": "网络活动",
+    "other": "其他",
+}
+
+_PHASE_HINTS = {
+    "T1110": "凭据访问",
+    "T1078": "身份突破",
+    "T1136": "持久化",
+    "T1548": "权限提升",
+    "T1190": "初始访问",
+    "T1505": "主机失陷",
+    "T1071": "命令控制",
+    "T1041": "数据外传",
+    "T1222": "防御规避",
+    "T1053": "持久化",
+}
+
+def _level_color(level: ThreatLevel) -> str:
+    return {
+        "critical": RED,
+        "high":     ORANGE,
+        "medium":   YELLOW,
+        "low":      GREEN,
+        "info":     BLUE,
+    }.get(level.value, RESET)
+
+
+def _level_badge(level: ThreatLevel) -> str:
+    c = _level_color(level)
+    labels = {"critical":"[严重]","high":"[高危]","medium":"[中危]","low":"[低危]","info":"[信息]"}
+    return f"{BOLD}{c}{labels.get(level.value,'[?]')}{RESET}"
+
+
+def _hr(char: str = "─", width: int = 80) -> str:
+    return GRAY + char * width + RESET
+
+
+def _section(title: str, color: str = "") -> str:
+    line = "═" * 80
+    color = color or CYAN
+    return f"\n{BOLD}{color}{line}\n  {title}\n{line}{RESET}\n"
+
+
+def _display_width(text: str) -> int:
+    width = 0
+    for char in text:
+        width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+    return width
+
+
+def _banner_line(text: str, width: int = 78) -> str:
+    text_width = _display_width(text)
+    if text_width >= width:
+        return f"║{text}║\n"
+    left = (width - text_width) // 2
+    right = width - text_width - left
+    return f"║{' ' * left}{text}{' ' * right}║\n"
+
+
+def _fmt_top(items: list, key: str, limit: int = 3) -> str:
+    filtered = [
+        item for item in items
+        if not (key.endswith("ip") and is_placeholder_source(item.get(key, "")))
+    ]
+    if not filtered:
+        return "-"
+    return ", ".join(f"{_safe_text(item.get(key, '?'))}({item.get('count', 0)})" for item in filtered[:limit])
+
+
+def _fmt_time(ts: str) -> str:
+    return format_timestamp_local(ts)
+
+
+def _truncate_text(text: str, max_len: int) -> str:
+    if max_len <= 0:
+        return ""
+    text = _safe_text(text)
+    if _display_width(text) <= max_len:
+        return text
+
+    if max_len == 1:
+        return "…"
+
+    max_body_width = max_len - 1
+    body = []
+    current_width = 0
+    for char in text:
+        char_width = 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+        if current_width + char_width > max_body_width:
+            break
+        body.append(char)
+        current_width += char_width
+    return "".join(body) + "…"
+
+
+def _evidence_text(text: str, full: bool, max_len: int = 220) -> str:
+    """Terminal keeps summaries compact unless full evidence output is requested."""
+    text = _safe_text(text)
+    return text if full else _truncate_text(text, max_len)
+
+
+def _safe_text(value: object) -> str:
+    return sanitize_report_text(value)
+
+
+def _basename(path: str) -> str:
+    s = _safe_text(path).replace("/", "\\")
+    if "\\" in s:
+        return s.rsplit("\\", 1)[-1]
+    return s
+
+
+def _event_sort_key(event: LogEvent) -> tuple:
+    return (
+        event.level.score,
+        event.timestamp or "",
+        event.id,
+    )
+
+
+def _render_logon_event_detail(event: LogEvent, full_evidence: bool) -> List[str]:
+    details = event.details
+    account = _safe_text(details.get("account_name") or event.user or "?")
+    domain = _safe_text(details.get("account_domain") or "")
+    principal = f"{domain}\\{account}" if domain else account
+    source_ip = _safe_text(details.get("source_ip") or event.ip or "-")
+    workstation = _safe_text(details.get("workstation") or "-")
+    logon_type = _safe_text(details.get("LogonType") or "?")
+    logon_label = _safe_text(details.get("logon_type_label") or "未知")
+    process = _safe_text(details.get("logon_process") or details.get("process_name") or "-")
+    auth_package = _safe_text(details.get("auth_package") or "-")
+
+    lines = [
+        (
+            f"        {_level_badge(event.level)} {_fmt_time(event.timestamp)}  "
+            f"账户={principal}  来源IP={source_ip}  登录类型={logon_type}({logon_label})"
+        ),
+        (
+            f"          工作站={workstation}  进程={_truncate_text(process, 28)}  "
+            f"认证={_truncate_text(auth_package, 18)}"
+        ),
+    ]
+
+    if event.event_id == "4625":
+        reason = _safe_text(details.get("failure_reason") or "-")
+        status = _safe_text(details.get("status_code") or "-")
+        sub_status = _safe_text(details.get("sub_status_code") or "-")
+        lines.append(
+            f"          失败原因={_truncate_text(reason, 42)}  Status={status}  SubStatus={sub_status}"
+        )
+    return lines
+
+
+def _render_process_creation_event_detail(event: LogEvent, full_evidence: bool) -> List[str]:
+    details = event.details
+    parent_path = details.get("parent_process") or ""
+    parent = _basename(parent_path) or "(unknown)"
+    child = details.get("child_process") or _basename(details.get("child_path") or event.process or "") or "(unknown)"
+    path = details.get("child_path") or event.process or "-"
+    cmd = _safe_text(details.get("command_line") or details.get("CommandLine") or "-")
+    tags = []
+    for tag in ("malware-indicator", "lolbin", "lsass-dump"):
+        if tag in event.tags:
+            tags.append(tag)
+    tag_text = f"  标记={','.join(tags)}" if tags else ""
+
+    return [
+        (
+            f"        {_level_badge(event.level)} {_fmt_time(event.timestamp)}  "
+            f"父进程={_truncate_text(parent, 20)}  子进程={_truncate_text(child, 20)}{tag_text}"
+        ),
+        f"          路径={_truncate_text(path, 96 if full_evidence else 52)}",
+        f"          命令行={_evidence_text(cmd, full_evidence, 96)}",
+    ]
+
+
+def _phase_rank(phase: str) -> int:
+    try:
+        return _PHASE_ORDER.index(phase)
+    except ValueError:
+        return len(_PHASE_ORDER)
+
+
+def _event_phase(event: LogEvent, item: TimelineEntry) -> str:
+    family = _safe_text(event.details.get("event_family") or "")
+    if family in _EVENT_FAMILY_PHASE and family != "other":
+        return _EVENT_FAMILY_PHASE[family]
+    technique = _safe_text(item.mitre_attack or event.mitre_attack or "")
+    for prefix, phase in _PHASE_HINTS.items():
+        if technique.startswith(prefix):
+            return phase
+    if family in _EVENT_FAMILY_PHASE:
+        return _EVENT_FAMILY_PHASE[family]
+    return "其他"
+
+
+def _short_time(ts: str) -> str:
+    formatted = _safe_text(_fmt_time(ts))
+    if len(formatted) >= 19 and formatted[4:5] == "-":
+        return formatted[11:19]
+    return _truncate_text(formatted, 19)
+
+
+def _join_values(values: List[str], limit: int = 3) -> str:
+    clean = []
+    for value in values:
+        value = _safe_text(value)
+        if value and value not in clean:
+            clean.append(value)
+    if not clean:
+        return "?"
+    suffix = f" +{len(clean) - limit}" if len(clean) > limit else ""
+    return ", ".join(clean[:limit]) + suffix
+
+
+def _event_entity_hint(event: LogEvent) -> str:
+    details = event.details
+    bits = []
+    src = details.get("src_ip") or details.get("source_ip") or event.ip
+    dst = details.get("dst_ip") or details.get("asset") or event.host
+    account = details.get("account") or details.get("target_account") or event.user
+    source_type = details.get("source_type")
+    if source_type:
+        bits.append(_safe_text(str(source_type)))
+    if src and dst and str(src) != str(dst):
+        bits.append(f"{_safe_text(src)} → {_safe_text(dst)}")
+    elif src:
+        bits.append(f"src={_safe_text(src)}")
+    elif dst:
+        bits.append(f"asset={_safe_text(dst)}")
+    if account:
+        bits.append(f"account={_safe_text(account)}")
+    return "  " + DIM + "[" + " | ".join(bits[:3]) + "]" + RESET if bits else ""
+
+
+def _render_edr_timeline_entry(entry: TimelineEntry, event: LogEvent, full_evidence: bool) -> List[str]:
+    details = event.details
+    parent = _safe_text(details.get("process_name") or _basename(details.get("process_path") or "") or event.process or "?")
+    child = _safe_text(details.get("target_process") or _basename(details.get("target_path") or "") or "?")
+    action = _safe_text(event.rule_name or details.get("action") or entry.category or "EDR 事件")
+    color = _level_color(entry.level)
+    mitre = f" {DIM}[{_safe_text(entry.mitre_attack)}]{RESET}" if entry.mitre_attack else ""
+    lines = [
+        f"  {DIM}{_safe_text(_fmt_time(entry.timestamp))}{RESET}  {_level_badge(entry.level)}  {color}{action}{RESET}{mitre}",
+        f"      {parent} -> {child}",
+    ]
+    path = (
+        details.get("archive_output_path")
+        or details.get("acl_path")
+        or details.get("target_path")
+        or details.get("child_path")
+        or details.get("process_path")
+        or ""
+    )
+    if path:
+        lines.append(f"      路径: {_evidence_text(path, full_evidence, 140)}")
+    command = _safe_text(details.get("command_line") or details.get("command") or "")
+    if command:
+        lines.append(f"      命令: {_evidence_text(command, full_evidence, 160)}")
+    reasons = _safe_text(details.get("suspicion_reasons") or "")
+    if reasons and full_evidence:
+        lines.append(f"      依据: {reasons}")
+    return lines
+
+
+def _render_edr_process_chains(
+    incident: Incident,
+    event_by_id: Dict[str, LogEvent],
+    full_evidence: bool,
+) -> List[str]:
+    events = [
+        event_by_id[event_id]
+        for event_id in incident.affected_events
+        if event_id in event_by_id and event_by_id[event_id].details.get("source_type") == "edr"
+    ]
+    if not events:
+        return []
+
+    create_events = [
+        event for event in events
+        if "process-create" in event.tags
+        and _edr_tree_event_is_useful(event)
+    ]
+    if not create_events:
+        return []
+
+    grouped: Dict[str, List[LogEvent]] = {}
+    for event in sorted(create_events, key=lambda item: (item.timestamp or "", item.id)):
+        grouped.setdefault(_short_time(event.timestamp), []).append(event)
+
+    group_items = list(grouped.items())
+    if not full_evidence:
+        group_items = group_items[:5]
+
+    lines = [f"       {GRAY}EDR 进程链:{RESET}"]
+    for group_index, (time_label, group_events) in enumerate(group_items):
+        if group_index:
+            lines.append("")
+        lines.append(f"         {BOLD}{CYAN}{time_label}{RESET}")
+        lines.extend(_render_edr_group_tree(group_events, full_evidence))
+
+    if len(grouped) > len(group_items):
+        lines.append(f"         {DIM}还有 {len(grouped) - len(group_items)} 个时间片，使用 --full 查看。{RESET}")
+    return lines
+
+
+def _edr_tree_event_is_useful(event: LogEvent) -> bool:
+    child = _basename(event.details.get("target_path") or "")
+    if child.lower() == "conhost.exe":
+        return False
+    return bool(
+        event.level.score >= ThreatLevel.MEDIUM.score
+        or "edr-key-evidence" in event.tags
+        or "suspicious-execution" in event.tags
+        or "archive-extract" in event.tags
+    )
+
+
+def _render_edr_group_tree(events: List[LogEvent], full_evidence: bool) -> List[str]:
+    children: Dict[str, List[LogEvent]] = {}
+    child_names = set()
+    for event in events:
+        parent = _safe_text(event.details.get("process_name") or _basename(event.details.get("process_path") or "") or "?")
+        child = _safe_text(event.details.get("target_process") or _basename(event.details.get("target_path") or "") or "?")
+        if not parent or not child or child == "?":
+            continue
+        children.setdefault(parent, []).append(event)
+        child_names.add(child)
+
+    if not children:
+        return []
+
+    roots = [parent for parent in children if parent not in child_names]
+    if not roots:
+        roots = list(children)[:1]
+    roots = sorted(roots, key=lambda value: (0 if value.lower() in {"explorer.exe", "tencentttmeeti5681.exe"} else 1, value.lower()))
+
+    lines: List[str] = []
+    seen_edges = set()
+    max_edges = 24 if full_evidence else 14
+
+    def render_node(name: str, prefix: str, is_root: bool = False) -> None:
+        if len(seen_edges) >= max_edges:
+            return
+        if is_root:
+            lines.append(f"         {name}")
+        outgoing = _dedupe_edr_edges(children.get(name, []))
+        for idx, event in enumerate(outgoing):
+            if len(seen_edges) >= max_edges:
+                lines.append(f"         {prefix}{DIM}└─ 还有更多分支，使用 --full 查看{RESET}")
+                return
+            child = _safe_text(event.details.get("target_process") or _basename(event.details.get("target_path") or "") or "?")
+            edge_key = (name, child, event.details.get("target_path", ""), event.details.get("command_line", ""))
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+            connector = "└─" if idx == len(outgoing) - 1 else "├─"
+            next_prefix = prefix + ("   " if idx == len(outgoing) - 1 else "│  ")
+            lines.append(f"         {prefix}{connector} {_edr_child_label(event)}")
+            extra = _edr_edge_extra(event)
+            for extra_index, item in enumerate(extra):
+                extra_connector = "└─" if extra_index == len(extra) - 1 and child not in children else "├─"
+                lines.append(f"         {next_prefix}{extra_connector} {item}")
+            if child in children:
+                render_node(child, next_prefix)
+
+    for root in roots:
+        render_node(root, "", is_root=True)
+    return lines
+
+
+def _dedupe_edr_edges(events: List[LogEvent]) -> List[LogEvent]:
+    result = []
+    seen = set()
+    for event in events:
+        key = (
+            event.details.get("target_process", ""),
+            event.details.get("target_path", ""),
+            event.details.get("command_line", ""),
+            event.rule_id or "",
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(event)
+    return result
+
+
+def _edr_child_label(event: LogEvent) -> str:
+    child = _safe_text(event.details.get("target_process") or _basename(event.details.get("target_path") or "") or "?")
+    annotations = []
+    signature = _safe_text(event.details.get("target_signature") or "")
+    parent_signature = _safe_text(event.details.get("process_signature") or "")
+    size = _format_file_size(event.details.get("file_size") or "")
+    if _is_unsigned_signature(signature):
+        annotations.append("无签名")
+    elif "Tencent" in signature:
+        annotations.append("腾讯签名")
+        if _is_unsigned_signature(parent_signature):
+            annotations.append("像诱饵/合法安装器")
+    elif signature:
+        annotations.append(f"签名: {_truncate_text(signature, 24)}")
+    if size:
+        annotations.append(f"约 {size}")
+    if event.rule_id == "EDR-XLSX-SCHTASKS-DELETE":
+        task = _safe_text(event.details.get("task_name") or "?")
+        annotations.append(f"删除任务 {task}")
+    elif event.rule_id == "EDR-XLSX-RANDOM-ACL":
+        annotations.append("修改随机目录 ACL")
+    elif event.rule_id == "EDR-XLSX-PORTPROXY-RESET":
+        annotations.append("portproxy reset")
+    suffix = f"  [{', '.join(annotations)}]" if annotations else ""
+    return f"{child}{suffix}"
+
+
+def _edr_edge_extra(event: LogEvent) -> List[str]:
+    details = event.details
+    if event.rule_id == "EDR-XLSX-ARCHIVE-EXTRACT":
+        output = _safe_text(details.get("archive_output_path") or "")
+        return [f"解压到 {output}"] if output else []
+    if event.rule_id == "EDR-XLSX-RANDOM-ACL":
+        path = _safe_text(details.get("acl_path") or "")
+        child = _basename(details.get("target_path") or "")
+        return [path] if path and child.lower() == "cmd.exe" else []
+    if event.rule_id == "EDR-XLSX-SCHTASKS-DELETE":
+        command = _safe_text(details.get("command_line") or "")
+        return [command] if command else []
+    path = _safe_text(details.get("target_path") or "")
+    if path and _edr_tree_path_is_investigative(path):
+        return [path]
+    return []
+
+
+def _edr_tree_path_is_investigative(path: str) -> bool:
+    normalized = _safe_text(path).replace("/", "\\").lower()
+    return bool(
+        "\\appdata\\local\\temp\\is-" in normalized
+        or "\\inetpub\\wwwroot\\" in normalized
+        or ("\\users\\" in normalized and "\\documents\\" in normalized)
+    )
+
+
+def _is_unsigned_signature(signature: str) -> bool:
+    return str(signature or "").strip().lower() in {"", "-", "none", "null", "unknown", "unsigned", "无", "未知", "未签名"}
+
+
+def _format_file_size(value: object) -> str:
+    try:
+        size = int(float(str(value or "0")))
+    except ValueError:
+        return ""
+    if size <= 0:
+        return ""
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.0f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.0f} KB"
+    return f"{size} B"
+
+
+def _render_stage_topology(summary: AnalysisSummary) -> List[str]:
+    active_phases = {c.phase: c for c in summary.attack_chain}
+    ordered = sorted(active_phases.values(), key=lambda item: _phase_rank(item.phase))
+    if not ordered:
+        return []
+
+    lines = [
+        f"  {BOLD}{CYAN}● 攻击阶段拓扑{RESET}  {DIM}按 ATT&CK / 应急 kill chain 顺序排列{RESET}"
+    ]
+    for idx, chain in enumerate(ordered):
+        connector = "└─" if idx == len(ordered) - 1 else "├─"
+        color = _level_color(chain.level)
+        techs = ", ".join(_safe_text(item) for item in chain.techniques[:4]) or "-"
+        lines.append(
+            f"  {GRAY}{connector}{RESET} {BOLD}{color}{_safe_text(chain.phase)}{RESET}  "
+            f"{WHITE}{chain.event_count} 个事件{RESET}  {DIM}{techs}{RESET}"
+        )
+
+    missed = [
+        phase for phase in ("侦察", "执行", "防御规避", "横向移动", "命令控制", "数据外传")
+        if phase not in active_phases
+    ]
+    if missed:
+        lines.append(f"  {DIM}未命中阶段: {', '.join(missed)}{RESET}")
+    return lines
+
+
+def merge_web_forensics(items: Iterable[dict]) -> dict:
+    merged = {"requests": [], "homepage_requests": []}
+    for item in items:
+        if not item:
+            continue
+        merged["requests"].extend(item.get("requests", []))
+        merged["homepage_requests"].extend(item.get("homepage_requests", []))
+    for key in merged:
+        merged[key].sort(key=lambda row: str(row.get("timestamp") or "9999-99-99"))
+    return {key: value for key, value in merged.items() if value}
+
+
+def _render_web_forensics_lines(web_forensics: dict) -> List[str]:
+    lines: List[str] = []
+    homepage = web_forensics.get("homepage_requests") or []
+    if homepage:
+        first = homepage[0]
+        lines.append(
+            f"首页访问最早证据: {_safe_text(_fmt_time(first.get('timestamp') or ''))}  "
+            f"src={_safe_text(first.get('ip') or '?')}  "
+            f"{_safe_text(first.get('method') or '?')} {_safe_text(first.get('path') or '?')}  "
+            f"[{_safe_text(first.get('source_file') or '?')}]"
+        )
+    requests = web_forensics.get("requests") or []
+    if requests:
+        lines.append(f"error.log 请求上下文: {len(requests)} 条（用于补齐多行错误日志的时间/IP/请求关系）")
+    return lines
+
+
+def _render_incident_brief_lines(brief: dict, full_evidence: bool = False) -> List[str]:
+    if not brief:
+        return []
+    headline = brief.get("headline", {})
+    lines = [
+        f"  {BOLD}{CYAN}初步判断:{RESET} {_safe_text(headline.get('title') or '未形成明确攻击研判')}  "
+        f"{DIM}置信度: {_safe_text(headline.get('confidence') or 'low')}{RESET}",
+        f"  {_safe_text(headline.get('summary') or '')}",
+    ]
+    facts = brief.get("confirmed_facts", [])[:4]
+    if facts:
+        lines.append(f"  {GRAY}关键事实:{RESET}")
+        for item in facts:
+            lines.append(f"    • {_safe_text(item.get('title') or '')}: {_safe_text(item.get('summary') or '')}")
+            if full_evidence:
+                for ev in item.get("evidence", [])[:2]:
+                    lines.append(f"      - {_safe_text(_brief_evidence_label(ev))}")
+    hypotheses = brief.get("hypotheses", [])[:3]
+    if hypotheses:
+        lines.append(f"  {GRAY}研判假设:{RESET}")
+        for item in hypotheses:
+            lines.append(f"    • [{_safe_text(item.get('confidence') or 'low')}] {_safe_text(item.get('title') or '')}: {_safe_text(item.get('summary') or '')}")
+    attack_paths = brief.get("attack_paths", [])[:3]
+    if attack_paths:
+        lines.append(f"  {GRAY}攻击路径研判:{RESET}")
+        for item in attack_paths:
+            ips = ", ".join(item.get("source_ips", [])[:4]) or "?"
+            lines.append(
+                f"    • [{_safe_text(item.get('confidence') or 'low')}] "
+                f"{_safe_text(item.get('id') or '')} {_safe_text(item.get('title') or '')}: "
+                f"{_safe_text(item.get('time_range_text') or item.get('time_range') or '')} "
+                f"事件={item.get('event_count', 0)} IP={_safe_text(ips)}"
+            )
+            if full_evidence:
+                for ev in item.get("evidence", [])[:2]:
+                    lines.append(f"      - {_safe_text(_brief_evidence_label(ev))}")
+    uncertainties = brief.get("uncertainties", [])[:3]
+    if uncertainties:
+        lines.append(f"  {GRAY}当前不能确认:{RESET}")
+        for item in uncertainties:
+            lines.append(f"    • {_safe_text(item)}")
+    boundary = brief.get("evidence_boundary") or {}
+    if boundary:
+        lines.append(f"  {GRAY}证据边界:{RESET}")
+        lines.append(f"    • 依据: {_safe_text(boundary.get('basis') or '当前输入日志')}")
+        if boundary.get("note"):
+            lines.append(f"    • 说明: {_safe_text(boundary.get('note'))}")
+    return lines
+
+
+def _brief_evidence_label(ev: dict) -> str:
+    bits = [
+        ev.get("timestamp") or "",
+        ev.get("source_file") or "",
+        ev.get("ip") or "",
+        " ".join(str(ev.get(k) or "") for k in ("method", "url")).strip(),
+        f"-> {ev.get('status')}" if ev.get("status") else "",
+    ]
+    return " | ".join(str(bit) for bit in bits if bit)
+
+
+def _render_incident_topology(
+    incident: Incident,
+    event_by_id: Dict[str, LogEvent],
+    full_evidence: bool,
+) -> List[str]:
+    timeline_pairs: List[Tuple[TimelineEntry, LogEvent]] = []
+    for item in incident.timeline:
+        event = event_by_id.get(item.event_id)
+        if event:
+            timeline_pairs.append((item, event))
+
+    if not timeline_pairs:
+        return []
+
+    root_bits = []
+    if incident.source_ips:
+        root_bits.append(f"源IP {_join_values(incident.source_ips, 3)}")
+    if incident.assets:
+        root_bits.append(f"资产 {_join_values(incident.assets, 3)}")
+    if incident.accounts:
+        root_bits.append(f"账号 {_join_values(incident.accounts, 4)}")
+    root = " / ".join(root_bits) or _safe_text(incident.title)
+
+    grouped: Dict[str, List[Tuple[TimelineEntry, LogEvent]]] = {}
+    for item, event in timeline_pairs:
+        phase = _event_phase(event, item)
+        grouped.setdefault(phase, []).append((item, event))
+
+    phase_names = [
+        phase for phase in sorted(grouped, key=_phase_rank)
+        if phase in grouped
+    ]
+    lines = [
+        f"       {GRAY}攻击拓扑:{RESET}",
+        f"         {BOLD}{CYAN}● {_safe_text(root)}{RESET}",
+    ]
+
+    for phase_index, phase in enumerate(phase_names):
+        entries = grouped[phase]
+        phase_connector = "└─" if phase_index == len(phase_names) - 1 else "├─"
+        child_prefix = "   " if phase_index == len(phase_names) - 1 else "│  "
+        techniques = _join_values([
+            item.mitre_attack or event.mitre_attack or ""
+            for item, event in entries
+        ], 3)
+        sources = _join_values([
+            str(event.details.get("source_type") or "")
+            for _, event in entries
+        ], 4)
+        level = max((item.level for item, _ in entries), key=lambda item: item.score, default=ThreatLevel.INFO)
+        color = _level_color(level)
+        lines.append(
+            f"         {GRAY}{phase_connector}{RESET} {BOLD}{color}{phase}{RESET}  "
+            f"{WHITE}{len(entries)} 事件{RESET}  {DIM}{techniques} · {sources}{RESET}"
+        )
+        preview = entries if full_evidence else entries[:3]
+        for item_index, (item, event) in enumerate(preview):
+            is_last_child = item_index == len(preview) - 1 and len(entries) <= len(preview)
+            connector = "└─" if is_last_child else "├─"
+            message = _evidence_text(item.message, full_evidence, 92)
+            lines.append(
+                f"         {GRAY}{child_prefix}{connector}{RESET} "
+                f"{DIM}{_short_time(item.timestamp)}{RESET}  {message}{_event_entity_hint(event)}"
+            )
+        if len(entries) > len(preview):
+            lines.append(
+                f"         {GRAY}{child_prefix}└─{RESET} {DIM}还有 {len(entries) - len(preview)} 条同阶段事件，使用 --full 查看完整路径{RESET}"
+            )
+    return lines
+
+
+
+def print_terminal_report(
+    parse_results: List[ParseResult],
+    summary: AnalysisSummary,
+    verbose: bool = False,
+    no_color: bool = False,
+    max_alerts: int = 50,
+    full_evidence: bool = False,
+) -> None:
+    """打印完整的终端分析报告"""
+    if no_color:
+        _disable_color()
+
+    out = safe_stream(sys.stdout)
+
+    event_by_id = {}
+    for result in parse_results:
+        event_by_id.update({event.id: event for event in result.events})
+
+    # ── 标题横幅 ──────────────────────────────────────────
+    out.write(f"\n{BOLD}{BLUE}")
+    out.write("╔══════════════════════════════════════════════════════════════════════════════╗\n")
+    out.write(_banner_line("BlueTeam Log Analyzer (BLA) - Blue Team Incident Response"))
+    out.write(_banner_line("南京澄安科技有限公司出品"))
+    out.write(_banner_line(f"Version {__version__} | 100% Offline | No AI"))
+    out.write("╚══════════════════════════════════════════════════════════════════════════════╝\n")
+    out.write(RESET)
+
+    # ── 风险总览 ──────────────────────────────────────────
+    out.write(_section("📊 分析总览"))
+    risk_color = _level_color(summary.risk_level)
+    out.write(f"  {BOLD}综合风险评分: {risk_color}{summary.risk_score}/100  {_level_badge(summary.risk_level)}{RESET}\n")
+    out.write(f"  分析文件数:   {WHITE}{summary.files_analyzed}{RESET}\n")
+    out.write(f"  总事件数:     {WHITE}{summary.total_events}{RESET}\n")
+    out.write(f"  告警数量:     {WHITE}{len(summary.alerts)}{RESET}\n")
+    out.write(f"  关联案件:     {WHITE}{len(summary.incidents)}{RESET}\n")
+
+    # 按级别统计
+    crit  = sum(r.stats.critical for r in parse_results)
+    high  = sum(r.stats.high for r in parse_results)
+    med   = sum(r.stats.medium for r in parse_results)
+    low   = sum(r.stats.low for r in parse_results)
+    info  = sum(r.stats.info for r in parse_results)
+
+    out.write(f"\n  {_hr()}\n")
+    out.write("  事件级别分布:\n")
+    out.write(f"    {RED}{BOLD}严重: {crit:>5}{RESET}  {ORANGE}{BOLD}高危: {high:>5}{RESET}  "
+              f"{YELLOW}中危: {med:>5}{RESET}  {GREEN}低危: {low:>5}{RESET}  {BLUE}信息: {info:>5}{RESET}\n")
+
+    # ── 文件解析结果 ──────────────────────────────────────
+    out.write(_section("📁 文件解析结果"))
+    for r in parse_results:
+        size_kb = r.file_size_bytes / 1024
+        out.write(f"  {BOLD}{CYAN}{_safe_text(r.file_name)}{RESET}  {DIM}({_safe_text(r.log_type)}){RESET}\n")
+        out.write(f"    大小: {size_kb:.1f} KB  |  解析耗时: {r.parse_time_ms:.0f}ms  |  "
+                  f"总事件: {r.stats.total}  |  "
+                  f"{RED}严重:{r.stats.critical}{RESET}  {ORANGE}高:{r.stats.high}{RESET}  "
+                  f"{YELLOW}中:{r.stats.medium}{RESET}\n")
+        if r.stats.time_start:
+            out.write(f"    时间范围: {DIM}{_safe_text(_fmt_time(r.stats.time_start))}  ~  {_safe_text(_fmt_time(r.stats.time_end))}{RESET}\n")
+        if r.stats.top_ips:
+            top_ip = r.stats.top_ips[0]
+            out.write(f"    Top IP:   {WHITE}{_safe_text(top_ip['ip'])}{RESET} ({top_ip['count']} 次)\n")
+        elif r.stats.top_local_ips:
+            top_local = r.stats.top_local_ips[0]
+            out.write(f"    Top IP:   {DIM}暂无有效远程源（本机/空来源 {_safe_text(top_local['ip'])} {top_local['count']} 次）{RESET}\n")
+        out.write("\n")
+
+    web_forensics = merge_web_forensics(r.stats.web_forensics for r in parse_results)
+    if web_forensics:
+        out.write(_section("🔎 Web 访问取证摘要"))
+        for line in _render_web_forensics_lines(web_forensics):
+            out.write(f"  {line}\n")
+        out.write("\n")
+
+    if summary.incident_brief:
+        out.write(_section("🧭 应急研判摘要"))
+        for line in _render_incident_brief_lines(summary.incident_brief, full_evidence):
+            out.write(f"{line}\n")
+        out.write("\n")
+
+    has_windows_logon = any(r.stats.windows_logon_stats for r in parse_results)
+    has_windows_4688 = any(r.stats.windows_process_creation_stats for r in parse_results)
+    if has_windows_logon or has_windows_4688:
+        out.write(_section("🔎 专项分析"))
+        for r in parse_results:
+            if not r.stats.windows_logon_stats and not r.stats.windows_process_creation_stats:
+                continue
+            out.write(f"  {BOLD}{CYAN}{_safe_text(r.file_name)}{RESET}  {DIM}({_safe_text(r.log_type)}){RESET}\n")
+
+            if r.stats.windows_logon_stats:
+                win_stats = r.stats.windows_logon_stats
+                out.write(
+                    f"    {BOLD}EID 4624/4625 登录事件{RESET}  "
+                    f"成功={win_stats.get('total_success', 0)}  |  失败={win_stats.get('total_failure', 0)}  |  "
+                    f"账户={win_stats.get('unique_accounts', 0)}  |  源IP={win_stats.get('unique_source_ips', 0)}\n"
+                )
+                for event_id in ("4624", "4625"):
+                    event_stats = win_stats.get("events", {}).get(event_id)
+                    if not event_stats:
+                        continue
+                    out.write(f"      {DIM}EID {event_id}{RESET}  {BOLD}{_safe_text(event_stats.get('event_name', ''))}{RESET}  (总计 {event_stats.get('total', 0)})\n")
+                    out.write(f"        Top账户:     {_fmt_top(event_stats.get('principals', []), 'principal', 5)}\n")
+                    out.write(f"        Top源IP:     {_fmt_top(event_stats.get('source_ips', []), 'source_ip', 5)}\n")
+                    logon_types = event_stats.get("logon_types", [])[:5]
+                    logon_type_text = ", ".join(
+                        f"{_safe_text(item.get('logon_type', '?'))}:{_safe_text(item.get('label', '未知'))}({item.get('count', 0)})"
+                        for item in logon_types
+                    ) if logon_types else "-"
+                    out.write(f"        登录类型:    {logon_type_text}\n")
+                    out.write(f"        账号域:      {_fmt_top(event_stats.get('account_domains', []), 'account_domain', 5)}\n")
+                    out.write(f"        工作站:      {_fmt_top(event_stats.get('workstations', []), 'workstation', 5)}\n")
+                    if event_id == "4625":
+                        if event_stats.get("failure_reasons"):
+                            out.write(f"        失败原因:    {_fmt_top(event_stats.get('failure_reasons', []), 'failure_reason', 5)}\n")
+                        if event_stats.get("status_codes"):
+                            out.write(f"        Status:      {_fmt_top(event_stats.get('status_codes', []), 'status_code', 5)}\n")
+                        if event_stats.get("sub_status_codes"):
+                            out.write(f"        SubStatus:   {_fmt_top(event_stats.get('sub_status_codes', []), 'sub_status_code', 5)}\n")
+                    out.write("\n")
+
+                logon_recent = sorted(
+                    [event for event in r.events if event.event_id in {"4624", "4625"}],
+                    key=_event_sort_key,
+                    reverse=True,
+                )[:8]
+                if logon_recent:
+                    out.write(f"      {BOLD}具体事件{RESET}  {DIM}(按级别、时间排序，最近 8 条){RESET}\n")
+                    for event in logon_recent:
+                        for line in _render_logon_event_detail(event, full_evidence):
+                            out.write(f"{line}\n")
+                    out.write("\n")
+
+            if r.stats.windows_process_creation_stats:
+                pstats = r.stats.windows_process_creation_stats
+                out.write(
+                    f"    {BOLD}EID 4688 进程创建{RESET}  "
+                    f"总数={pstats.get('total', 0)}  |  唯一父子对={pstats.get('unique_pairs', 0)}\n"
+                )
+                header = (
+                    f"      {DIM}{'#':<3} {'父进程':<18} {'子进程':<16} {'次数':>4} {'最近时间':<20} {'路径':<1}{RESET}\n"
+                )
+                out.write(header)
+                out.write(f"      {DIM}{'-'*76}{RESET}\n")
+                for idx, item in enumerate(pstats.get('top', [])[:10], 1):
+                    parent_path = item.get("parent_process") or ""
+                    child_name = item.get("child_process") or ""
+                    count = item.get("count", 0)
+                    ts = _fmt_time(item.get("time") or "") or "-"
+                    path = item.get("path") or "-"
+                    parent_name = _basename(parent_path) or "(unknown)"
+                    parent_col = _truncate_text(parent_name, 18)
+                    child_col = _truncate_text(child_name or "(unknown)", 16)
+                    ts_col = _truncate_text(ts, 20)
+                    path_col = _truncate_text(path, 24)
+                    out.write(f"      {idx:>2}. {parent_col:<18} {child_col:<16} {count:>4} {ts_col:<20} {path_col}\n")
+                if pstats.get("suspicious_count", 0) == 0:
+                    out.write(f"      {DIM}研判: 进程创建已采集，但未发现明显恶意进程命令行。{RESET}\n")
+                proc_recent = sorted(
+                    [event for event in r.events if event.event_id == "4688"],
+                    key=lambda event: (
+                        1 if any(tag in event.tags for tag in ("malware-indicator", "lolbin", "lsass-dump")) else 0,
+                        event.level.score,
+                        event.timestamp or "",
+                        event.id,
+                    ),
+                    reverse=True,
+                )[:6]
+                if proc_recent:
+                    out.write(f"      {BOLD}具体事件{RESET}  {DIM}(可疑优先，最近 6 条){RESET}\n")
+                    for event in proc_recent:
+                        for line in _render_process_creation_event_detail(event, full_evidence):
+                            out.write(f"{line}\n")
+                out.write("\n")
+
+            out.write("\n")
+
+    # ── ATT&CK 攻击链 ─────────────────────────────────────
+    if summary.attack_chain:
+        out.write(_section("⛓  ATT&CK 攻击链分析"))
+        for line in _render_stage_topology(summary):
+            out.write(f"{line}\n")
+
+    # ── 应急案件视图 ──────────────────────────────────────
+    if summary.incidents:
+        out.write(_section("🧩 应急案件视图"))
+        for i, incident in enumerate(summary.incidents[:10], 1):
+            color = _level_color(incident.level)
+            out.write(f"\n  {BOLD}[INC-{i:02d}] {_level_badge(incident.level)} {color}{_safe_text(incident.title)}{RESET}\n")
+            out.write(f"       {_safe_text(incident.description)}\n")
+            source_types = ", ".join(_safe_text(item) for item in incident.source_types[:6]) or "?"
+            out.write(f"       {DIM}置信度: {_safe_text(incident.confidence)}  |  日志源: {source_types}  |  事件: {len(incident.affected_events)}{RESET}\n")
+            if incident.evidence:
+                out.write(f"       {GRAY}关键证据:{RESET}\n")
+                for item in incident.evidence[:4]:
+                    out.write(f"         • {_evidence_text(item, full_evidence)}\n")
+            topology_lines = _render_incident_topology(incident, event_by_id, full_evidence)
+            if topology_lines:
+                for line in topology_lines:
+                    out.write(f"{line}\n")
+            edr_tree_lines = _render_edr_process_chains(incident, event_by_id, full_evidence)
+            if edr_tree_lines:
+                for line in edr_tree_lines:
+                    out.write(f"{line}\n")
+            if incident.next_logs:
+                out.write(f"       {CYAN}建议补采: {', '.join(_safe_text(item) for item in incident.next_logs[:5])}{RESET}\n")
+            if incident.recommended_actions:
+                out.write(f"       {YELLOW}处置动作: {_safe_text(incident.recommended_actions[0])}{RESET}\n")
+            out.write(f"  {_hr('─', 76)}\n")
+
+    # ── 告警详情 ──────────────────────────────────────────
+    out.write(_section("🚨 威胁告警"))
+    if not summary.alerts:
+        out.write(f"  {GREEN}未发现明显威胁告警{RESET}\n")
+    else:
+        shown_alerts = summary.alerts if max_alerts <= 0 else summary.alerts[:max_alerts]
+        if max_alerts > 0 and len(summary.alerts) > max_alerts:
+            out.write(f"  {DIM}终端仅展示前 {max_alerts} 个告警；完整结果请查看 --html / --json 报告，或使用 --max-alerts 0。{RESET}\n")
+        for i, alert in enumerate(shown_alerts, 1):
+            color = _level_color(alert.level)
+            badge = _level_badge(alert.level)
+            out.write(f"\n  {BOLD}[{i:02d}] {badge} {color}{_safe_text(alert.rule_name)}{RESET}\n")
+            out.write(f"       {_safe_text(alert.description)}\n")
+            out.write(f"       {DIM}MITRE: {_safe_text(alert.mitre_attack)}  |  阶段: {_safe_text(alert.mitre_phase)}  |  "
+                      f"置信度: {_safe_text(alert.confidence)}  |  时间: {_safe_text(_fmt_time(alert.timestamp))}{RESET}\n")
+            out.write(f"       {GRAY}证据:{RESET}\n")
+            evidence_items = alert.evidence if full_evidence else alert.evidence[:3]
+            for ev in evidence_items:
+                out.write(f"         • {_evidence_text(ev, full_evidence)}\n")
+            if not full_evidence and len(alert.evidence) > 3:
+                out.write(f"         {DIM}… 还有 {len(alert.evidence) - 3} 条证据；使用 --full / --no-truncate 查看完整证据。{RESET}\n")
+            if full_evidence and alert.level.score >= ThreatLevel.HIGH.score:
+                out.write(f"       {GRAY}完整事件证据:{RESET}\n")
+                for event_id in alert.affected_events:
+                    event = event_by_id.get(event_id)
+                    if not event:
+                        continue
+                    method = event.details.get("method", "")
+                    path = event.details.get("decoded_path") or event.details.get("path", "")
+                    status = event.details.get("status", "")
+                    ua = event.details.get("user_agent", "")
+                    referer = event.details.get("referer", "")
+                    scanner_tool = event.details.get("scanner_tool", "")
+                    if scanner_tool:
+                        out.write(f"         - 扫描工具: {_safe_text(scanner_tool)}\n")
+                    if method or path or status:
+                        out.write(f"         - 请求: {_safe_text(method)} {_evidence_text(path, full_evidence)} -> {_safe_text(status)}\n")
+                    if ua:
+                        out.write(f"           User-Agent: {_evidence_text(ua, full_evidence)}\n")
+                    if referer:
+                        out.write(f"           Referer: {_evidence_text(referer, full_evidence)}\n")
+                    if event.raw_line:
+                        out.write(f"           原始日志: {_evidence_text(event.raw_line, full_evidence)}\n")
+            out.write(f"       {YELLOW}建议: {_safe_text(alert.recommendation)}{RESET}\n")
+            out.write(f"  {_hr('─', 76)}\n")
+
+    # ── 时间线（按发生时间排序的 Top 20 事件）─────────────
+    if summary.timeline:
+        out.write(_section("📅 关键事件时间线 Top 20（按时间）"))
+        for entry in summary.timeline[:20]:
+            event = event_by_id.get(entry.event_id)
+            if event and event.details.get("source_type") == "edr":
+                for line in _render_edr_timeline_entry(entry, event, full_evidence):
+                    out.write(f"{line}\n")
+                continue
+            color = _level_color(entry.level)
+            badge = _level_badge(entry.level)
+            mitre = f" {DIM}[{_safe_text(entry.mitre_attack)}]{RESET}" if entry.mitre_attack else ""
+            message = _evidence_text(entry.message, full_evidence, 180)
+            out.write(f"  {DIM}{_safe_text(_fmt_time(entry.timestamp))}{RESET}  {badge}  {color}{message}{RESET}{mitre}\n")
+
+    # ── 应急处置建议 ──────────────────────────────────────
+    out.write(_section("💡 应急处置建议"))
+    for i, rec in enumerate(summary.recommendations, 1):
+        out.write(f"  {BOLD}{i}.{RESET} {_safe_text(rec)}\n")
+
+    # ── Top IP ────────────────────────────────────────────
+    all_ips: dict = {}
+    local_ips: dict = {}
+    for r in parse_results:
+        for ip_info in r.stats.top_ips:
+            ip = ip_info["ip"]
+            all_ips[ip] = all_ips.get(ip, 0) + ip_info["count"]
+        for ip_info in r.stats.top_local_ips:
+            ip = ip_info["ip"]
+            local_ips[ip] = local_ips.get(ip, 0) + ip_info["count"]
+    if all_ips or local_ips:
+        out.write(_section("🌐 Top 攻击源 IP"))
+        if all_ips:
+            out.write(f"  {BOLD}有效远程源 IP:{RESET}\n")
+            sorted_ips = sorted(all_ips.items(), key=lambda x: x[1], reverse=True)[:10]
+            for ip, count in sorted_ips:
+                bar = "█" * min(count // 5, 30)
+                out.write(f"  {WHITE}{_safe_text(ip):<20}{RESET}  {RED}{bar}{RESET} {count}\n")
+        else:
+            out.write(f"  {DIM}有效远程源 IP: 暂无{RESET}\n")
+        if local_ips:
+            out.write(f"  {DIM}本机/空来源:{RESET}\n")
+            for ip, count in sorted(local_ips.items(), key=lambda x: x[1], reverse=True)[:5]:
+                out.write(f"  {DIM}{_safe_text(ip):<20} {count}{RESET}\n")
+
+    # ── 详细事件（verbose 模式）──────────────────────────
+    if verbose:
+        out.write(_section("📋 详细事件列表（高危以上）"))
+        all_events: List[LogEvent] = []
+        for r in parse_results:
+            all_events.extend(e for e in r.events if e.level.score >= ThreatLevel.HIGH.score)
+        all_events.sort(key=lambda e: e.timestamp)
+        for ev in all_events[:100]:
+            color = _level_color(ev.level)
+            out.write(f"  {DIM}{_safe_text(ev.timestamp)}{RESET}  {_level_badge(ev.level)}  "
+                      f"{color}{_safe_text(ev.message)}{RESET}\n")
+            if ev.details:
+                for k, v in list(ev.details.items())[:3]:
+                    out.write(f"    {DIM}{_safe_text(k)}: {_safe_text(v)}{RESET}\n")
+
+    out.write(f"\n{BOLD}{BLUE}{'═'*80}{RESET}\n")
+    out.write(f"{BOLD}  分析完成。如需详细报告请使用 --html / --json / --csv 参数。{RESET}\n")
+    out.write(f"{BOLD}{BLUE}{'═'*80}{RESET}\n\n")
+    out.flush()
+
+
+def _disable_color():
+    """禁用颜色（重定向输出时使用）"""
+    global RESET, BOLD, DIM, RED, ORANGE, YELLOW, GREEN, BLUE, CYAN, WHITE, GRAY
+    global BG_RED, BG_ORANGE, BG_YELLOW, BG_GREEN, BG_BLUE
+    RESET = BOLD = DIM = RED = ORANGE = YELLOW = GREEN = BLUE = CYAN = WHITE = GRAY = ""
+    BG_RED = BG_ORANGE = BG_YELLOW = BG_GREEN = BG_BLUE = ""

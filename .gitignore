@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Output files (don't commit reports)
+*.html
+*.json
+!docs/allowlist-example.json
+!tests/fixtures/**/*.json
+*.csv
+!tests/fixtures/**/*.csv
+*.sarif
+iocs.txt
+report/
+case-*/
+!sample_logs/
+.coverage
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+
+# Local filing bundles
+soft-copyright-materials/
+
+# Logs
+*.log
+!sample_logs/*.log
+!tests/fixtures/**/*.log

@@ -1,0 +1,18 @@
+{
+  "profile": "cn-hvv",
+  "total_events": 6,
+  "alert_rule_ids": [
+    "CN-HVV-001",
+    "P0-C2-001",
+    "P0-EDR-001",
+    "P0-EXFIL-001",
+    "WEB-LOG4SHELL-001"
+  ],
+  "incident_count": 1,
+  "top_incident": {
+    "level": "critical",
+    "confidence": "high",
+    "source_types": ["application", "dns", "edr", "firewall", "proxy", "waf"],
+    "attack_phases": ["初始访问", "主机失陷", "命令控制", "数据外传"]
+  }
+}

@@ -1,0 +1,5 @@
+# 真实日志验证清单示例（每行一个 JSON 对象，路径相对本清单所在目录）。
+# 用法: python3 scripts/eval_detection.py --manifest tests/fixtures/detection_quality/manifest.example.jsonl
+# 字段: name, file, expect_alert(bool); 可选 parser(默认按文件自动识别)、category。
+{"name": "real-access-with-attacks", "file": "real/sample_access_attack.log", "expect_alert": true, "category": "web-attack"}
+{"name": "real-access-benign", "file": "real/sample_access_benign.log", "expect_alert": false, "category": "benign"}
